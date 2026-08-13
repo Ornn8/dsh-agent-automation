@@ -18,9 +18,7 @@ The runner process receives `DSH_AGENT_CONFIG`, pointing to a machine-local JSON
 ```json
 {
   "repositories": ["owner/repository"],
-  "dshNode": "X:\\path\\to\\node.exe",
-  "dshScript": "X:\\path\\to\\@deepseek-ai\\dsh\\lib\\bin.js",
-  "dshHome": "X:\\path\\to\\dsh-data",
+  "dshWebBaseUrl": "http://127.0.0.1:3080",
   "codexNode": "X:\\path\\to\\node.exe",
   "codexScript": "X:\\path\\to\\@openai\\codex\\bin\\codex.js",
   "codexHome": "X:\\path\\to\\codex-data",
@@ -30,7 +28,7 @@ The runner process receives `DSH_AGENT_CONFIG`, pointing to a machine-local JSON
 }
 ```
 
-The file contains paths and an allowlist, not credentials. DSH resolves its OpenCode Go API key from `dshHome`; GitHub CLI and Codex use their existing host logins.
+The file contains paths and an allowlist, not credentials. The local DSH Web Host resolves its already-configured OpenCode Go API key; GitHub CLI and Codex use their existing host logins. The Web Host must be running, but an idle Host and self-hosted runner make no model calls. Each GitHub job creates a Chinese-titled, UI-owned DSH session, switches that session to `danger-full-access`, and waits on local session state without scheduled model polling. This keeps the live tool timeline observable in the DSH WebUI and avoids a second headless process competing for the same session files.
 
 ## Security and failure behavior
 

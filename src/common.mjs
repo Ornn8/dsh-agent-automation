@@ -79,7 +79,7 @@ export async function loadConfig() {
   const path = resolve(requiredEnv('DSH_AGENT_CONFIG'))
   const config = parseJson(await readFile(path, 'utf8'), 'runner configuration')
   const required = [
-    'repositories', 'dshNode', 'dshScript', 'dshHome', 'codexNode', 'codexScript',
+    'repositories', 'dshWebBaseUrl', 'codexNode', 'codexScript',
     'codexHome', 'codexProjectCwd', 'ghExecutable', 'gitExecutable',
   ]
   for (const name of required) {

@@ -10,6 +10,7 @@ import {
   trustedAssociation,
 } from './common.mjs'
 import { explicitReworkCommand } from './dispatch-policy.mjs'
+import { runDshWebSession } from './dsh-web-session.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -139,16 +140,11 @@ You own the technical response:
 
 Do not delegate implementation to Codex or wait for another local process. Finish only after pushing a new head, requesting the one same-head rereview, or posting the BLOCKED handoff.`
 
-  await run(config.dshNode, [config.dshScript, '--profile', 'headless', prompt], {
+  await runDshWebSession({
+    baseUrl: config.dshWebBaseUrl,
     cwd: checkoutPath,
-    env: hostCredentialEnvironment({
-      DSH_HOME: config.dshHome,
-      DSH_PERMISSION_MODE: 'danger-full-access',
-      DSH_TELEMETRY_DISABLED: '1',
-      NO_COLOR: '1',
-    }),
-    tee: true,
-    timeoutMs: 3 * 60 * 60 * 1000,
+    title: `[DSH] 修复 PR #${pullRequestNumber}`,
+    prompt: `${prompt}\n\nFinish this local DSH session with a concise Chinese report. Keep all GitHub-visible content in English.`,
   })
 
   const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')

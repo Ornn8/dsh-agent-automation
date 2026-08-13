@@ -33,7 +33,7 @@ if (pullRequest.state !== 'open' || pullRequest.draft) throw new Error('Pull req
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach DSH')
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'dsh-repair.mjs')
-await run(config.dshNode, [script], {
+await run(process.execPath, [script], {
   env: hostCredentialEnvironment({
     TARGET_REPOSITORY: repository,
     PR_NUMBER: String(pullRequestNumber),

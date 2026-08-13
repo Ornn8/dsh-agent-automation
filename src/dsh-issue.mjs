@@ -10,6 +10,7 @@ import {
   run,
   trustedAssociation,
 } from './common.mjs'
+import { runDshWebSession } from './dsh-web-session.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
@@ -126,17 +127,11 @@ You own the implementation end to end:
 
 Do not wait for another local process or WebUI session. Finish only after the pull request exists at the declared branch and exact pushed head, or after posting the BLOCKED handoff.`
 
-  const dshEnvironment = hostCredentialEnvironment({
-    DSH_HOME: config.dshHome,
-    DSH_PERMISSION_MODE: 'danger-full-access',
-    DSH_TELEMETRY_DISABLED: '1',
-    NO_COLOR: '1',
-  })
-  await run(config.dshNode, [config.dshScript, '--profile', 'headless', prompt], {
+  await runDshWebSession({
+    baseUrl: config.dshWebBaseUrl,
     cwd: checkoutPath,
-    env: dshEnvironment,
-    tee: true,
-    timeoutMs: 3 * 60 * 60 * 1000,
+    title: `[DSH] 执行 Issue #${issueNumber}`,
+    prompt: `${prompt}\n\nFinish this local DSH session with a concise Chinese report. Keep all GitHub-visible content in English.`,
   })
 
   const pullRequests = await ghJson([

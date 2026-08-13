@@ -10,6 +10,82 @@ import {
   selectBacklogWork,
 } from '../src/dispatch-policy.mjs'
 import { githubReviewBody, parseReviewMessage } from '../src/review-protocol.mjs'
+import { localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
+
+function rpcResponse(request, value, ok = true) {
+  return {
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        type: 'server-response',
+        rpcId: request.rpcId,
+        result: ok ? { ok: true, value } : { ok: false, error: value },
+      }
+    },
+  }
+}
+
+function visibleSessionFetch(reason = 'completed') {
+  const calls = []
+  let lists = 0
+  const fetchImpl = async (_url, options) => {
+    const request = JSON.parse(options.body)
+    calls.push(request)
+    switch (request.method) {
+      case 'session.create': return rpcResponse(request, { sessionId: 'session-visible' })
+      case 'session.rename': return rpcResponse(request, { title: request.payload.title, seq: 1 })
+      case 'session.prompt': return rpcResponse(request, request.payload.content[0].text.startsWith('/permission')
+        ? { accepted: true, command: { kind: 'success', text: 'preset danger-full-access' } }
+        : { accepted: true })
+      case 'session.list': {
+        lists += 1
+        return rpcResponse(request, { items: [{ sessionId: 'session-visible', running: lists === 1 }] })
+      }
+      case 'session.history': return rpcResponse(request, {
+        events: [{ event: { type: 'turn/end', data: { reason: { kind: reason } } } }],
+      })
+      default: throw new Error(`Unexpected method ${request.method}`)
+    }
+  }
+  return { calls, fetchImpl }
+}
+
+test('DSH Web sessions stay on the loopback Host', () => {
+  assert.equal(localDshWebBaseUrl('http://localhost:3080'), 'http://localhost:3080')
+  assert.throws(() => localDshWebBaseUrl('https://example.com'), /loopback/)
+})
+
+test('DSH Web session is titled, privileged, prompted, and observed to completion', async () => {
+  const fake = visibleSessionFetch()
+  const result = await runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080',
+    cwd: 'F:\\runner\\checkout',
+    title: '[DSH] 修复 PR #12',
+    prompt: 'Do the work.',
+    fetchImpl: fake.fetchImpl,
+    sleep: async () => undefined,
+  })
+  assert.deepEqual(result, { sessionId: 'session-visible', reason: 'completed' })
+  assert.deepEqual(fake.calls.map(call => call.method), [
+    'session.create', 'session.rename', 'session.prompt', 'session.prompt',
+    'session.list', 'session.list', 'session.history',
+  ])
+  assert.equal(fake.calls[2].payload.content[0].text, '/permission danger-full-access')
+  assert.equal(fake.calls[3].payload.content[0].text, 'Do the work.')
+})
+
+test('DSH Web session interruption fails the controller', async () => {
+  const fake = visibleSessionFetch('interrupted')
+  await assert.rejects(runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080',
+    cwd: 'F:\\runner\\checkout',
+    title: '[DSH] 修复 PR #12',
+    prompt: 'Do the work.',
+    fetchImpl: fake.fetchImpl,
+    sleep: async () => undefined,
+  }), /ended with interrupted/)
+})
 
 test('issueBranch accepts the documented branch field', () => {
   assert.equal(issueBranch('## Completion\nBranch: `gui/02-shell`\n'), 'gui/02-shell')
