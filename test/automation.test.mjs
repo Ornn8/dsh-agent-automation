@@ -35,9 +35,7 @@ function visibleSessionFetch(reason = 'completed') {
     switch (request.method) {
       case 'session.create': return rpcResponse(request, { sessionId: 'session-visible' })
       case 'session.rename': return rpcResponse(request, { title: request.payload.title, seq: 1 })
-      case 'session.prompt': return rpcResponse(request, request.payload.content[0].text.startsWith('/permission')
-        ? { accepted: true, command: { kind: 'success', text: 'preset danger-full-access' } }
-        : { accepted: true })
+      case 'session.prompt': return rpcResponse(request, { accepted: true })
       case 'session.list': {
         lists += 1
         return rpcResponse(request, { items: [{ sessionId: 'session-visible', running: lists === 1 }] })

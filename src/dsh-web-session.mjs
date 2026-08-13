@@ -58,7 +58,7 @@ export async function runDshWebSession({
     mode: 'queue',
     content: [{ type: 'text', text: '/permission danger-full-access' }],
   }, fetchImpl)
-  if (permission?.command?.kind !== 'success') {
+  if (permission?.accepted !== true) {
     throw new Error('DSH Web Host did not accept the danger-full-access permission command')
   }
   await dshRpc(endpoint, 'session.prompt', {
