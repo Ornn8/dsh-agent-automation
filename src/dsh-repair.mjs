@@ -7,7 +7,9 @@ import {
   removeJobDirectory,
   requiredEnv,
   run,
+  trustedAssociation,
 } from './common.mjs'
+import { explicitReworkCommand } from './dispatch-policy.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -64,6 +66,18 @@ if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNu
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach the DSH repair agent')
 if (pullRequest.head.sha !== expectedHead) throw new Error('The pull request head changed before DSH repair started')
+if (explicitCommentRequest) {
+  const commentId = Number.parseInt(requestId.slice('comment-'.length), 10)
+  if (!Number.isSafeInteger(commentId) || commentId < 1) throw new Error('Invalid comment repair request id')
+  const comment = await ghJson(['api', `repos/${repository}/issues/comments/${commentId}`], 'rework comment')
+  if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
+    throw new Error('Rework comment does not belong to this pull request')
+  }
+  if (!trustedAssociation(comment.author_association)) {
+    throw new Error(`Untrusted rework comment association ${comment.author_association}`)
+  }
+  if (!explicitReworkCommand(comment.body)) throw new Error('Comment is not an explicit DSH rework command')
+}
 if (!explicitCommentRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
   throw new Error('The pull request no longer has the automation/review-blocked label')
 }
