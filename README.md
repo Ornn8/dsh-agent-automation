@@ -3,7 +3,7 @@
 This repository connects native GitHub events to two independent local agents without polling:
 
 1. Adding the exact `agent/dsh` label to a trusted Issue starts a fresh DeepSeek Harness headless session. DSH reads its existing provider and credential configuration, then owns the claim, implementation, tests, commit, push, and pull request.
-2. Opening or updating a same-repository pull request starts a persisted Codex task with `gpt-5.6-sol` at medium reasoning. Codex reviews a fixed base/head pair without executing pull request code. A blocking verdict returns English findings to GitHub; a passing verdict enables squash auto-merge at the reviewed head.
+2. Opening or updating a same-repository pull request starts a persisted Codex task with `gpt-5.6-sol` at medium reasoning. Codex reviews a fixed base/head pair without executing pull request code. A blocking verdict returns English findings to GitHub and wakes a fresh DSH repair session; a passing verdict enables squash auto-merge at the reviewed head.
 
 The self-hosted GitHub runner is an idle event listener. It makes no model calls until GitHub assigns a matching job. GitHub Actions logs are the operational source of truth. DSH sessions remain in the configured DSH data directory, and automated Codex review tasks are named `[GitHub Review] ...`; only the six newest remain unarchived.
 
@@ -39,7 +39,7 @@ The file contains paths and an allowlist, not credentials. DSH resolves its Open
 - Codex receives no GitHub token and runs with a read-only tool sandbox. CI executes separately.
 - A review is bound to exact base and head SHAs. Any head movement discards the verdict.
 - Missing or malformed agent output fails closed. Controllers never convert infrastructure failure into PASS.
+- Each blocked head receives at most one automatic DSH response. A code fix advances the head and triggers a new review; a technical rebuttal may request one same-head rereview. A repeated block at the same head stops for human inspection instead of looping.
 - DSH-created GitHub operations use the host GitHub login rather than `GITHUB_TOKEN`, so the resulting pull request emits normal GitHub workflow events.
 
 Run the controller tests with `npm test`.
-

@@ -58,6 +58,10 @@ async function setReviewStatus(state, description) {
 }
 
 await setReviewStatus('pending', 'Codex is reviewing this exact pull request head')
+await run(config.ghExecutable, [
+  'pr', 'edit', String(pullRequestNumber), '--repo', repository,
+  '--remove-label', 'automation/review-ready',
+], { env: hostCredentialEnvironment() }).catch(() => undefined)
 
 const pullRequest = await ghJson([
   'pr', 'view', String(pullRequestNumber), '--repo', repository,
@@ -166,7 +170,7 @@ if (review.verdict === 'block') {
 
 await run(config.ghExecutable, [
   'pr', 'edit', String(pullRequestNumber), '--repo', repository,
-  '--remove-label', 'automation/review-blocked',
+  '--remove-label', 'automation/review-blocked', '--remove-label', 'automation/review-ready',
 ], { env: hostCredentialEnvironment() }).catch(() => undefined)
 await setReviewStatus('success', 'Codex found no blocking defects at this head')
 await run(config.ghExecutable, [

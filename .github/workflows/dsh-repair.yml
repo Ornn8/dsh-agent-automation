@@ -1,0 +1,41 @@
+name: DSH Review Repair
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      pull_request_number:
+        required: true
+        type: number
+      head_sha:
+        required: true
+        type: string
+
+concurrency:
+  group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    name: dsh/review-repair
+    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    timeout-minutes: 210
+    steps:
+      - name: Check out automation controller
+        uses: actions/checkout@v6
+        with:
+          repository: Ornn8/dsh-agent-automation
+          ref: master
+          path: controller
+          persist-credentials: false
+
+      - name: Address Codex review with DSH
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node controller/src/dsh-repair.mjs
+
