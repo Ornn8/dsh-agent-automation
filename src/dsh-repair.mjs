@@ -106,9 +106,10 @@ GitHub is the only coordination channel. Read the live pull request, its English
 You own the technical response:
 1. Comment \`CLAIMED: addressing Codex review at ${expectedHead}\` on pull request #${pullRequestNumber}.
 2. Evaluate every blocking finding independently. Do not accept a claim merely because Codex made it.
-3. For valid findings, implement the complete fix on branch \`${branch}\`, update required tests and documentation, run the checks appropriate to the new diff, commit, and push. The push must advance the pull request head and will trigger a fresh Codex review.
-4. If every blocking finding is technically invalid, post one concrete English rebuttal on the pull request and add the exact label \`automation/review-ready\` without changing the branch. That label requests one same-head rereview.
-5. If you cannot complete either path, post one English \`BLOCKED:\` comment with evidence and do not claim success.
+3. Before writing or pushing, re-read the live pull request head. If it is no longer ${expectedHead}, do not modify or push the stale checkout; stop so the newer head can proceed through review.
+4. For valid findings on the unchanged head, implement the complete fix on branch \`${branch}\`, update required tests and documentation, run the checks appropriate to the new diff, commit, and push. The push must advance the pull request head and will trigger a fresh Codex review.
+5. If every blocking finding is technically invalid, post one concrete English rebuttal on the pull request and add the exact label \`automation/review-ready\` without changing the branch. That label requests one same-head rereview.
+6. If you cannot complete either path, post one English \`BLOCKED:\` comment with evidence and do not claim success.
 
 Do not delegate implementation to Codex or wait for another local process. Finish only after pushing a new head, requesting the one same-head rereview, or posting the BLOCKED handoff.`
 
@@ -126,8 +127,8 @@ Do not delegate implementation to Codex or wait for another local process. Finis
 
   const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
   if (current.head.sha !== expectedHead) {
-    await upsertStatus('complete', branch, `DSH pushed new head ${current.head.sha}; GitHub will start a fresh Codex review.`)
-    process.stdout.write(`DSH advanced pull request #${pullRequestNumber} to ${current.head.sha}.\n`)
+    await upsertStatus('complete', branch, `The pull request advanced to ${current.head.sha} while this session was active; GitHub will review the newer head.`)
+    process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
   } else if (current.labels.some(label => label.name === 'automation/review-ready')) {
     await upsertStatus('complete', branch, 'DSH posted a technical rebuttal and requested one same-head Codex rereview.')
     process.stdout.write(`DSH requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
