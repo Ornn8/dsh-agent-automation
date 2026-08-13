@@ -1,0 +1,58 @@
+name: Codex Review
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      pull_request_number:
+        required: true
+        type: number
+      base_sha:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+
+concurrency:
+  group: codex-review-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: codex/review
+    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    timeout-minutes: 75
+    steps:
+      - name: Check out automation controller
+        uses: actions/checkout@v6
+        with:
+          repository: Ornn8/dsh-agent-automation
+          ref: main
+          path: controller
+          persist-credentials: false
+
+      - name: Check out exact review head
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.head_sha }}
+          path: review
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch exact review base
+        working-directory: review
+        run: git fetch --no-tags origin ${{ inputs.base_sha }}
+
+      - name: Review exact PR head with Codex
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          REVIEW_CHECKOUT: ${{ github.workspace }}\review
+        run: node controller/src/codex-review.mjs
+
