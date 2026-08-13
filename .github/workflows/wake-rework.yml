@@ -17,7 +17,7 @@ on:
         type: string
 
 concurrency:
-  group: dsh-rework-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+  group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: false
 
 jobs:
