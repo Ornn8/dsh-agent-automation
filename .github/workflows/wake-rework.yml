@@ -1,4 +1,4 @@
-name: DSH Review Repair
+name: Wake DSH For Rework
 
 on:
   workflow_call:
@@ -9,24 +9,20 @@ on:
       pull_request_number:
         required: true
         type: number
-      head_sha:
+      comment_id:
         required: true
-        type: string
-      request_id:
-        required: false
-        type: string
-        default: ''
+        type: number
       controller_sha:
         required: true
         type: string
 
 concurrency:
-  group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+  group: dsh-rework-${{ inputs.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: false
 
 jobs:
   repair:
-    name: dsh/review-repair
+    name: dsh/comment-rework
     runs-on: [self-hosted, Windows, X64, dsh-agent]
     timeout-minutes: 210
     steps:
@@ -38,11 +34,10 @@ jobs:
           path: controller
           persist-credentials: false
 
-      - name: Address Codex review with DSH
+      - name: Address explicit trusted rework comment
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          REPAIR_REQUEST_ID: ${{ inputs.request_id }}
+          COMMENT_ID: ${{ inputs.comment_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node controller/src/dsh-repair.mjs
+        run: node controller/src/wake-rework.mjs

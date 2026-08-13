@@ -66,7 +66,9 @@ if (!issue.labels?.some(label => label.name === 'agent/dsh')) {
   throw new Error(`Issue #${issueNumber} no longer has the exact agent/dsh label`)
 }
 
-const branch = issueBranch(issue.body || '')
+const branch = issueBranch(issue.body || '', /^\[BUG\]\s+/i.test(issue.title || '')
+  ? { number: issueNumber }
+  : undefined)
 const existing = await ghJson([
   'pr', 'list', '--repo', repository, '--state', 'open', '--head', branch,
   '--json', 'number,body,headRefName,baseRefName,url',
@@ -160,8 +162,11 @@ Do not wait for another local process or WebUI session. Finish only after the pu
 } catch (error) {
   await upsertStatus(statusBody('failed', branch, `The run failed: ${String(error.message).slice(0, 1000)}`))
     .catch(() => undefined)
+  await run(config.ghExecutable, [
+    'issue', 'edit', String(issueNumber), '--repo', repository,
+    '--remove-label', 'agent/dsh', '--add-label', 'agent/dsh-failed',
+  ], { env: hostCredentialEnvironment() }).catch(() => undefined)
   throw error
 } finally {
   await removeJobDirectory(runnerTemp, jobPath)
 }
-

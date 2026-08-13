@@ -103,8 +103,11 @@ export function hostCredentialEnvironment(overrides = {}) {
 }
 
 /** Parse and validate the branch declared by an automation Issue. */
-export function issueBranch(body) {
+export function issueBranch(body, fallback) {
   const branch = body.match(/^\s*(?:[-*]\s*)?(?:branch|branch name)\s*:\s*`([^`]+)`\s*$/im)?.[1]?.trim()
+  if (!branch && Number.isSafeInteger(fallback?.number) && fallback.number > 0) {
+    return `agent/issue-${fallback.number}`
+  }
   if (!branch) throw new Error('The Issue must declare `Branch: `name`` on its own line')
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(branch)
     || branch.includes('..')
@@ -131,4 +134,3 @@ export async function removeJobDirectory(root, target) {
   }
   await rm(targetPath, { recursive: true, force: true })
 }
-

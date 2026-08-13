@@ -1,0 +1,34 @@
+name: Dispatch DSH Backlog
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      controller_sha:
+        required: true
+        type: string
+
+concurrency:
+  group: dsh-backlog-${{ inputs.repository }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: dsh/backlog-dispatch
+    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    timeout-minutes: 10
+    steps:
+      - name: Check out automation controller
+        uses: actions/checkout@v6
+        with:
+          repository: Ornn8/dsh-agent-automation
+          ref: ${{ inputs.controller_sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Dispatch one ready work item
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+        run: node controller/src/dispatch-backlog.mjs

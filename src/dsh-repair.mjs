@@ -12,9 +12,14 @@ import {
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
 const expectedHead = requiredEnv('HEAD_SHA')
+const requestId = process.env.REPAIR_REQUEST_ID?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const marker = `<!-- dsh-review-repair:${expectedHead} -->`
+if (requestId && !/^[A-Za-z0-9._-]{1,100}$/.test(requestId)) throw new Error('Invalid REPAIR_REQUEST_ID')
+const marker = requestId
+  ? `<!-- dsh-review-repair:${expectedHead}:${requestId} -->`
+  : `<!-- dsh-review-repair:${expectedHead} -->`
+const explicitCommentRequest = requestId.startsWith('comment-')
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
@@ -59,7 +64,7 @@ if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNu
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach the DSH repair agent')
 if (pullRequest.head.sha !== expectedHead) throw new Error('The pull request head changed before DSH repair started')
-if (!pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
+if (!explicitCommentRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
   throw new Error('The pull request no longer has the automation/review-blocked label')
 }
 
@@ -75,11 +80,15 @@ if (priorRun) {
 
 const branch = pullRequest.head.ref
 const baseBranch = pullRequest.base.ref
-await upsertStatus('running', branch, 'The blocking Codex verdict started a fresh DSH repair session.')
-await run(config.ghExecutable, [
-  'pr', 'edit', String(pullRequestNumber), '--repo', repository,
-  '--remove-label', 'automation/review-blocked',
-], { env: hostCredentialEnvironment() })
+await upsertStatus('running', branch, explicitCommentRequest
+  ? `Trusted rework comment ${requestId} started a fresh DSH repair session.`
+  : 'The blocking Codex verdict started a fresh DSH repair session.')
+if (!explicitCommentRequest) {
+  await run(config.ghExecutable, [
+    'pr', 'edit', String(pullRequestNumber), '--repo', repository,
+    '--remove-label', 'automation/review-blocked',
+  ], { env: hostCredentialEnvironment() })
+}
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-repair-${pullRequestNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
@@ -99,9 +108,12 @@ try {
   ])).stdout.trim()
   if (checkedOutHead !== expectedHead) throw new Error(`Repair checkout is ${checkedOutHead}, expected ${expectedHead}`)
 
-  const prompt = `Address the blocking Codex review on ${repository} pull request #${pullRequestNumber} at exact head ${expectedHead}.
+  const requestDescription = explicitCommentRequest
+    ? `the explicit trusted rework request ${requestId}`
+    : 'the blocking Codex review and every unresolved trusted blocking comment'
+  const prompt = `Address ${requestDescription} on ${repository} pull request #${pullRequestNumber} at exact head ${expectedHead}.
 
-GitHub is the only coordination channel. Read the live pull request, its English Codex review comment marked \`codex-review:${expectedHead}\`, its linked Issue, all repository instructions, and the exact \`${baseBranch}...${branch}\` diff before deciding what to do. Use English for every GitHub comment, commit, and pull request update.
+GitHub is the only coordination channel. Read the live pull request, all trusted review and conversation comments, its linked Issue, all repository instructions, and the exact \`${baseBranch}...${branch}\` diff before deciding what to do. When a \`codex-review:${expectedHead}\` marker exists, treat it as the automated verdict; an explicit \`comment-*\` request is a separate instruction on the same head. Use English for every GitHub comment, commit, and pull request update.
 
 You own the technical response:
 1. Comment \`CLAIMED: addressing Codex review at ${expectedHead}\` on pull request #${pullRequestNumber}.

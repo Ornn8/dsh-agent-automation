@@ -4,6 +4,11 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
 import { issueBranch, removeJobDirectory, trustedAssociation } from '../src/common.mjs'
+import {
+  explicitReworkCommand,
+  issueDependencies,
+  selectBacklogWork,
+} from '../src/dispatch-policy.mjs'
 import { githubReviewBody, parseReviewMessage } from '../src/review-protocol.mjs'
 
 test('issueBranch accepts the documented branch field', () => {
@@ -15,6 +20,89 @@ test('issueBranch rejects missing or unsafe branches', () => {
   assert.throws(() => issueBranch('No branch here'), /must declare/)
   assert.throws(() => issueBranch('Branch: `../master`'), /unsafe/)
   assert.throws(() => issueBranch('Branch: `topic@{1}`'), /unsafe/)
+})
+
+test('issueBranch gives trusted bug dispatch a deterministic fallback', () => {
+  assert.equal(issueBranch('No branch here', { number: 11 }), 'agent/issue-11')
+})
+
+test('issueDependencies reads blocking dependency prose only', () => {
+  assert.deepEqual(issueDependencies('Parent: #1\n\nBlocked by #2. Do not claim.'), [2])
+  assert.deepEqual(issueDependencies('Depends on #7. Continue after merge.'), [7])
+  assert.deepEqual(issueDependencies('Closes #9'), [])
+})
+
+test('backlog dispatch repairs blocked pull requests before starting Issues', () => {
+  const work = selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness',
+    pullRequests: [{
+      number: 10,
+      draft: false,
+      head: { sha: 'head10', repo: { full_name: 'Ornn8/deepseek-harness' } },
+      labels: [{ name: 'automation/review-blocked' }],
+    }],
+    issues: [{
+      number: 3,
+      state: 'open',
+      title: '[GUI-02] Shell',
+      body: 'Blocked by #2.\nBranch: `gui/02-shell`',
+      author_association: 'OWNER',
+      labels: [],
+    }],
+  })
+  assert.deepEqual(work, { type: 'repair', number: 10, head: 'head10' })
+})
+
+test('backlog dispatch waits for open dependencies and skips trackers', () => {
+  const issues = [
+    {
+      number: 1,
+      state: 'open',
+      title: '[GUI-00] Standalone GUI tracker',
+      body: 'Parent tracker only.',
+      author_association: 'OWNER',
+      labels: [],
+    },
+    {
+      number: 2,
+      state: 'open',
+      title: '[GUI-01] Architecture',
+      body: 'Branch: `gui/01-architecture`',
+      author_association: 'OWNER',
+      labels: [{ name: 'agent/dsh' }],
+    },
+    {
+      number: 3,
+      state: 'open',
+      title: '[GUI-02] Shell',
+      body: 'Blocked by #2.\nBranch: `gui/02-shell`',
+      author_association: 'OWNER',
+      labels: [],
+    },
+    {
+      number: 11,
+      state: 'open',
+      title: '[BUG] Static I/O error',
+      body: 'A focused bug report without a branch field.',
+      author_association: 'OWNER',
+      labels: [],
+    },
+  ]
+  assert.deepEqual(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
+  }), { type: 'issue', number: 11 })
+
+  issues[1].state = 'closed'
+  assert.deepEqual(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
+  }), { type: 'issue', number: 3 })
+})
+
+test('explicit rework commands are deliberate and case insensitive', () => {
+  assert.equal(explicitReworkCommand('@dsh fix the lifecycle finding'), true)
+  assert.equal(explicitReworkCommand('DSH: rework this PR'), true)
+  assert.equal(explicitReworkCommand('Looks good to me'), false)
+  assert.equal(explicitReworkCommand('<!-- dsh-review-result -->'), false)
 })
 
 test('trustedAssociation limits privileged dispatch', () => {
@@ -54,4 +142,3 @@ test('githubReviewBody stays English and binds the reviewed commits', () => {
   assert.match(body, /Codex review: PASS/)
   assert.match(body, /head456.*base123/)
 })
-
