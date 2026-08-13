@@ -5,7 +5,7 @@ This repository connects native GitHub events to two independent local agents wi
 1. Adding the exact `agent/dsh` label to a trusted Issue starts a fresh DeepSeek Harness headless session. DSH reads its existing provider and credential configuration, then owns the claim, implementation, tests, commit, push, and pull request.
 2. Opening or updating a same-repository pull request starts a persisted Codex task with `gpt-5.6-sol` at medium reasoning. Codex reviews a fixed base/head pair without executing pull request code. A blocking verdict returns English findings to GitHub and wakes a fresh DSH repair session; a passing verdict enables squash auto-merge at the reviewed head.
 
-The self-hosted GitHub runner is an idle event listener. It makes no model calls until GitHub assigns a matching job. GitHub Actions logs are the operational source of truth. DSH sessions remain in the configured DSH data directory, and automated Codex review tasks are named `[GitHub Review] ...`; only the six newest remain unarchived.
+The self-hosted GitHub runner is an idle event listener. It makes no model calls until GitHub assigns a matching job. GitHub Actions logs are the operational source of truth. DSH sessions remain in the configured DSH data directory. Codex reviews run as named ChatGPT Desktop tasks under the configured project directory, retain their live tool timeline, and show a concise Chinese final answer; only the six newest `[GitHub Review] ...` tasks remain unarchived.
 
 ## Target repository footprint
 

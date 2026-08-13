@@ -1,5 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import {
   hostCredentialEnvironment,
   loadConfig,
@@ -7,7 +6,7 @@ import {
   requiredEnv,
   run,
 } from './common.mjs'
-import { retainReviewSessions } from './codex-session.mjs'
+import { runReviewTask } from './codex-session.mjs'
 import { githubReviewBody, parseReviewMessage } from './review-protocol.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
@@ -15,10 +14,7 @@ const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
 const expectedBase = requiredEnv('BASE_SHA')
 const expectedHead = requiredEnv('HEAD_SHA')
 const reviewCheckout = resolve(requiredEnv('REVIEW_CHECKOUT'))
-const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const outputPath = join(runnerTemp, `codex-review-${pullRequestNumber}-${expectedHead}.md`)
-const eventsPath = join(runnerTemp, `codex-review-${pullRequestNumber}-${expectedHead}.jsonl`)
 const marker = `<!-- codex-review:${expectedHead} -->`
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
@@ -106,33 +102,17 @@ End the final answer with this exact hidden block, using valid compact JSON betw
 
 For PASS, findings must be an empty array. For BLOCK, include at least one finding.`
 
-const codex = await run(config.codexNode, [
-  config.codexScript,
-  'exec',
-  '--model', 'gpt-5.6-sol',
-  '--config', 'model_reasoning_effort="medium"',
-  '--sandbox', 'read-only',
-  '--json',
-  '--output-last-message', outputPath,
-  '--cd', config.codexProjectCwd,
-  '-',
-], {
-  input: prompt,
-  tee: true,
+const task = await runReviewTask({
+  node: config.codexNode,
+  codexScript: config.codexScript,
+  prompt,
+  title: `[GitHub Review] PR #${pullRequestNumber}: ${pullRequest.title}`,
+  projectCwd: config.codexProjectCwd,
+  environment: hostCredentialEnvironment({ CODEX_HOME: config.codexHome, NO_COLOR: '1' }),
+  keep: 6,
   timeoutMs: 60 * 60 * 1000,
-  env: hostCredentialEnvironment({ CODEX_HOME: config.codexHome, NO_COLOR: '1' }),
 })
-await writeFile(eventsPath, codex.stdout, 'utf8')
-
-let threadId
-for (const line of codex.stdout.split(/\r?\n/)) {
-  if (!line.trim()) continue
-  const event = parseJson(line, 'Codex JSONL event')
-  if (event.type === 'thread.started' && typeof event.thread_id === 'string') threadId = event.thread_id
-}
-if (!threadId) throw new Error('Codex did not report a persisted task ID')
-
-const review = parseReviewMessage(await readFile(outputPath, 'utf8'))
+const review = parseReviewMessage(task.finalMessage)
 const current = await ghJson([
   'pr', 'view', String(pullRequestNumber), '--repo', repository,
   '--json', 'state,baseRefOid,headRefOid',
@@ -140,15 +120,6 @@ const current = await ghJson([
 if (current.state !== 'OPEN' || current.baseRefOid !== expectedBase || current.headRefOid !== expectedHead) {
   throw new Error('Pull request changed while Codex was reviewing it; discard the stale verdict')
 }
-
-await retainReviewSessions({
-  node: config.codexNode,
-  codexScript: config.codexScript,
-  threadId,
-  title: `[GitHub Review] PR #${pullRequestNumber}: ${pullRequest.title}`,
-  projectCwd: config.codexProjectCwd,
-  keep: 6,
-}).catch(error => process.stderr.write(`Could not apply Codex task retention: ${error.message}\n`))
 
 await upsertReviewComment(githubReviewBody(review, {
   marker,
