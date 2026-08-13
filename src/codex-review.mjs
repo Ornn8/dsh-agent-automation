@@ -47,6 +47,18 @@ async function upsertReviewComment(body) {
   }
 }
 
+async function setReviewStatus(state, description) {
+  await run(config.ghExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/statuses/${expectedHead}`,
+    '-f', `state=${state}`,
+    '-f', 'context=codex/review',
+    '-f', `description=${description}`,
+    '-f', `target_url=${requiredEnv('RUN_URL')}`,
+  ], { env: hostCredentialEnvironment() })
+}
+
+await setReviewStatus('pending', 'Codex is reviewing this exact pull request head')
+
 const pullRequest = await ghJson([
   'pr', 'view', String(pullRequestNumber), '--repo', repository,
   '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,title,url',
@@ -148,6 +160,7 @@ if (review.verdict === 'block') {
     'pr', 'edit', String(pullRequestNumber), '--repo', repository,
     '--add-label', 'automation/review-blocked',
   ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+  await setReviewStatus('failure', `Codex found ${review.findings.length} blocking defect(s)`)
   throw new Error(`Codex blocked pull request #${pullRequestNumber} with ${review.findings.length} finding(s)`)
 }
 
@@ -155,9 +168,9 @@ await run(config.ghExecutable, [
   'pr', 'edit', String(pullRequestNumber), '--repo', repository,
   '--remove-label', 'automation/review-blocked',
 ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+await setReviewStatus('success', 'Codex found no blocking defects at this head')
 await run(config.ghExecutable, [
   'pr', 'merge', String(pullRequestNumber), '--repo', repository,
   '--auto', '--squash', '--delete-branch', '--match-head-commit', expectedHead,
 ], { env: hostCredentialEnvironment() })
 process.stdout.write(`Codex passed pull request #${pullRequestNumber}; auto-merge is enabled for ${expectedHead}.\n`)
-

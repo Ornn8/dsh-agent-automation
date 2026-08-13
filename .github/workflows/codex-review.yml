@@ -54,4 +54,13 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
           REVIEW_CHECKOUT: ${{ github.workspace }}\review
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node controller/src/codex-review.mjs
+
+      - name: Fail the exact-head review status when automation fails
+        if: failure()
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node controller/src/review-failure.mjs
