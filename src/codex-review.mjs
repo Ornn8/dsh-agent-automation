@@ -65,10 +65,10 @@ const pullRequest = await ghJson([
 ], 'pull request')
 if (pullRequest.state !== 'OPEN') throw new Error(`Pull request #${pullRequestNumber} is not open`)
 if (pullRequest.isDraft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
-if (pullRequest.baseRefName !== 'master') throw new Error(`Pull request #${pullRequestNumber} does not target master`)
 if (pullRequest.baseRefOid !== expectedBase || pullRequest.headRefOid !== expectedHead) {
   throw new Error(`Pull request refs changed before review: ${pullRequest.baseRefOid}..${pullRequest.headRefOid}`)
 }
+const expectedBaseRef = pullRequest.baseRefName
 
 const checkedOutHead = (await run(config.gitExecutable, [
   '-C', reviewCheckout, 'rev-parse', 'HEAD',
@@ -115,9 +115,12 @@ const task = await runReviewTask({
 const review = parseReviewMessage(task.finalMessage)
 const current = await ghJson([
   'pr', 'view', String(pullRequestNumber), '--repo', repository,
-  '--json', 'state,baseRefOid,headRefOid',
+  '--json', 'state,baseRefName,baseRefOid,headRefOid',
 ], 'pull request after review')
-if (current.state !== 'OPEN' || current.baseRefOid !== expectedBase || current.headRefOid !== expectedHead) {
+if (current.state !== 'OPEN'
+  || current.baseRefName !== expectedBaseRef
+  || current.baseRefOid !== expectedBase
+  || current.headRefOid !== expectedHead) {
   throw new Error('Pull request changed while Codex was reviewing it; discard the stale verdict')
 }
 

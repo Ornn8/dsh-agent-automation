@@ -57,7 +57,6 @@ async function upsertStatus(status, branch, detail) {
 const pullRequest = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request')
 if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNumber} is not open`)
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
-if (pullRequest.base.ref !== 'master') throw new Error(`Pull request #${pullRequestNumber} does not target master`)
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach the DSH repair agent')
 if (pullRequest.head.sha !== expectedHead) throw new Error('The pull request head changed before DSH repair started')
 if (!pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
@@ -75,6 +74,7 @@ if (priorRun) {
 }
 
 const branch = pullRequest.head.ref
+const baseBranch = pullRequest.base.ref
 await upsertStatus('running', branch, 'The blocking Codex verdict started a fresh DSH repair session.')
 await run(config.ghExecutable, [
   'pr', 'edit', String(pullRequestNumber), '--repo', repository,
@@ -89,7 +89,7 @@ try {
     'repo', 'clone', repository, checkoutPath, '--', '--filter=blob:none', '--no-checkout',
   ], { env: hostCredentialEnvironment(), tee: true })
   await run(config.gitExecutable, [
-    '-C', checkoutPath, 'fetch', '--no-tags', 'origin', 'master', branch,
+    '-C', checkoutPath, 'fetch', '--no-tags', 'origin', baseBranch, branch,
   ], { tee: true })
   await run(config.gitExecutable, [
     '-C', checkoutPath, 'switch', '--track', '-c', branch, `origin/${branch}`,
@@ -101,7 +101,7 @@ try {
 
   const prompt = `Address the blocking Codex review on ${repository} pull request #${pullRequestNumber} at exact head ${expectedHead}.
 
-GitHub is the only coordination channel. Read the live pull request, its English Codex review comment marked \`codex-review:${expectedHead}\`, its linked Issue, all repository instructions, and the exact diff before deciding what to do. Use English for every GitHub comment, commit, and pull request update.
+GitHub is the only coordination channel. Read the live pull request, its English Codex review comment marked \`codex-review:${expectedHead}\`, its linked Issue, all repository instructions, and the exact \`${baseBranch}...${branch}\` diff before deciding what to do. Use English for every GitHub comment, commit, and pull request update.
 
 You own the technical response:
 1. Comment \`CLAIMED: addressing Codex review at ${expectedHead}\` on pull request #${pullRequestNumber}.
@@ -144,4 +144,3 @@ Do not delegate implementation to Codex or wait for another local process. Finis
 } finally {
   await removeJobDirectory(runnerTemp, jobPath)
 }
-
