@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Ornn8/dsh-agent-automation
-          ref: main
+          ref: master
           path: controller
           persist-credentials: false
 
@@ -34,4 +34,3 @@ jobs:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node controller/src/dsh-issue.mjs
-

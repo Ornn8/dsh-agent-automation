@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Ornn8/dsh-agent-automation
-          ref: main
+          ref: master
           path: controller
           persist-credentials: false
 
@@ -55,4 +55,3 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           REVIEW_CHECKOUT: ${{ github.workspace }}\review
         run: node controller/src/codex-review.mjs
-
