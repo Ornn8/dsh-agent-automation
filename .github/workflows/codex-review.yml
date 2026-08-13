@@ -15,6 +15,9 @@ on:
       head_sha:
         required: true
         type: string
+      controller_sha:
+        required: true
+        type: string
 
 concurrency:
   group: codex-review-${{ inputs.repository }}-${{ inputs.pull_request_number }}
@@ -30,7 +33,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Ornn8/dsh-agent-automation
-          ref: master
+          ref: ${{ inputs.controller_sha }}
           path: controller
           persist-credentials: false
 

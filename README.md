@@ -9,7 +9,7 @@ The self-hosted GitHub runner is an idle event listener. It makes no model calls
 
 ## Target repository footprint
 
-A target repository needs one thin caller workflow under `.github/workflows/`. The controllers, validation, tests, and machine-independent workflow definitions stay here. GitHub Actions cannot subscribe one repository directly to another repository's Issue and pull request events, so the caller is the only required target-side file.
+A target repository needs one thin caller workflow under `.github/workflows/`. The caller pins both each reusable workflow and its controller checkout to one audited full commit SHA. The controllers, validation, tests, and machine-independent workflow definitions stay here. GitHub Actions cannot subscribe one repository directly to another repository's Issue and pull request events, so the caller is the only required target-side file.
 
 ## Local runner configuration
 
