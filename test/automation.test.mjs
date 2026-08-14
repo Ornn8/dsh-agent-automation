@@ -168,6 +168,14 @@ test('the DSH bundle registers only explicit GitHub work skills', async () => {
   }
 })
 
+test('operations directory creation uses a supported New-Item path parameter', async () => {
+  const moduleSource = await readFile(new URL('../ops/Automation.Operations.psm1', import.meta.url), 'utf8')
+  const directoryFunction = moduleSource.match(/function Initialize-PrivateDirectory \{[\s\S]*?\n\}/)?.[0]
+  assert.ok(directoryFunction)
+  assert.match(directoryFunction, /New-Item -ItemType Directory -Force -Path \$Path/)
+  assert.doesNotMatch(directoryFunction, /New-Item[^\n]+-LiteralPath/)
+})
+
 test('DSH Web session interruption fails the controller', async () => {
   const fake = visibleSessionFetch('interrupted')
   await assert.rejects(runDshWebSession({
