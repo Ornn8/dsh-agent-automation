@@ -422,6 +422,13 @@ test('Codex review negotiates experimental workspace roots before using them', (
   })
 })
 
+test('Codex review restores the visible project cwd after isolating the automated turn', async () => {
+  const source = await readFile(new URL('../src/codex-session.mjs', import.meta.url), 'utf8')
+  assert.match(source, /const turn = await call\('turn\/start'/)
+  assert.match(source, /cwd: taskCwd/)
+  assert.match(source, /await call\('thread\/settings\/update', \{ threadId, cwd: projectCwd \}\)/)
+})
+
 test('Codex retention reads every active-task page and rejects repeated cursors', async () => {
   const requests = []
   const pages = [
