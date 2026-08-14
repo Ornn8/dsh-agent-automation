@@ -550,7 +550,7 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.doesNotMatch(workflow, /issues: write/)
 })
 
-test('Codex materializes a fresh task before naming it', async () => {
+test('Codex starts the first turn without racing durable task metadata', async () => {
   const calls = []
   const result = await materializeReviewTask(async (method, params) => {
     calls.push({ method, params })
@@ -570,9 +570,8 @@ test('Codex materializes a fresh task before naming it', async () => {
   })
 
   assert.deepEqual(result, { threadId: 'fresh-review', turnId: 'review-turn' })
-  assert.deepEqual(calls.map(call => call.method), ['thread/start', 'turn/start', 'thread/name/set'])
+  assert.deepEqual(calls.map(call => call.method), ['thread/start', 'turn/start'])
   assert.equal(calls[1].params.threadId, 'fresh-review')
-  assert.equal(calls[2].params.threadId, 'fresh-review')
 })
 
 test('backlog Issue dispatch is not lost to GitHub token recursion suppression', async () => {
