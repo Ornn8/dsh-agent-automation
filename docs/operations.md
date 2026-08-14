@@ -56,7 +56,7 @@ pwsh -NoProfile -File F:\dsh-agent-automation\scripts\bootstrap-repository.ps1 `
   -DryRun
 ```
 
-The checkout argument must name the local Git root exactly. The renderer refuses any generated workflow with staged, unstaged, or untracked overlap; use `-Update` only after reviewing that exact replacement. A matching rerun writes nothing. The generated health workflow has separate review and change roles, CI repair and rework forward `DSH_AUTOMATION_CI_WORKFLOW`, and recovery forwards failed controller runs to the hosted recovery workflow. Set the target variable through the ordinary installer or repository settings before committing the generated files.
+The checkout argument must name the local Git root exactly. The renderer validates every generated workflow and every staged, unstaged, or untracked overlap before writing any file; use `-Update` only after reviewing that exact replacement. A matching rerun writes nothing. The generated health workflow has separate review and change roles. CI repair and CI-triggered landing subscribe to the rendered literal CI workflow name, then compare `DSH_AUTOMATION_CI_WORKFLOW` again before invoking a controller. Rework forwards that variable to repair, and recovery forwards failed controller runs to the hosted recovery workflow. Set the target variable through the ordinary installer or repository settings before committing the generated files.
 
 ## Autonomous repair budget
 

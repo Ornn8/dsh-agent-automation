@@ -4,6 +4,7 @@ name: Agent PR CI Repair
 
 on:
   workflow_run:
+    workflows: [{{CI_WORKFLOW_NAME_JSON}}]
     types: [completed]
 
 permissions:

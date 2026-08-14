@@ -4,6 +4,7 @@ on:
   repository_dispatch:
     types: [dsh-land]
   workflow_run:
+    workflows: [{{CI_WORKFLOW_NAME_JSON}}]
     types: [completed]
 
 permissions:

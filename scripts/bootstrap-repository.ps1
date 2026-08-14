@@ -72,8 +72,10 @@ $replacements = @{
   '{{CONTROLLER_REPOSITORY}}' = $ControllerRepository
   '{{CONTROLLER_SHA}}' = $ControllerSha
   '{{CI_WORKFLOW_NAME}}' = $CiWorkflowName
+  '{{CI_WORKFLOW_NAME_JSON}}' = ($CiWorkflowName | ConvertTo-Json -Compress)
 }
 $utf8 = [Text.UTF8Encoding]::new($false)
+$plan = @()
 
 foreach ($name in $workflowNames) {
   $relativePath = ".github/workflows/$name"
@@ -102,14 +104,30 @@ foreach ($name in $workflowNames) {
     $null
   }
   if ($current -ceq $content) {
-    Write-Output "unchanged $relativePath"
-    continue
+    $action = 'unchanged'
+  } elseif ($DryRun) {
+    $action = 'would write'
+  } else {
+    $action = 'write'
   }
-  if ($DryRun) {
-    Write-Output "would write $relativePath"
-    continue
+  $plan += [pscustomobject]@{
+    RelativePath = $relativePath
+    Destination = $existing
+    Content = $content
+    Action = $action
   }
+}
+
+if (-not $DryRun -and @($plan | Where-Object { $_.Action -eq 'write' }).Count) {
   [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
-  [IO.File]::WriteAllText($existing, $content, $utf8)
-  Write-Output "wrote $relativePath"
+}
+foreach ($item in $plan) {
+  if ($item.Action -eq 'unchanged') {
+    Write-Output "unchanged $($item.RelativePath)"
+  } elseif ($item.Action -eq 'would write') {
+    Write-Output "would write $($item.RelativePath)"
+  } else {
+    [IO.File]::WriteAllText($item.Destination, $item.Content, $utf8)
+    Write-Output "wrote $($item.RelativePath)"
+  }
 }
