@@ -1,0 +1,27 @@
+{
+  "repositories": ["owner/repository"],
+  "ghExecutable": "gh.exe",
+  "gitExecutable": "git.exe",
+  "workers": {
+    "dsh": {
+      "adapter": "dsh-web",
+      "baseUrl": "http://127.0.0.1:3080"
+    },
+    "codex": {
+      "adapter": "codex-app",
+      "node": "X:\\path\\to\\node.exe",
+      "script": "X:\\path\\to\\codex.js",
+      "home": "X:\\path\\to\\codex-data",
+      "projectCwd": "X:\\path\\to\\visible-project",
+      "model": "gpt-5.6-sol",
+      "effort": "medium",
+      "keep": 6
+    },
+    "another-agent": {
+      "adapter": "command-json",
+      "executable": "X:\\agents\\another-agent.exe",
+      "args": ["run-json"],
+      "healthArgs": ["health"]
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { readFile, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
+import { normalizeWorkerConfig } from './agent-worker.mjs'
 
 /** Run a process without a command shell and return its captured output. */
 export function run(command, args, options = {}) {
@@ -77,11 +78,8 @@ export function parseJson(text, description) {
 /** Load and validate the machine-local runner configuration. */
 export async function loadConfig() {
   const path = resolve(requiredEnv('DSH_AGENT_CONFIG'))
-  const config = parseJson(await readFile(path, 'utf8'), 'runner configuration')
-  const required = [
-    'repositories', 'dshWebBaseUrl', 'codexNode', 'codexScript',
-    'codexHome', 'codexProjectCwd', 'ghExecutable', 'gitExecutable',
-  ]
+  const config = normalizeWorkerConfig(parseJson(await readFile(path, 'utf8'), 'runner configuration'))
+  const required = ['repositories', 'ghExecutable', 'gitExecutable']
   for (const name of required) {
     if (name === 'repositories') {
       if (!Array.isArray(config[name]) || config[name].length === 0) {

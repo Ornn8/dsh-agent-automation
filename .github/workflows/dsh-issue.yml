@@ -12,6 +12,14 @@ on:
       controller_sha:
         required: true
         type: string
+      worker_id:
+        required: false
+        type: string
+        default: dsh
+      runner_labels_json:
+        required: false
+        type: string
+        default: '["self-hosted","Windows","X64","agent-change"]'
 
 concurrency:
   group: dsh-issue-${{ inputs.repository }}-${{ inputs.issue_number }}
@@ -20,7 +28,7 @@ concurrency:
 jobs:
   execute:
     name: dsh/issue-agent
-    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
     timeout-minutes: 210
     permissions:
       contents: read
@@ -46,4 +54,5 @@ jobs:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AGENT_WORKER_ID: ${{ inputs.worker_id }}
         run: node controller/src/dsh-issue.mjs

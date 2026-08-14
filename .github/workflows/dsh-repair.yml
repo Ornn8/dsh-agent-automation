@@ -19,6 +19,14 @@ on:
       controller_sha:
         required: true
         type: string
+      worker_id:
+        required: false
+        type: string
+        default: dsh
+      runner_labels_json:
+        required: false
+        type: string
+        default: '["self-hosted","Windows","X64","agent-change"]'
 concurrency:
   group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: false
@@ -26,7 +34,7 @@ concurrency:
 jobs:
   repair:
     name: dsh/review-repair
-    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
     timeout-minutes: 210
     permissions:
       contents: read
@@ -54,4 +62,5 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           REPAIR_REQUEST_ID: ${{ inputs.request_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AGENT_WORKER_ID: ${{ inputs.worker_id }}
         run: node controller/src/dsh-repair.mjs

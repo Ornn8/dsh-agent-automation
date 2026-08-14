@@ -22,8 +22,11 @@ export async function runReviewTask({
   title,
   projectCwd,
   environment,
+  model = 'gpt-5.6-sol',
+  effort = 'medium',
   keep = 6,
   timeoutMs = 60 * 60 * 1000,
+  onCreated = async () => undefined,
 }) {
   const child = spawn(node, [codexScript, 'app-server', '--listen', 'stdio://'], {
     cwd: projectCwd,
@@ -112,13 +115,14 @@ export async function runReviewTask({
     send({ method: 'initialized', params: {} })
     const started = await call('thread/start', {
       cwd: projectCwd,
-      model: 'gpt-5.6-sol',
+      model,
       approvalPolicy: 'never',
       sandbox: 'read-only',
       serviceName: 'dsh_github_review',
     })
     const threadId = started.thread.id
     await call('thread/name/set', { threadId, name: title })
+    await onCreated({ sessionId: threadId })
     process.stdout.write(`ChatGPT Desktop review task created: ${threadId}\n`)
 
     const listed = await call('thread/list', {
@@ -136,8 +140,8 @@ export async function runReviewTask({
       input: [{ type: 'text', text: prompt }],
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'readOnly', access: { type: 'fullAccess' } },
-      model: 'gpt-5.6-sol',
-      effort: 'medium',
+      model,
+      effort,
     })
     turnId = turn.turn.id
     await completion

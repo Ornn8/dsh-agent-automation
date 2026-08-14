@@ -10,12 +10,14 @@ import {
   run,
   trustedAssociation,
 } from './common.mjs'
-import { runDshWebSession } from './dsh-web-session.mjs'
+import { createAgentAdapters } from './agent-adapters.mjs'
+import { runAgentWorker } from './agent-worker.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
+const workerId = process.env.AGENT_WORKER_ID?.trim() || 'dsh'
 const marker = '<!-- dsh-agent-run -->'
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
@@ -127,12 +129,18 @@ You own the implementation end to end:
 
 Do not wait for another local process or WebUI session. Finish only after the pull request exists at the declared branch and exact pushed head, or after posting the BLOCKED handoff.`
 
-  const dshSession = await runDshWebSession({
-    baseUrl: config.dshWebBaseUrl,
-    cwd: checkoutPath,
-    title: `[DSH] 执行 Issue #${issueNumber}`,
-    prompt: `${prompt}\n\nFinish this local DSH session with a concise Chinese report. Keep all GitHub-visible content in English.`,
-    onCreated: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible DSH session: ${sessionId}.`)),
+  const workerReceipt = await runAgentWorker({
+    config,
+    workerId,
+    invocation: {
+      taskId: `issue-${issueNumber}`,
+      cwd: checkoutPath,
+      title: `[Agent: ${workerId}] 执行 Issue #${issueNumber}`,
+      prompt: `${prompt}\n\nFinish this local agent session with a concise Chinese report. Keep all GitHub-visible content in English.`,
+      timeoutMs: 3 * 60 * 60 * 1000,
+      onStarted: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible ${workerId} session: ${sessionId}.`)),
+    },
+    adapters: createAgentAdapters(),
   })
 
   const pullRequests = await ghJson([
@@ -153,8 +161,8 @@ Do not wait for another local process or WebUI session. Finish only after the pu
     throw new Error(`Pull request head ${pullRequest.headRefOid} does not match remote branch head ${remoteHead || '<missing>'}`)
   }
 
-  await upsertStatus(statusBody('complete', branch, `Session ${dshSession.sessionId} produced a pull request for independent review: ${pullRequest.url}`))
-  process.stdout.write(`DSH produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
+  await upsertStatus(statusBody('complete', branch, `Session ${workerReceipt.sessionId} produced a pull request for independent review: ${pullRequest.url}`))
+  process.stdout.write(`${workerId} produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
 } catch (error) {
   await upsertStatus(statusBody('failed', branch, `The run failed: ${String(error.message).slice(0, 1000)}`))
     .catch(() => undefined)

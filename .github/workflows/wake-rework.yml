@@ -15,6 +15,14 @@ on:
       controller_sha:
         required: true
         type: string
+      worker_id:
+        required: false
+        type: string
+        default: dsh
+      runner_labels_json:
+        required: false
+        type: string
+        default: '["self-hosted","Windows","X64","agent-change"]'
 
 concurrency:
   group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}
@@ -23,7 +31,7 @@ concurrency:
 jobs:
   repair:
     name: dsh/comment-rework
-    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
     timeout-minutes: 210
     permissions:
       contents: read
@@ -50,4 +58,5 @@ jobs:
           PR_NUMBER: ${{ inputs.pull_request_number }}
           COMMENT_ID: ${{ inputs.comment_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AGENT_WORKER_ID: ${{ inputs.worker_id }}
         run: node controller/src/wake-rework.mjs

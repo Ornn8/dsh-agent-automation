@@ -128,11 +128,14 @@ test('Codex retention archives automated review tasks beyond six', () => {
   assert.deepEqual(reviewTaskIdsToArchive(threads, 'review-0', 6), ['review-6', 'review-7'])
 })
 
-test('Codex hands blocking verdicts directly to DSH in the same runner job', async () => {
+test('a blocking review publishes an independent change work request', async () => {
   const reviewWorkflow = await readFile(new URL('../.github/workflows/codex-review.yml', import.meta.url), 'utf8')
   const workflow = await readFile(new URL('../.github/workflows/dsh-repair.yml', import.meta.url), 'utf8')
-  assert.match(reviewWorkflow, /Hand a blocking verdict directly to DSH/)
-  assert.match(reviewWorkflow, /node controller\/src\/dsh-repair\.mjs/)
+  assert.match(reviewWorkflow, /Publish an independent change work request/)
+  assert.match(reviewWorkflow, /node controller\/src\/publish-work-request\.mjs/)
+  assert.doesNotMatch(reviewWorkflow, /node controller\/src\/dsh-repair\.mjs/)
+  assert.match(reviewWorkflow, /runner_labels_json:/)
+  assert.match(workflow, /runner_labels_json:/)
   assert.doesNotMatch(workflow, /workflow_dispatch:/)
   assert.match(workflow, /controller_sha:/)
 })

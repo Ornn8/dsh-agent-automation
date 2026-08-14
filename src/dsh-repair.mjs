@@ -15,7 +15,8 @@ import {
   trustedCiFailure,
   trustedReviewFeedback,
 } from './dispatch-policy.mjs'
-import { runDshWebSession } from './dsh-web-session.mjs'
+import { createAgentAdapters } from './agent-adapters.mjs'
+import { runAgentWorker } from './agent-worker.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -23,6 +24,7 @@ const expectedHead = requiredEnv('HEAD_SHA')
 const requestId = process.env.REPAIR_REQUEST_ID?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
+const workerId = process.env.AGENT_WORKER_ID?.trim() || 'dsh'
 if (requestId && !/^[A-Za-z0-9._-]{1,100}$/.test(requestId)) throw new Error('Invalid REPAIR_REQUEST_ID')
 const marker = requestId
   ? `<!-- dsh-review-repair:${expectedHead}:${requestId} -->`
@@ -224,23 +226,29 @@ ${ciInstructions}
 
 Do not delegate implementation to Codex or wait for another local process. Finish only after pushing a new head, requesting the one same-head rereview, or posting the BLOCKED handoff.`
 
-  const dshSession = await runDshWebSession({
-    baseUrl: config.dshWebBaseUrl,
-    cwd: checkoutPath,
-    title: `[DSH] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
-    prompt: `${prompt}\n\nFinish this local DSH session with a concise Chinese report. Keep all GitHub-visible content in English.`,
-    onCreated: ({ sessionId }) => upsertStatus('running', branch, `Visible DSH session: ${sessionId}.`),
+  const workerReceipt = await runAgentWorker({
+    config,
+    workerId,
+    invocation: {
+      taskId: `repair-${pullRequestNumber}-${expectedHead}`,
+      cwd: checkoutPath,
+      title: `[Agent: ${workerId}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
+      prompt: `${prompt}\n\nFinish this local agent session with a concise Chinese report. Keep all GitHub-visible content in English.`,
+      timeoutMs: 3 * 60 * 60 * 1000,
+      onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible ${workerId} session: ${sessionId}.`),
+    },
+    adapters: createAgentAdapters(),
   })
 
   const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
   if (current.head.sha !== expectedHead) {
     await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/repairing', 'agent/dsh-failed'] })
-    await upsertStatus('complete', branch, `Session ${dshSession.sessionId} advanced the pull request to ${current.head.sha}; GitHub will review the newer head.`)
+    await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; GitHub will review the newer head.`)
     process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
   } else if (!ciRequest && current.labels.some(label => label.name === 'automation/review-ready')) {
     await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-    await upsertStatus('complete', branch, `Session ${dshSession.sessionId} posted a technical rebuttal and requested one same-head Codex rereview.`)
-    process.stdout.write(`DSH requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
+    await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
+    process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
   } else {
     throw new Error('DSH exited successfully without advancing the head or requesting the documented same-head rereview')
   }

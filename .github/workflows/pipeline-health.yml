@@ -9,15 +9,21 @@ on:
       controller_sha:
         required: true
         type: string
+      worker_id:
+        required: true
+        type: string
+      runner_labels_json:
+        required: true
+        type: string
 
 concurrency:
-  group: dsh-health-${{ inputs.repository }}
+  group: agent-health-${{ inputs.repository }}-${{ inputs.worker_id }}
   cancel-in-progress: true
 
 jobs:
   health:
     name: pipeline/health
-    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -42,4 +48,5 @@ jobs:
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          AGENT_WORKER_ID: ${{ inputs.worker_id }}
         run: node controller/src/pipeline-health.mjs

@@ -18,6 +18,14 @@ on:
       controller_sha:
         required: true
         type: string
+      worker_id:
+        required: false
+        type: string
+        default: codex
+      runner_labels_json:
+        required: false
+        type: string
+        default: '["self-hosted","Windows","X64","agent-reviewer"]'
 
 concurrency:
   group: codex-review-${{ inputs.repository }}-${{ inputs.pull_request_number }}
@@ -26,7 +34,7 @@ concurrency:
 jobs:
   review:
     name: codex/review
-    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
     timeout-minutes: 255
     permissions:
       contents: write
@@ -73,23 +81,23 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           REVIEW_CHECKOUT: ${{ github.workspace }}\review
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AGENT_WORKER_ID: ${{ inputs.worker_id }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/codex-review.mjs
 
-      - name: Hand a blocking verdict directly to DSH
-        id: repair
+      - name: Publish an independent change work request
+        id: work_request
         if: steps.review.outcome == 'failure'
         continue-on-error: true
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
+          BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
-          REPAIR_REQUEST_ID: ''
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node controller/src/dsh-repair.mjs
+        run: node controller/src/publish-work-request.mjs
 
       - name: Fail the exact-head review status when automation fails
-        if: steps.review.outcome == 'failure' && steps.repair.outcome == 'failure'
+        if: steps.review.outcome == 'failure' && steps.work_request.outcome == 'failure'
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           HEAD_SHA: ${{ inputs.head_sha }}
