@@ -60,6 +60,7 @@ try {
     $expected = $expected.Replace('{{CONTROLLER_REPOSITORY}}', $repository)
     $expected = $expected.Replace('{{CONTROLLER_SHA}}', $sha)
     $expected = $expected.Replace('{{CI_WORKFLOW_NAME}}', $ciWorkflow)
+    $expected = $expected.Replace('{{CI_WORKFLOW_NAME_JSON}}', ($ciWorkflow | ConvertTo-Json -Compress))
     Assert-True ($actual -ceq $expected) "First render of $name did not exactly match its template."
   }
 
@@ -73,6 +74,11 @@ try {
   Assert-True ($rendered -notmatch 'with:\s*\r?\n\s*repository:') 'Generated YAML exposes a reusable repository input.'
   Assert-True ($rendered -match 'role: review' -and $rendered -match 'role: change') 'Health workflow did not keep separate roles.'
   Assert-True ($rendered -match 'ci_workflow_name: \$\{\{ vars\.DSH_AUTOMATION_CI_WORKFLOW \}\}') 'CI repair or rework did not pass DSH_AUTOMATION_CI_WORKFLOW.'
+  foreach ($name in @('agent-pr-ci-repair.yml', 'agent-pr-land.yml')) {
+    $workflow = Get-Content -LiteralPath (Join-Path $temp ".github\workflows\$name") -Raw
+    Assert-True ($workflow -match '(?m)^    workflows: \["Target CI"\]\r?$') "$name does not subscribe workflow_run to the rendered CI workflow name."
+    Assert-True ($workflow -match 'github\.event\.workflow_run\.name == vars\.DSH_AUTOMATION_CI_WORKFLOW') "$name does not retain its CI workflow variable comparison."
+  }
   Assert-True ($rendered -match 'recover-backlog\.yml') 'Generated YAML omitted recovery.'
   $issuesWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-issues.yml') -Raw
   foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: write', 'pull-requests: write')) {

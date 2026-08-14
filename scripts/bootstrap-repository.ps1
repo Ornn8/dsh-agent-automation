@@ -72,6 +72,7 @@ $replacements = @{
   '{{CONTROLLER_REPOSITORY}}' = $ControllerRepository
   '{{CONTROLLER_SHA}}' = $ControllerSha
   '{{CI_WORKFLOW_NAME}}' = $CiWorkflowName
+  '{{CI_WORKFLOW_NAME_JSON}}' = ($CiWorkflowName | ConvertTo-Json -Compress)
 }
 $utf8 = [Text.UTF8Encoding]::new($false)
 
