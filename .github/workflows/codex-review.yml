@@ -69,9 +69,7 @@ jobs:
 
       - name: Fetch exact review history and base
         working-directory: review
-        run: |
-          git fetch --no-tags --unshallow origin ${{ inputs.head_sha }}
-          git fetch --no-tags origin ${{ inputs.base_sha }}
+        run: git fetch --no-tags --depth=64 origin ${{ inputs.head_sha }} ${{ inputs.base_sha }}
 
       - name: Review exact PR head with Codex
         id: review

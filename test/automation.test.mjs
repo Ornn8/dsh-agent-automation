@@ -143,7 +143,8 @@ test('a blocking review publishes an independent change work request', async () 
 test('review checkout fetches only the exact pull request history', async () => {
   const workflow = await readFile(new URL('../.github/workflows/codex-review.yml', import.meta.url), 'utf8')
   assert.match(workflow, /fetch-depth: 1/)
-  assert.match(workflow, /git fetch --no-tags --unshallow origin \$\{\{ inputs\.head_sha \}\}/)
+  assert.match(workflow, /git fetch --no-tags --depth=64 origin \$\{\{ inputs\.head_sha \}\} \$\{\{ inputs\.base_sha \}\}/)
+  assert.doesNotMatch(workflow, /--unshallow/)
   assert.doesNotMatch(workflow, /fetch-depth: 0/)
 })
 
