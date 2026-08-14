@@ -3,13 +3,24 @@ import { mkdtemp, mkdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
-import { issueBranch, removeJobDirectory, trustedAssociation } from '../src/common.mjs'
+import {
+  actionsCredentialEnvironment,
+  hostCredentialEnvironment,
+  issueBranch,
+  removeJobDirectory,
+  trustedAssociation,
+} from '../src/common.mjs'
 import {
   explicitReworkCommand,
   issueDependencies,
   selectBacklogWork,
+  trustedReviewFeedback,
 } from '../src/dispatch-policy.mjs'
-import { githubReviewBody, parseReviewMessage } from '../src/review-protocol.mjs'
+import {
+  automaticRepairRequestId,
+  githubReviewBody,
+  parseReviewMessage,
+} from '../src/review-protocol.mjs'
 import { localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
 
 function rpcResponse(request, value, ok = true) {
@@ -57,6 +68,7 @@ test('DSH Web sessions stay on the loopback Host', () => {
 
 test('DSH Web session is titled, prompted once, and observed to completion', async () => {
   const fake = visibleSessionFetch()
+  let created
   const result = await runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080',
     cwd: 'F:\\runner\\checkout',
@@ -64,8 +76,10 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
     prompt: 'Do the work.',
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
+    onCreated: async value => { created = value },
   })
   assert.deepEqual(result, { sessionId: 'session-visible', reason: 'completed' })
+  assert.deepEqual(created, { sessionId: 'session-visible' })
   assert.deepEqual(fake.calls.map(call => call.method), [
     'session.create', 'session.rename', 'session.prompt',
     'session.list', 'session.list', 'session.history',
@@ -143,6 +157,29 @@ test('backlog dispatch repairs blocked pull requests before starting Issues', ()
   assert.deepEqual(work, { type: 'repair', number: 10, head: 'head10' })
 })
 
+test('backlog dispatch leaves failed or active repairs for their explicit recovery path', () => {
+  const pullRequest = {
+    number: 10,
+    draft: false,
+    head: { sha: 'head10', repo: { full_name: 'Ornn8/deepseek-harness' } },
+    labels: [
+      { name: 'automation/review-blocked' },
+      { name: 'agent/dsh-failed' },
+    ],
+  }
+  assert.equal(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness', pullRequests: [pullRequest], issues: [],
+  }), null)
+
+  pullRequest.labels = [
+    { name: 'automation/review-blocked' },
+    { name: 'automation/repairing' },
+  ]
+  assert.equal(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness', pullRequests: [pullRequest], issues: [],
+  }), null)
+})
+
 test('backlog dispatch waits for open dependencies and skips trackers', () => {
   const issues = [
     {
@@ -195,12 +232,35 @@ test('explicit rework commands are deliberate and case insensitive', () => {
   assert.equal(explicitReworkCommand('<!-- dsh-review-result -->'), false)
 })
 
+test('trusted blocking GitHub reviews and inline comments wake DSH without a mention', () => {
+  assert.equal(trustedReviewFeedback({
+    kind: 'review', association: 'OWNER', state: 'CHANGES_REQUESTED',
+  }), true)
+  assert.equal(trustedReviewFeedback({
+    kind: 'review-comment', association: 'COLLABORATOR',
+  }), true)
+  assert.equal(trustedReviewFeedback({
+    kind: 'review', association: 'OWNER', state: 'APPROVED',
+  }), false)
+  assert.equal(trustedReviewFeedback({
+    kind: 'review-comment', association: 'CONTRIBUTOR',
+  }), false)
+})
+
 test('trustedAssociation limits privileged dispatch', () => {
   assert.equal(trustedAssociation('OWNER'), true)
   assert.equal(trustedAssociation('MEMBER'), true)
   assert.equal(trustedAssociation('COLLABORATOR'), true)
   assert.equal(trustedAssociation('CONTRIBUTOR'), false)
   assert.equal(trustedAssociation('NONE'), false)
+})
+
+test('review publication and agent execution use different GitHub credentials', () => {
+  const source = { GITHUB_TOKEN: 'actions-token', GH_TOKEN: 'host-token', PATH: 'bin' }
+  assert.deepEqual(actionsCredentialEnvironment({}, source), {
+    GITHUB_TOKEN: 'actions-token', GH_TOKEN: 'actions-token', PATH: 'bin',
+  })
+  assert.deepEqual(hostCredentialEnvironment({}, source), { PATH: 'bin' })
 })
 
 test('removeJobDirectory cannot escape its declared root', async () => {
@@ -213,8 +273,8 @@ test('removeJobDirectory cannot escape its declared root', async () => {
   await assert.rejects(removeJobDirectory(root, join(root, '..')), /Refusing/)
 })
 
-test('parseReviewMessage reads a hidden passing result after Chinese prose', () => {
-  const review = parseReviewMessage('结论：通过。\n\n<!-- dsh-review-result\n{"verdict":"pass","summary":"No blocking defects.","findings":[]}\n-->')
+test('parseReviewMessage reads a collapsible automation result after Chinese prose', () => {
+  const review = parseReviewMessage('结论：通过。\n\n<details>\n<summary>Automation result</summary>\n\n```json\n{"verdict":"pass","summary":"No blocking defects.","findings":[]}\n```\n</details>')
   assert.deepEqual(review, { verdict: 'pass', summary: 'No blocking defects.', findings: [] })
 })
 
@@ -231,4 +291,11 @@ test('githubReviewBody stays English and binds the reviewed commits', () => {
   })
   assert.match(body, /Codex review: PASS/)
   assert.match(body, /head456.*base123/)
+})
+
+test('automatic repair requests are idempotent for one exact review pair', () => {
+  const base = 'a'.repeat(40)
+  const head = 'b'.repeat(40)
+  assert.equal(automaticRepairRequestId(base, head), `codex-${base}-${head}`)
+  assert.throws(() => automaticRepairRequestId('main', head), /full commit SHA/)
 })

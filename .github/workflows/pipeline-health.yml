@@ -1,4 +1,4 @@
-name: DSH Review Repair
+name: Agent Pipeline Health
 
 on:
   workflow_call:
@@ -6,29 +6,19 @@ on:
       repository:
         required: true
         type: string
-      pull_request_number:
-        required: true
-        type: number
-      head_sha:
-        required: true
-        type: string
-      request_id:
-        required: false
-        type: string
-        default: ''
       controller_sha:
         required: true
         type: string
 
 concurrency:
-  group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}
-  cancel-in-progress: false
+  group: dsh-health-${{ inputs.repository }}
+  cancel-in-progress: true
 
 jobs:
-  repair:
-    name: dsh/review-repair
+  health:
+    name: pipeline/health
     runs-on: [self-hosted, Windows, X64, dsh-agent]
-    timeout-minutes: 210
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -48,11 +38,8 @@ jobs:
           path: controller
           persist-credentials: false
 
-      - name: Address Codex review with DSH
+      - name: Verify the idle event bridge without model calls
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
-          PR_NUMBER: ${{ inputs.pull_request_number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          REPAIR_REQUEST_ID: ${{ inputs.request_id }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node controller/src/dsh-repair.mjs
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+        run: node controller/src/pipeline-health.mjs

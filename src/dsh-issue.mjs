@@ -127,11 +127,12 @@ You own the implementation end to end:
 
 Do not wait for another local process or WebUI session. Finish only after the pull request exists at the declared branch and exact pushed head, or after posting the BLOCKED handoff.`
 
-  await runDshWebSession({
+  const dshSession = await runDshWebSession({
     baseUrl: config.dshWebBaseUrl,
     cwd: checkoutPath,
     title: `[DSH] 执行 Issue #${issueNumber}`,
     prompt: `${prompt}\n\nFinish this local DSH session with a concise Chinese report. Keep all GitHub-visible content in English.`,
+    onCreated: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible DSH session: ${sessionId}.`)),
   })
 
   const pullRequests = await ghJson([
@@ -152,7 +153,7 @@ Do not wait for another local process or WebUI session. Finish only after the pu
     throw new Error(`Pull request head ${pullRequest.headRefOid} does not match remote branch head ${remoteHead || '<missing>'}`)
   }
 
-  await upsertStatus(statusBody('complete', branch, `Pull request ready for independent review: ${pullRequest.url}`))
+  await upsertStatus(statusBody('complete', branch, `Session ${dshSession.sessionId} produced a pull request for independent review: ${pullRequest.url}`))
   process.stdout.write(`DSH produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
 } catch (error) {
   await upsertStatus(statusBody('failed', branch, `The run failed: ${String(error.message).slice(0, 1000)}`))

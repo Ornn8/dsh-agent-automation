@@ -46,6 +46,7 @@ export async function runDshWebSession({
   fetchImpl = fetch,
   sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
   now = Date.now,
+  onCreated = async () => undefined,
 }) {
   const endpoint = localDshWebBaseUrl(baseUrl)
   const created = await dshRpc(endpoint, 'session.create', { cwd }, fetchImpl)
@@ -55,6 +56,7 @@ export async function runDshWebSession({
 
   try {
     await dshRpc(endpoint, 'session.rename', { sessionId, title }, fetchImpl)
+    await onCreated({ sessionId })
     await dshRpc(endpoint, 'session.prompt', {
       sessionId,
       mode: 'queue',

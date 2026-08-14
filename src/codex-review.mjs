@@ -1,5 +1,6 @@
 import { resolve } from 'node:path'
 import {
+  actionsCredentialEnvironment,
   hostCredentialEnvironment,
   loadConfig,
   parseJson,
@@ -7,7 +8,11 @@ import {
   run,
 } from './common.mjs'
 import { runReviewTask } from './codex-session.mjs'
-import { githubReviewBody, parseReviewMessage } from './review-protocol.mjs'
+import {
+  automaticRepairRequestId,
+  githubReviewBody,
+  parseReviewMessage,
+} from './review-protocol.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -16,6 +21,7 @@ const expectedHead = requiredEnv('HEAD_SHA')
 const reviewCheckout = resolve(requiredEnv('REVIEW_CHECKOUT'))
 const config = await loadConfig()
 const marker = `<!-- codex-review:${expectedHead} -->`
+const githubEnvironment = actionsCredentialEnvironment()
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
@@ -23,7 +29,7 @@ if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
 }
 
 async function ghJson(args, description) {
-  const result = await run(config.ghExecutable, args, { env: hostCredentialEnvironment() })
+  const result = await run(config.ghExecutable, args, { env: githubEnvironment })
   return parseJson(result.stdout, description)
 }
 
@@ -35,11 +41,11 @@ async function upsertReviewComment(body) {
   if (prior) {
     await run(config.ghExecutable, [
       'api', '--method', 'PATCH', `repos/${repository}/issues/comments/${prior.id}`, '-f', `body=${body}`,
-    ], { env: hostCredentialEnvironment() })
+    ], { env: githubEnvironment })
   } else {
     await run(config.ghExecutable, [
       'pr', 'comment', String(pullRequestNumber), '--repo', repository, '--body', body,
-    ], { env: hostCredentialEnvironment() })
+    ], { env: githubEnvironment })
   }
 }
 
@@ -50,14 +56,25 @@ async function setReviewStatus(state, description) {
     '-f', 'context=codex/review',
     '-f', `description=${description}`,
     '-f', `target_url=${requiredEnv('RUN_URL')}`,
-  ], { env: hostCredentialEnvironment() })
+  ], { env: githubEnvironment })
 }
 
 await setReviewStatus('pending', 'Codex is reviewing this exact pull request head')
 await run(config.ghExecutable, [
-  'pr', 'edit', String(pullRequestNumber), '--repo', repository,
-  '--remove-label', 'automation/review-ready',
-], { env: hostCredentialEnvironment() }).catch(() => undefined)
+  'pr', 'merge', String(pullRequestNumber), '--repo', repository, '--disable-auto',
+], { env: githubEnvironment }).catch(() => undefined)
+for (const label of [
+  'automation/review-ready',
+  'automation/review-blocked',
+  'automation/repairing',
+  'automation/review-failed',
+  'agent/dsh-failed',
+]) {
+  await run(config.ghExecutable, [
+    'pr', 'edit', String(pullRequestNumber), '--repo', repository,
+    '--remove-label', label,
+  ], { env: githubEnvironment }).catch(() => undefined)
+}
 
 const pullRequest = await ghJson([
   'pr', 'view', String(pullRequestNumber), '--repo', repository,
@@ -92,13 +109,17 @@ Review procedure:
 3. Report only actionable P0/P1 defects introduced by this pull request. A finding must name the exact path and tightest changed line that demonstrates the defect, plus concrete impact and evidence. Omit style, speculation, already-green automated gates, and non-blocking suggestions.
 4. Return PASS only when there are no P0/P1 findings. Otherwise return BLOCK.
 
-Your visible final answer is for the repository owner in ChatGPT Desktop. Write it in concise Chinese: verdict first, exact base/head, findings or the reason for PASS, and whether merging is allowed. Do not dump JSON visibly.
+Your visible final answer is for the repository owner in ChatGPT Desktop. Write it in concise Chinese: verdict first, exact base/head, findings or the reason for PASS, and whether merging is allowed. Do not place JSON outside the collapsed automation section.
 
-End the final answer with this exact hidden block, using valid compact JSON between the delimiter lines. All JSON string fields must be English and must not contain two consecutive hyphens.
+End the final answer with this collapsible automation block. Keep it after the concise Chinese report so the ChatGPT Desktop task remains readable. Use valid compact JSON, and keep every JSON string field in English without two consecutive hyphens.
 
-<!-- dsh-review-result
+<details>
+<summary>Automation result</summary>
+
+\`\`\`json
 {"verdict":"pass or block","summary":"English GitHub summary","findings":[{"priority":"P0 or P1","title":"English title","body":"English evidence and impact","path":"repository/relative/path","line":1}]}
--->
+\`\`\`
+</details>
 
 For PASS, findings must be an empty array. For BLOCK, include at least one finding.`
 
@@ -106,7 +127,7 @@ const task = await runReviewTask({
   node: config.codexNode,
   codexScript: config.codexScript,
   prompt,
-  title: `[GitHub Review] PR #${pullRequestNumber}: ${pullRequest.title}`,
+  title: `[GitHub Review] PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}: ${pullRequest.title}`,
   projectCwd: config.codexProjectCwd,
   environment: hostCredentialEnvironment({ CODEX_HOME: config.codexHome, NO_COLOR: '1' }),
   keep: 6,
@@ -133,22 +154,34 @@ if (review.verdict === 'block') {
   await run(config.ghExecutable, [
     'label', 'create', 'automation/review-blocked', '--repo', repository,
     '--description', 'Codex found a blocking defect at the current PR head', '--color', 'B60205',
-  ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+  ], { env: githubEnvironment }).catch(() => undefined)
   await run(config.ghExecutable, [
     'pr', 'edit', String(pullRequestNumber), '--repo', repository,
     '--add-label', 'automation/review-blocked',
-  ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+  ], { env: githubEnvironment }).catch(() => undefined)
   await setReviewStatus('failure', `Codex found ${review.findings.length} blocking defect(s)`)
+  const requestId = automaticRepairRequestId(expectedBase, expectedHead)
+  await run(config.ghExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/dispatches`,
+    '-f', 'event_type=dsh-repair',
+    '-F', `client_payload[pr_number]=${pullRequestNumber}`,
+    '-f', `client_payload[head_sha]=${expectedHead}`,
+    '-f', `client_payload[request_id]=${requestId}`,
+  ], { env: githubEnvironment })
   throw new Error(`Codex blocked pull request #${pullRequestNumber} with ${review.findings.length} finding(s)`)
 }
 
-await run(config.ghExecutable, [
-  'pr', 'edit', String(pullRequestNumber), '--repo', repository,
-  '--remove-label', 'automation/review-blocked', '--remove-label', 'automation/review-ready',
-], { env: hostCredentialEnvironment() }).catch(() => undefined)
+for (const label of ['automation/review-blocked', 'automation/review-ready', 'automation/review-failed']) {
+  await run(config.ghExecutable, [
+    'pr', 'edit', String(pullRequestNumber), '--repo', repository,
+    '--remove-label', label,
+  ], { env: githubEnvironment }).catch(() => undefined)
+}
 await setReviewStatus('success', 'Codex found no blocking defects at this head')
 await run(config.ghExecutable, [
-  'pr', 'merge', String(pullRequestNumber), '--repo', repository,
-  '--auto', '--squash', '--delete-branch', '--match-head-commit', expectedHead,
-], { env: hostCredentialEnvironment() })
-process.stdout.write(`Codex passed pull request #${pullRequestNumber}; auto-merge is enabled for ${expectedHead}.\n`)
+  'api', '--method', 'POST', `repos/${repository}/dispatches`,
+  '-f', 'event_type=dsh-land',
+  '-F', `client_payload[pr_number]=${pullRequestNumber}`,
+  '-f', `client_payload[head_sha]=${expectedHead}`,
+], { env: githubEnvironment })
+process.stdout.write(`Codex passed pull request #${pullRequestNumber}; landing was requested for ${expectedHead}.\n`)

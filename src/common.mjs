@@ -95,11 +95,20 @@ export async function loadConfig() {
 }
 
 /** Return an environment that cannot make GitHub CLI use an Actions token. */
-export function hostCredentialEnvironment(overrides = {}) {
-  const environment = { ...process.env }
+export function hostCredentialEnvironment(overrides = {}, source = process.env) {
+  const environment = { ...source }
   delete environment.GH_TOKEN
   delete environment.GITHUB_TOKEN
   return Object.assign(environment, overrides)
+}
+
+/** Return an environment that forces GitHub CLI to use the current Actions token. */
+export function actionsCredentialEnvironment(overrides = {}, source = process.env) {
+  const environment = { ...source, ...overrides }
+  const token = environment.GITHUB_TOKEN?.trim()
+  if (!token) throw new Error('Missing required environment variable GITHUB_TOKEN')
+  environment.GH_TOKEN = token
+  return environment
 }
 
 /** Parse and validate the branch declared by an automation Issue. */

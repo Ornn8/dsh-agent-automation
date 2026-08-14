@@ -18,6 +18,13 @@ export function explicitReworkCommand(body) {
     .test(String(body || ''))
 }
 
+/** Return whether trusted GitHub review feedback should wake a repair session. */
+export function trustedReviewFeedback({ kind, association, state }) {
+  if (!trustedAssociation(association)) return false
+  if (kind === 'review-comment') return true
+  return kind === 'review' && state === 'CHANGES_REQUESTED'
+}
+
 function hasDeclaredBranch(body) {
   return /^\s*(?:[-*]\s*)?(?:branch|branch name)\s*:\s*`[^`]+`\s*$/im.test(String(body || ''))
 }
@@ -36,7 +43,9 @@ export function selectBacklogWork({ repository, pullRequests, issues }) {
   const repair = [...pullRequests]
     .filter(pullRequest => !pullRequest.draft
       && pullRequest.head?.repo?.full_name === repository
-      && labelNames(pullRequest).has('automation/review-blocked'))
+      && labelNames(pullRequest).has('automation/review-blocked')
+      && !labelNames(pullRequest).has('automation/repairing')
+      && !labelNames(pullRequest).has('agent/dsh-failed'))
     .sort((left, right) => left.number - right.number)[0]
   if (repair) return { type: 'repair', number: repair.number, head: repair.head.sha }
 

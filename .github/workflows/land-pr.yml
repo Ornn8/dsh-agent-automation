@@ -1,4 +1,4 @@
-name: DSH Review Repair
+name: Land Reviewed Pull Request
 
 on:
   workflow_call:
@@ -7,28 +7,25 @@ on:
         required: true
         type: string
       pull_request_number:
-        required: true
+        required: false
         type: number
+        default: 0
       head_sha:
         required: true
         type: string
-      request_id:
-        required: false
-        type: string
-        default: ''
       controller_sha:
         required: true
         type: string
 
 concurrency:
-  group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+  group: dsh-land-${{ inputs.repository }}-${{ inputs.pull_request_number }}-${{ inputs.head_sha }}
   cancel-in-progress: false
 
 jobs:
-  repair:
-    name: dsh/review-repair
+  land:
+    name: landing/exact-pair
     runs-on: [self-hosted, Windows, X64, dsh-agent]
-    timeout-minutes: 210
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -48,11 +45,9 @@ jobs:
           path: controller
           persist-credentials: false
 
-      - name: Address Codex review with DSH
+      - name: Land only after exact review and required checks pass
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
-          REPAIR_REQUEST_ID: ${{ inputs.request_id }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node controller/src/dsh-repair.mjs
+        run: node controller/src/land-pr.mjs

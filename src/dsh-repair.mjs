@@ -9,7 +9,7 @@ import {
   run,
   trustedAssociation,
 } from './common.mjs'
-import { explicitReworkCommand } from './dispatch-policy.mjs'
+import { explicitReworkCommand, trustedReviewFeedback } from './dispatch-policy.mjs'
 import { runDshWebSession } from './dsh-web-session.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
@@ -22,7 +22,9 @@ if (requestId && !/^[A-Za-z0-9._-]{1,100}$/.test(requestId)) throw new Error('In
 const marker = requestId
   ? `<!-- dsh-review-repair:${expectedHead}:${requestId} -->`
   : `<!-- dsh-review-repair:${expectedHead} -->`
-const explicitCommentRequest = requestId.startsWith('comment-')
+const explicitRequest = requestId.startsWith('comment-')
+  || requestId.startsWith('review-')
+  || requestId.startsWith('review-comment-')
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
@@ -62,48 +64,87 @@ async function upsertStatus(status, branch, detail) {
   }
 }
 
+async function setRepairLabels({ add = [], remove = [] }) {
+  for (const [name, description, color] of [
+    ['automation/review-blocked', 'Codex found a blocking defect at the current PR head', 'B60205'],
+    ['automation/repairing', 'DSH is addressing the current blocking review', 'FBCA04'],
+    ['agent/dsh-failed', 'DSH execution failed; an explicit recovery request is required', 'D93F0B'],
+  ]) {
+    if (add.includes(name)) {
+      await run(config.ghExecutable, [
+        'label', 'create', name, '--repo', repository,
+        '--description', description, '--color', color,
+      ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+      await run(config.ghExecutable, [
+        'pr', 'edit', String(pullRequestNumber), '--repo', repository,
+        '--add-label', name,
+      ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+    }
+  }
+  for (const label of remove) {
+    await run(config.ghExecutable, [
+      'pr', 'edit', String(pullRequestNumber), '--repo', repository,
+      '--remove-label', label,
+    ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+  }
+}
+
 const pullRequest = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request')
 if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNumber} is not open`)
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach the DSH repair agent')
 if (pullRequest.head.sha !== expectedHead) throw new Error('The pull request head changed before DSH repair started')
-if (explicitCommentRequest) {
-  const commentId = Number.parseInt(requestId.slice('comment-'.length), 10)
-  if (!Number.isSafeInteger(commentId) || commentId < 1) throw new Error('Invalid comment repair request id')
-  const comment = await ghJson(['api', `repos/${repository}/issues/comments/${commentId}`], 'rework comment')
-  if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
-    throw new Error('Rework comment does not belong to this pull request')
+if (explicitRequest) {
+  const reviewCommentRequest = requestId.startsWith('review-comment-')
+  const reviewRequest = !reviewCommentRequest && requestId.startsWith('review-')
+  const prefix = reviewCommentRequest ? 'review-comment-' : reviewRequest ? 'review-' : 'comment-'
+  const feedbackId = Number.parseInt(requestId.slice(prefix.length), 10)
+  if (!Number.isSafeInteger(feedbackId) || feedbackId < 1) throw new Error('Invalid explicit repair request id')
+  if (prefix === 'comment-') {
+    const comment = await ghJson(['api', `repos/${repository}/issues/comments/${feedbackId}`], 'rework comment')
+    if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
+      throw new Error('Rework comment does not belong to this pull request')
+    }
+    if (!trustedAssociation(comment.author_association)) {
+      throw new Error(`Untrusted rework comment association ${comment.author_association}`)
+    }
+    if (!explicitReworkCommand(comment.body)) throw new Error('Comment is not an explicit DSH rework command')
+  } else {
+    const feedback = reviewCommentRequest
+      ? await ghJson(['api', `repos/${repository}/pulls/comments/${feedbackId}`], 'review comment')
+      : await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}/reviews/${feedbackId}`], 'review')
+    if (reviewCommentRequest
+      && !feedback.pull_request_url?.endsWith(`/pulls/${pullRequestNumber}`)) {
+      throw new Error('Review comment does not belong to this pull request')
+    }
+    if (!trustedReviewFeedback({
+      kind: reviewCommentRequest ? 'review-comment' : 'review',
+      association: feedback.author_association,
+      state: feedback.state,
+    })) {
+      throw new Error('Feedback is not a trusted blocking review request')
+    }
   }
-  if (!trustedAssociation(comment.author_association)) {
-    throw new Error(`Untrusted rework comment association ${comment.author_association}`)
-  }
-  if (!explicitReworkCommand(comment.body)) throw new Error('Comment is not an explicit DSH rework command')
 }
-if (!explicitCommentRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
+if (!explicitRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
   throw new Error('The pull request no longer has the automation/review-blocked label')
 }
 
 const priorComments = await ghJson([
   'api', `repos/${repository}/issues/${pullRequestNumber}/comments`, '--paginate',
 ], 'pull request comments')
-const priorRun = priorComments.find(comment => comment.body?.includes(marker)
-  && comment.body.includes('- Status: **complete**'))
+const priorRun = priorComments.find(comment => comment.body?.includes(marker))
 if (priorRun) {
-  process.stdout.write(`DSH already completed a response for ${expectedHead}; leaving the repeated block for human inspection.\n`)
+  process.stdout.write(`DSH already consumed repair request ${marker}; leaving its recorded state for inspection.\n`)
   process.exit(0)
 }
 
 const branch = pullRequest.head.ref
 const baseBranch = pullRequest.base.ref
-await upsertStatus('running', branch, explicitCommentRequest
-  ? `Trusted rework comment ${requestId} started a fresh DSH repair session.`
+await upsertStatus('running', branch, explicitRequest
+  ? `Trusted rework request ${requestId} started a fresh DSH repair session.`
   : 'The blocking Codex verdict started a fresh DSH repair session.')
-if (!explicitCommentRequest) {
-  await run(config.ghExecutable, [
-    'pr', 'edit', String(pullRequestNumber), '--repo', repository,
-    '--remove-label', 'automation/review-blocked',
-  ], { env: hostCredentialEnvironment() })
-}
+await setRepairLabels({ add: ['automation/review-blocked', 'automation/repairing'], remove: ['agent/dsh-failed'] })
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-repair-${pullRequestNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
@@ -123,7 +164,7 @@ try {
   ])).stdout.trim()
   if (checkedOutHead !== expectedHead) throw new Error(`Repair checkout is ${checkedOutHead}, expected ${expectedHead}`)
 
-  const requestDescription = explicitCommentRequest
+  const requestDescription = explicitRequest
     ? `the explicit trusted rework request ${requestId}`
     : 'the blocking Codex review and every unresolved trusted blocking comment'
   const prompt = `Address ${requestDescription} on ${repository} pull request #${pullRequestNumber} at exact head ${expectedHead}.
@@ -140,19 +181,22 @@ You own the technical response:
 
 Do not delegate implementation to Codex or wait for another local process. Finish only after pushing a new head, requesting the one same-head rereview, or posting the BLOCKED handoff.`
 
-  await runDshWebSession({
+  const dshSession = await runDshWebSession({
     baseUrl: config.dshWebBaseUrl,
     cwd: checkoutPath,
-    title: `[DSH] 修复 PR #${pullRequestNumber}`,
+    title: `[DSH] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
     prompt: `${prompt}\n\nFinish this local DSH session with a concise Chinese report. Keep all GitHub-visible content in English.`,
+    onCreated: ({ sessionId }) => upsertStatus('running', branch, `Visible DSH session: ${sessionId}.`),
   })
 
   const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
   if (current.head.sha !== expectedHead) {
-    await upsertStatus('complete', branch, `The pull request advanced to ${current.head.sha} while this session was active; GitHub will review the newer head.`)
+    await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repairing', 'agent/dsh-failed'] })
+    await upsertStatus('complete', branch, `Session ${dshSession.sessionId} advanced the pull request to ${current.head.sha}; GitHub will review the newer head.`)
     process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
   } else if (current.labels.some(label => label.name === 'automation/review-ready')) {
-    await upsertStatus('complete', branch, 'DSH posted a technical rebuttal and requested one same-head Codex rereview.')
+    await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repairing', 'agent/dsh-failed'] })
+    await upsertStatus('complete', branch, `Session ${dshSession.sessionId} posted a technical rebuttal and requested one same-head Codex rereview.`)
     process.stdout.write(`DSH requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
   } else {
     throw new Error('DSH exited successfully without advancing the head or requesting the documented same-head rereview')
@@ -160,9 +204,10 @@ Do not delegate implementation to Codex or wait for another local process. Finis
 } catch (error) {
   await upsertStatus('failed', branch, `The repair run failed: ${String(error.message).slice(0, 1000)}`)
     .catch(() => undefined)
-  await run(config.ghExecutable, [
-    'pr', 'edit', String(pullRequestNumber), '--repo', repository, '--add-label', 'agent/dsh-failed',
-  ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+  await setRepairLabels({
+    add: ['automation/review-blocked', 'agent/dsh-failed'],
+    remove: ['automation/repairing'],
+  })
   throw error
 } finally {
   await removeJobDirectory(runnerTemp, jobPath)

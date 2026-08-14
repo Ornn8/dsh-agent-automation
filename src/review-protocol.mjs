@@ -1,7 +1,16 @@
+/** Return the durable idempotency key for one exact blocked review pair. */
+export function automaticRepairRequestId(base, head) {
+  if (![base, head].every(value => /^[0-9a-f]{40}$/i.test(value))) {
+    throw new Error('Automatic repair requests require full commit SHAs')
+  }
+  return `codex-${base.toLowerCase()}-${head.toLowerCase()}`
+}
+
 /** Parse the hidden machine payload from a human-readable Codex final answer. */
 export function parseReviewMessage(message) {
-  const match = message.match(/<!-- dsh-review-result\r?\n([\s\S]*?)\r?\n-->\s*$/)
-  if (!match) throw new Error('Codex final answer does not end with the hidden review result')
+  const match = message.match(/<details>\r?\n<summary>Automation result<\/summary>\r?\n\r?\n```json\r?\n([\s\S]*?)\r?\n```\r?\n<\/details>\s*$/)
+    || message.match(/<!-- dsh-review-result\r?\n([\s\S]*?)\r?\n-->\s*$/)
+  if (!match) throw new Error('Codex final answer does not end with the automation result')
   let value
   try {
     value = JSON.parse(match[1])
@@ -60,4 +69,3 @@ export function githubReviewBody(review, { marker, base, head }) {
   lines.push('', `_Reviewed exact head \`${head}\` against base \`${base}\` with gpt-5.6-sol (medium)._`)
   return lines.join('\n')
 }
-

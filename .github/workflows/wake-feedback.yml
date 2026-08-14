@@ -1,4 +1,4 @@
-name: DSH Review Repair
+name: Wake DSH For Review Feedback
 
 on:
   workflow_call:
@@ -9,13 +9,12 @@ on:
       pull_request_number:
         required: true
         type: number
-      head_sha:
+      feedback_kind:
         required: true
         type: string
-      request_id:
-        required: false
-        type: string
-        default: ''
+      feedback_id:
+        required: true
+        type: number
       controller_sha:
         required: true
         type: string
@@ -26,7 +25,7 @@ concurrency:
 
 jobs:
   repair:
-    name: dsh/review-repair
+    name: dsh/review-feedback
     runs-on: [self-hosted, Windows, X64, dsh-agent]
     timeout-minutes: 210
     permissions:
@@ -48,11 +47,11 @@ jobs:
           path: controller
           persist-credentials: false
 
-      - name: Address Codex review with DSH
+      - name: Address trusted review feedback
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          REPAIR_REQUEST_ID: ${{ inputs.request_id }}
+          FEEDBACK_KIND: ${{ inputs.feedback_kind }}
+          FEEDBACK_ID: ${{ inputs.feedback_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node controller/src/dsh-repair.mjs
+        run: node controller/src/wake-feedback.mjs
