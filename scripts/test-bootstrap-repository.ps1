@@ -76,11 +76,11 @@ try {
   Assert-True ($rendered -match 'recover-backlog\.yml') 'Generated YAML omitted recovery.'
   $issuesWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-issues.yml') -Raw
   foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: write', 'pull-requests: write')) {
-    Assert-True ($issuesWorkflow -match "(?m)^  $([Regex]::Escape($permission))$") "Agent Issues omitted caller permission $permission."
+    Assert-True ($issuesWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent Issues omitted caller permission $permission."
   }
   $landingWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-pr-land.yml') -Raw
   foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: read', 'pull-requests: write')) {
-    Assert-True ($landingWorkflow -match "(?m)^  $([Regex]::Escape($permission))$") "Agent PR Landing omitted caller permission $permission."
+    Assert-True ($landingWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent PR Landing omitted caller permission $permission."
   }
 
   & git -C $temp add .github/workflows
