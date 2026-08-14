@@ -88,6 +88,8 @@ pwsh -NoProfile -File "$controller\scripts\doctor.ps1" -Configuration $config -D
 pwsh -NoProfile -File "$controller\scripts\install.ps1" -Configuration $config -DryRun
 ```
 
+`ControllerSha` must be a published lowercase 40-character SHA that remains permanently reachable from the controller default branch. If a controller PR is squash- or rebase-merged, first verify that the published commit tree exactly matches the reviewed PR-head tree, then pin the published commit; never pin a PR head from a branch that may be deleted. The offline bootstrap renderer does not verify GitHub reachability.
+
 Review the rendered workflows and dry-run output before removing `-DryRun`. The actual installer validates the active GitHub identity, runner archive checksum, immutable operations snapshot, repository variable, and branch protection before it starts either worker. It stores no model or GitHub credential in this repository.
 
 ## Runner isolation
