@@ -19,6 +19,7 @@ test('every privileged reusable workflow pins actions and checks out its own imm
 test('Codex publication is job-scoped and landing is a separate workflow', async () => {
   const review = await readFile(new URL('codex-review.yml', workflowDirectory), 'utf8')
   const landing = await readFile(new URL('land-pr.yml', workflowDirectory), 'utf8')
+  const landingController = await readFile(new URL('../src/land-pr.mjs', import.meta.url), 'utf8')
   assert.match(review, /checks: write/)
   assert.doesNotMatch(review, /statuses: write/)
   assert.match(review, /name: codex\/review/)
@@ -26,4 +27,7 @@ test('Codex publication is job-scoped and landing is a separate workflow', async
   assert.match(review, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/)
   assert.doesNotMatch(review, /--auto/)
   assert.match(landing, /node controller\/src\/land-pr\.mjs/)
+  assert.match(landing, /REQUIRED_CI_CHECK_NAME: \$\{\{ inputs\.ci_check_name \}\}/)
+  assert.doesNotMatch(landingController, /branches\/.*\/protection/)
+  assert.match(landingController, /\{ context: requiredCiCheckName, app_id: 15368 \}/)
 })

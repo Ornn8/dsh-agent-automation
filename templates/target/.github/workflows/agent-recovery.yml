@@ -2,7 +2,7 @@ name: Agent Recovery
 
 on:
   workflow_run:
-    workflows: [Agent Issues, Agent PR Rework, Agent PR Review]
+    workflows: [Agent Issues, Agent PR Rework, Agent PR CI Repair, Agent PR Review]
     types: [completed]
 
 permissions:

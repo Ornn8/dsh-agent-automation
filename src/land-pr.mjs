@@ -11,6 +11,7 @@ const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const githubEnvironment = actionsCredentialEnvironment()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
+const requiredCiCheckName = requiredEnv('REQUIRED_CI_CHECK_NAME')
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
@@ -20,6 +21,9 @@ const trustedReview = {
 if (!/^[0-9a-f]{40}$/i.test(expectedHead)) throw new Error('HEAD_SHA must be a full commit SHA')
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
 if (!Number.isSafeInteger(requestedNumber) || requestedNumber < 0) throw new Error('Invalid PR_NUMBER')
+if (requiredCiCheckName.length > 100 || requiredCiCheckName === 'codex/review') {
+  throw new Error('REQUIRED_CI_CHECK_NAME must name one independent CI aggregate')
+}
 
 async function ghJson(args, description) {
   const result = await run(githubExecutable, args, { env: githubEnvironment })
@@ -45,24 +49,6 @@ async function readPullRequest() {
     'pr', 'view', String(pullRequestNumber), '--repo', repository,
     '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefOid,mergeStateStatus,url',
   ], 'pull request for landing')
-}
-
-async function readRequiredChecks(baseRefName) {
-  const protection = await ghJson([
-    'api', `repos/${repository}/branches/${encodeURIComponent(baseRefName)}/protection`,
-  ], 'base branch protection')
-  const required = protection.required_status_checks
-  if (required?.strict !== true) {
-    throw new Error('The base branch must require branches to be up to date before merging')
-  }
-  const checks = required?.checks || []
-  const appBoundNames = new Set(checks.map(check => check.context))
-  return [
-    ...checks,
-    ...(required?.contexts || [])
-      .filter(context => !appBoundNames.has(context))
-      .map(context => ({ context, app_id: null })),
-  ]
 }
 
 async function readCheckRuns() {
@@ -92,8 +78,7 @@ if (pullRequest.baseRefName !== defaultBranch) {
   process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: base branch is not ${defaultBranch}.\n`)
   process.exit(0)
 }
-const requiredChecks = await readRequiredChecks(pullRequest.baseRefName)
-if (requiredChecks.length === 0) throw new Error('The base branch has no required status checks')
+const requiredChecks = [{ context: requiredCiCheckName, app_id: 15368 }]
 
 const checkRuns = await readCheckRuns()
 const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)
@@ -109,14 +94,12 @@ current.repository = repository
 if (current.baseRefName !== defaultBranch) {
   throw new Error(`Pull request base changed before merge: expected ${defaultBranch}`)
 }
-const currentRequiredChecks = await readRequiredChecks(current.baseRefName)
-if (currentRequiredChecks.length === 0) throw new Error('The base branch has no required status checks')
 const currentCheckRuns = await readCheckRuns()
 const currentReviewProof = await readLatestReviewProof(current, currentCheckRuns)
 const currentDecision = evaluateLanding({
   pullRequest: current,
   expectedHead,
-  requiredChecks: currentRequiredChecks,
+  requiredChecks,
   checkRuns: currentCheckRuns,
   reviewProof: currentReviewProof,
   trustedReview,

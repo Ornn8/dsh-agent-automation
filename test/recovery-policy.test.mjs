@@ -24,6 +24,7 @@ function run(overrides = {}) {
 test('only a failed or cancelled top-level agent run with immutable controller provenance can recover', () => {
   const trust = { controllerRepository: controller, controllerSha: sha }
   assert.equal(trustedFailedAgentRun({ run: run(), repository, trust }), 'pull-request')
+  assert.equal(trustedFailedAgentRun({ run: run({ name: 'Agent PR CI Repair' }), repository, trust }), 'pull-request')
   assert.equal(trustedFailedAgentRun({ run: run({ conclusion: 'cancelled' }), repository, trust }), 'pull-request')
   assert.equal(trustedFailedAgentRun({ run: run({ name: 'Agent Recovery' }), repository, trust }), null)
   assert.equal(trustedFailedAgentRun({ run: run({ referenced_workflows: [] }), repository, trust }), null)
