@@ -176,6 +176,15 @@ test('operations directory creation uses a supported New-Item path parameter', a
   assert.doesNotMatch(directoryFunction, /New-Item[^\n]+-LiteralPath/)
 })
 
+test('scheduled tasks use the installer-resolved absolute PowerShell host', async () => {
+  const installer = await readFile(new URL('../scripts/install.ps1', import.meta.url), 'utf8')
+  assert.match(installer, /\$pwshExecutable = \(Get-Command pwsh\.exe -ErrorAction Stop\)\.Source/)
+  assert.equal((installer.match(/New-ScheduledTaskAction -Execute \$pwshExecutable/g) ?? []).length, 2)
+  assert.doesNotMatch(installer, /New-ScheduledTaskAction -Execute 'pwsh\.exe'/)
+  assert.match(installer, /\$action\.PSObject\.Properties\['Arguments'\]/)
+  assert.doesNotMatch(installer, /\[string\]\$_\.Arguments/)
+})
+
 test('DSH Web session interruption fails the controller', async () => {
   const fake = visibleSessionFetch('interrupted')
   await assert.rejects(runDshWebSession({
