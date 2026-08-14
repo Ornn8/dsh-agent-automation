@@ -3,50 +3,69 @@ name: Agent Pipeline Health
 on:
   workflow_call:
     inputs:
-      repository:
-        required: true
-        type: string
-      controller_sha:
-        required: true
-        type: string
-      worker_id:
-        required: true
-        type: string
-      runner_labels_json:
+      role:
         required: true
         type: string
 
 concurrency:
-  group: agent-health-${{ inputs.repository }}-${{ inputs.worker_id }}
+  group: agent-health-${{ github.repository }}-${{ inputs.role }}
   cancel-in-progress: true
 
 jobs:
-  health:
-    name: pipeline/health
-    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
+  review:
+    if: inputs.role == 'review'
+    name: pipeline/review-health
+    runs-on: [self-hosted, agent-reviewer]
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
-      - name: Validate immutable controller revision
-        env:
-          CONTROLLER_SHA: ${{ inputs.controller_sha }}
-        run: |
-          if ($env:CONTROLLER_SHA -notmatch '^[0-9a-f]{40}$') {
-            throw 'controller_sha must be a full commit SHA'
-          }
-
-      - name: Check out automation controller
+      - name: Check out the immutable automation controller
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          repository: Ornn8/dsh-agent-automation
-          ref: ${{ inputs.controller_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: controller
           persist-credentials: false
-
-      - name: Verify the idle event bridge without model calls
+      - name: Verify the review worker without a model call
         env:
-          TARGET_REPOSITORY: ${{ inputs.repository }}
-          CONTROLLER_SHA: ${{ inputs.controller_sha }}
-          AGENT_WORKER_ID: ${{ inputs.worker_id }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROLLER_SHA: ${{ job.workflow_sha }}
+          AGENT_ROLE: review
         run: node controller/src/pipeline-health.mjs
+
+  change:
+    if: inputs.role == 'change'
+    name: pipeline/change-health
+    runs-on: [self-hosted, agent-change]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the immutable automation controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: controller
+          persist-credentials: false
+      - name: Verify the change worker without a model call
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROLLER_SHA: ${{ job.workflow_sha }}
+          AGENT_ROLE: change
+        run: node controller/src/pipeline-health.mjs
+
+  reject-unknown-role:
+    if: inputs.role != 'review' && inputs.role != 'change'
+    name: pipeline/invalid-role
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject an unknown role
+        env:
+          AGENT_ROLE: ${{ inputs.role }}
+        run: |
+          echo "Unknown agent role: $AGENT_ROLE" >&2
+          exit 1

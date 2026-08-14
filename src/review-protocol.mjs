@@ -7,9 +7,9 @@ export function automaticRepairRequestId(base, head) {
 }
 
 /** Return whether GitHub already records an automated verdict for this exact head. */
-export function hasExactReviewVerdict(comments, head) {
+export function hasExactReviewVerdict(comments, head, authorLogin = 'github-actions[bot]') {
   const marker = `<!-- codex-review:${head} -->`
-  return comments.some(comment => comment.body?.includes(marker))
+  return comments.some(comment => comment.user?.login === authorLogin && comment.body?.includes(marker))
 }
 
 /** Parse the hidden machine payload from a human-readable Codex final answer. */
@@ -29,21 +29,18 @@ export function parseReviewMessage(message) {
 /** Validate the fail-closed review payload consumed by GitHub automation. */
 export function validateReview(value) {
   if (!value || !['pass', 'block'].includes(value.verdict) || typeof value.summary !== 'string'
-    || !value.summary.trim() || value.summary.length > 4000 || !Array.isArray(value.findings)
+    || !englishLine(value.summary, 4000) || !Array.isArray(value.findings)
     || value.findings.length > 30) {
     throw new Error('Codex returned an invalid review object')
   }
   for (const finding of value.findings) {
     if (!['P0', 'P1'].includes(finding.priority)
       || typeof finding.title !== 'string'
-      || !finding.title.trim()
-      || finding.title.length > 200
+      || !englishLine(finding.title, 200)
       || typeof finding.body !== 'string'
-      || !finding.body.trim()
-      || finding.body.length > 4000
+      || !englishLine(finding.body, 4000)
       || typeof finding.path !== 'string'
-      || !finding.path.trim()
-      || finding.path.length > 500
+      || !repositoryPath(finding.path)
       || !Number.isInteger(finding.line)
       || finding.line < 1) {
       throw new Error('Codex returned an invalid blocking finding')
@@ -56,6 +53,17 @@ export function validateReview(value) {
     throw new Error('A blocking review must contain at least one finding')
   }
   return value
+}
+
+function englishLine(value, limit) {
+  return Boolean(value.trim()) && value.length <= limit && /^[\x20-\x7E]+$/.test(value)
+}
+
+function repositoryPath(value) {
+  if (!value.trim() || value.length > 500 || value.startsWith('/')
+    || /[`\\\r\n]/.test(value)) return false
+  const segments = value.split('/')
+  return segments.every(segment => segment && segment !== '.' && segment !== '..')
 }
 
 /** Render the English GitHub review body for one exact commit. */

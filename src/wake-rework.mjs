@@ -5,6 +5,7 @@ import {
   loadConfig,
   parseJson,
   requiredEnv,
+  resolveRepositoryWorker,
   run,
   trustedAssociation,
 } from './common.mjs'
@@ -14,6 +15,8 @@ const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
 const commentId = Number.parseInt(requiredEnv('COMMENT_ID'), 10)
 const config = await loadConfig()
+const agentRole = requiredEnv('AGENT_ROLE')
+resolveRepositoryWorker(config, repository, agentRole)
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) throw new Error('Invalid PR_NUMBER')
 if (!Number.isSafeInteger(commentId) || commentId < 1) throw new Error('Invalid COMMENT_ID')
@@ -42,6 +45,9 @@ await run(process.execPath, [script], {
     RUN_URL: requiredEnv('RUN_URL'),
     RUNNER_TEMP: requiredEnv('RUNNER_TEMP'),
     DSH_AGENT_CONFIG: requiredEnv('DSH_AGENT_CONFIG'),
+    AGENT_ROLE: agentRole,
+    DEFAULT_BRANCH: requiredEnv('DEFAULT_BRANCH'),
+    CONTROLLER_SHA: requiredEnv('CONTROLLER_SHA'),
   }),
   tee: true,
   timeoutMs: 3 * 60 * 60 * 1000,

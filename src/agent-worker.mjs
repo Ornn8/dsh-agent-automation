@@ -62,10 +62,15 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
     title: requiredText(invocation?.title, 'invocation.title'),
     prompt: requiredText(invocation?.prompt, 'invocation.prompt'),
     timeoutMs: invocation?.timeoutMs,
+    signal: invocation?.signal,
     onStarted: typeof invocation?.onStarted === 'function' ? invocation.onStarted : async () => undefined,
   }
   if (!Number.isSafeInteger(normalizedInvocation.timeoutMs) || normalizedInvocation.timeoutMs < 1) {
     throw new Error('invocation.timeoutMs must be a positive integer')
+  }
+  if (normalizedInvocation.signal !== undefined
+    && (typeof normalizedInvocation.signal !== 'object' || typeof normalizedInvocation.signal.aborted !== 'boolean')) {
+    throw new Error('invocation.signal must be an AbortSignal')
   }
 
   const value = await invoke({ workerId: id, worker, invocation: normalizedInvocation })

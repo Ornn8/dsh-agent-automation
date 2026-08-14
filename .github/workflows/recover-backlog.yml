@@ -1,0 +1,40 @@
+name: Recover Failed Agent Work
+
+on:
+  workflow_call:
+    inputs:
+      source_run_id:
+        required: true
+        type: string
+
+concurrency:
+  group: dsh-recover-${{ github.repository }}-${{ inputs.source_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: dsh/recover-backlog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Check out automation controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Recover one trusted failed agent run
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+          RECOVERY_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node controller/src/recover-backlog.mjs

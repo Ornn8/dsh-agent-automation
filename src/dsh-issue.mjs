@@ -2,13 +2,19 @@ import { mkdtemp } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import {
   hostCredentialEnvironment,
+  githubLogin,
   issueBranch,
+  authenticatedMarker,
+  authorizedIssueBranch,
   loadConfig,
   parseJson,
+  processCancellationSignal,
   removeJobDirectory,
+  resolveRepositoryWorker,
   requiredEnv,
   run,
   trustedAssociation,
+  verifyGithubIdentity,
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
@@ -17,7 +23,10 @@ const repository = requiredEnv('TARGET_REPOSITORY')
 const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const workerId = process.env.AGENT_WORKER_ID?.trim() || 'dsh'
+const workerId = resolveRepositoryWorker(config, repository, requiredEnv('AGENT_ROLE'))
+const cancellation = processCancellationSignal()
+const defaultBranch = requiredEnv('DEFAULT_BRANCH')
+const markerAuthor = githubLogin(config)
 const marker = '<!-- dsh-agent-run -->'
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
@@ -30,11 +39,13 @@ async function ghJson(args, description) {
   return parseJson(result.stdout, description)
 }
 
+await verifyGithubIdentity({ config })
+
 async function upsertStatus(body) {
   const comments = await ghJson([
     'api', `repos/${repository}/issues/${issueNumber}/comments`, '--paginate',
   ], 'Issue comments')
-  const prior = comments.find(comment => comment.body?.includes(marker))
+  const prior = comments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
   if (prior) {
     await run(config.ghExecutable, [
       'api', '--method', 'PATCH', `repos/${repository}/issues/comments/${prior.id}`, '-f', `body=${body}`,
@@ -69,9 +80,11 @@ if (!issue.labels?.some(label => label.name === 'agent/dsh')) {
   throw new Error(`Issue #${issueNumber} no longer has the exact agent/dsh label`)
 }
 
-const branch = issueBranch(issue.body || '', /^\[BUG\]\s+/i.test(issue.title || '')
-  ? { number: issueNumber }
-  : undefined)
+const branch = authorizedIssueBranch(
+  issueNumber,
+  issueBranch(issue.body || '', /^\[BUG\]\s+/i.test(issue.title || '') ? { number: issueNumber } : undefined),
+  defaultBranch,
+)
 const existing = await ghJson([
   'pr', 'list', '--repo', repository, '--state', 'open', '--head', branch,
   '--json', 'number,body,headRefName,baseRefName,url',
@@ -79,12 +92,15 @@ const existing = await ghJson([
 const closesIssue = pr => new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${issueNumber}\\b`, 'i')
   .test(pr.body || '')
 const validExisting = existing.find(pr => pr.headRefName === branch
-  && pr.baseRefName === 'master'
+  && pr.baseRefName === defaultBranch
   && closesIssue(pr))
 if (validExisting) {
   await upsertStatus(statusBody('complete', branch, `Existing pull request: ${validExisting.url}`))
   process.stdout.write(`Issue #${issueNumber} already has ${validExisting.url}\n`)
   process.exit(0)
+}
+if (existing.length > 0) {
+  throw new Error(`Issue #${issueNumber} branch ${branch} is already used by another open pull request`)
 }
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-issue-${issueNumber}-`))
@@ -96,7 +112,7 @@ try {
     'repo', 'clone', repository, checkoutPath, '--', '--filter=blob:none', '--no-checkout',
   ], { env: hostCredentialEnvironment(), tee: true })
   await run(config.gitExecutable, [
-    '-C', checkoutPath, 'fetch', '--no-tags', 'origin', 'master',
+    '-C', checkoutPath, 'fetch', '--no-tags', 'origin', defaultBranch,
   ], { tee: true })
   await run(config.gitExecutable, [
     '-C', checkoutPath, 'fetch', '--no-tags', 'origin', branch,
@@ -111,20 +127,20 @@ try {
     ], { tee: true })
   } else {
     await run(config.gitExecutable, [
-      '-C', checkoutPath, 'switch', '-c', branch, 'origin/master',
+      '-C', checkoutPath, 'switch', '-c', branch, `origin/${defaultBranch}`,
     ], { tee: true })
   }
 
   const prompt = `Execute GitHub Issue #${issueNumber} in ${repository}.
 
-GitHub is the only coordination channel. Read the live Issue, its comments, the repository instructions, and the current master branch before deciding what to do. Use English for every GitHub comment, commit, branch, and pull request field.
+GitHub is the only coordination channel. Read the live Issue, its comments, the repository instructions, and the current \`${defaultBranch}\` branch before deciding what to do. Use English for every GitHub comment, commit, branch, and pull request field.
 
 You own the implementation end to end:
 1. If no valid claim exists, comment exactly \`CLAIMED: starting ${branch}\` on Issue #${issueNumber}.
 2. Work only on branch \`${branch}\` in the current checkout. Do not delegate implementation to Codex or another agent.
 3. Implement the Issue completely, add required tests and documentation, and run the repository checks appropriate to the actual diff.
 4. Commit and push the work yourself.
-5. Open or update one pull request to \`master\`; its body must contain \`Closes #${issueNumber}\` and must report only checks actually run.
+5. Open or update one pull request to \`${defaultBranch}\`; its body must contain \`Closes #${issueNumber}\` and must report only checks actually run.
 6. If you cannot complete the work, leave one English \`BLOCKED:\` Issue comment with concrete evidence and do not claim success.
 
 Do not wait for another local process or WebUI session. Finish only after the pull request exists at the declared branch and exact pushed head, or after posting the BLOCKED handoff.`
@@ -138,6 +154,7 @@ Do not wait for another local process or WebUI session. Finish only after the pu
       title: `[Agent: ${workerId}] 执行 Issue #${issueNumber}`,
       prompt: `${prompt}\n\nFinish this local agent session with a concise Chinese report. Keep all GitHub-visible content in English.`,
       timeoutMs: 3 * 60 * 60 * 1000,
+      signal: cancellation.signal,
       onStarted: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible ${workerId} session: ${sessionId}.`)),
     },
     adapters: createAgentAdapters(),
@@ -148,10 +165,10 @@ Do not wait for another local process or WebUI session. Finish only after the pu
     '--json', 'number,body,headRefName,baseRefName,url,headRefOid',
   ], 'resulting pull requests')
   const pullRequest = pullRequests.find(pr => pr.headRefName === branch
-    && pr.baseRefName === 'master'
+    && pr.baseRefName === defaultBranch
     && closesIssue(pr))
   if (!pullRequest) {
-    throw new Error(`DSH exited successfully but did not create an open ${branch} -> master pull request that closes #${issueNumber}`)
+    throw new Error(`DSH exited successfully but did not create an open ${branch} -> ${defaultBranch} pull request that closes #${issueNumber}`)
   }
 
   const remoteHead = (await run(config.gitExecutable, [
@@ -172,5 +189,6 @@ Do not wait for another local process or WebUI session. Finish only after the pu
   ], { env: hostCredentialEnvironment() }).catch(() => undefined)
   throw error
 } finally {
+  cancellation.dispose()
   await removeJobDirectory(runnerTemp, jobPath)
 }

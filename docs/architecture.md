@@ -6,7 +6,7 @@
 
 This Module owns WorkRequest validation, exact revision identity, idempotency, review verdicts, repair postconditions, and landing eligibility. It contains no model-provider logic. Its Interface uses roles (`change` and `review`) rather than product names.
 
-The WorkRequest is the durable Seam between roles. A producer ends after GitHub accepts the event. A consumer starts in a separate workflow run and independently revalidates the live pull request.
+The WorkRequest is the durable Seam between roles. Its subject is either one Issue or one pull request; the request kind fixes which subject is valid. A producer ends after GitHub accepts the event. A consumer starts in a separate workflow run and independently revalidates the live pull request.
 
 ### Agent Worker
 
@@ -37,7 +37,7 @@ flowchart LR
   G["GitHub event"] --> C["Deterministic controller"]
   C -->|"review role"| RQ["agent-reviewer queue"]
   RQ --> RA["Configured review Worker"]
-  RA -->|"PASS"| L["Deterministic landing"]
+  RA -->|"immutable Actions proof"| L["Deterministic landing"]
   RA -->|"BLOCK"| W["Immutable WorkRequest"]
   W --> CQ["agent-change queue"]
   CQ --> CA["Configured change Worker"]
@@ -49,10 +49,17 @@ There is no direct Agent-to-Agent call. GitHub records the handoff before the pr
 ## Termination boundaries
 
 - A Worker run terminates only with `completed`, `blocked`, `superseded`, `timed-out`, or `failed`.
+- Landing accepts only the controller-created `codex/review` CheckRun on the exact PR head. Its GitHub Actions app, details URL, exact `pull_request_target` run, PR base/head, and `referenced_workflows` path `${controllerRepository}/${workflowPath}@${controllerSha}` plus SHA bind it to the trusted controller. Comments and commit statuses are not landing authority.
+- The review Adapter starts each turn in an empty controller-created directory and exposes the head checkout only as read-only data. Repository instructions come from the verified base revision; head-authored instructions cannot become reviewer policy.
 - A controller accepts `completed` only after independently checking the role postcondition, such as a new pull request head, an exact-pair verdict, or an explicit same-head rereview request.
+- Workflows select only the immutable `change` or `review` role. The local controller resolves its worker from the one configured repository mapping and rejects any missing, duplicate, or unknown mapping before invoking an adapter.
 - Workflow and local process timeouts are finite. Cancellation does not become success.
 - A review BLOCK terminates the review job after publishing a WorkRequest. It does not wait for change work.
+- A default-branch advance updates each behind same-repository pull request with its expected head SHA. The synchronize event owns the next review; stacked and fork pull requests are not modified.
 - A stopped role runner leaves its matching GitHub job queued. Other runner labels continue to accept work.
-- Landing terminates with merged, deferred for checks, stale revision, blocked, or failed. It never reuses a verdict from another base/head pair.
+- Landing terminates with merged, deferred for checks, stale revision, blocked, or failed. It requires strict protected checks, rereads the current branch protection, checks, and trusted review immediately before merging, and never reuses a verdict from another base/head pair.
+- DSH Web RPC retries only bounded transient transport failures with the same RPC id and the original visible session. A cancellation signal cancels that session. Exhausted failures retain their transient or terminal classification in the durable failed handoff; no controller waits indefinitely for a disconnected local host.
+- A completed failed or cancelled top-level Agent Issues or Agent PR Rework run wakes one model-free recovery workflow. Recovery verifies the recorded reusable controller reference, revalidates the current Issue or pull request head, and records at most three exact-subject retry attempts. The cap is a visible `agent/dsh-failed` dead-letter; labels and comments are audit state and cannot authorize recovery.
+- Issue implementation uses the trusted Issue's validated branch declaration, or `agent/issue-<number>` for a bug without one. The controller rejects the protected default branch and any declared branch already used by another open pull request. Marker authorship is audit data used only to avoid overwriting another actor's comment; it never authorizes landing or privileged work.
 
 The remaining common failure domains are GitHub, the network, and any machine that hosts more than one runner. Moving a runner to another host changes only its labels and machine-local worker configuration.

@@ -89,7 +89,50 @@ export async function loadConfig() {
       throw new Error(`runner configuration is missing ${name}`)
     }
   }
+  if (new Set(config.repositories).size !== config.repositories.length) {
+    throw new Error('runner configuration repositories must not contain duplicates')
+  }
+  for (const repository of config.repositories) {
+    resolveRepositoryWorker(config, repository, 'change')
+    resolveRepositoryWorker(config, repository, 'review')
+  }
+  githubLogin(config)
   return config
+}
+
+/** Resolve a worker from the one local mapping permitted for a repository role. */
+export function resolveRepositoryWorker(config, repository, role) {
+  if (!['change', 'review'].includes(role)) throw new Error(`Unknown agent role ${role}`)
+  const mappings = config?.operations?.repositoryMappings
+  if (!Array.isArray(mappings)) throw new Error('runner configuration operations.repositoryMappings must be an array')
+  const matches = mappings.filter(mapping => mapping?.repository === repository)
+  if (matches.length !== 1) throw new Error(`Repository ${repository} must have exactly one mapping`)
+  const workerId = matches[0][role === 'change' ? 'changeWorker' : 'reviewWorker']
+  if (typeof workerId !== 'string' || !workerId.trim()) {
+    throw new Error(`Repository ${repository} ${role} mapping must name a worker`)
+  }
+  if (!config?.workers?.[workerId]) throw new Error(`Repository ${repository} ${role} mapping has unknown worker ${workerId}`)
+  return workerId
+}
+
+/** Return the immutable local GitHub identity that owns controller markers. */
+export function githubLogin(config) {
+  const login = config?.github?.login
+  if (typeof login !== 'string' || !/^[A-Za-z0-9-]{1,39}$/.test(login)) {
+    throw new Error('runner configuration github.login must be a GitHub login')
+  }
+  return login
+}
+
+/** Fail closed when the active host credential differs from the configured controller identity. */
+export async function verifyGithubIdentity({ config, runCommand = run }) {
+  const expectedLogin = githubLogin(config)
+  const result = await runCommand(config.ghExecutable, ['api', 'user'], { env: hostCredentialEnvironment() })
+  const actualLogin = parseJson(result.stdout, 'GitHub authenticated user').login
+  if (actualLogin !== expectedLogin) {
+    throw new Error(`GitHub host credential is ${actualLogin || '<missing>'}, expected ${expectedLogin}`)
+  }
+  return expectedLogin
 }
 
 /** Return an environment that cannot make GitHub CLI use an Actions token. */
@@ -98,6 +141,28 @@ export function hostCredentialEnvironment(overrides = {}, source = process.env) 
   delete environment.GH_TOKEN
   delete environment.GITHUB_TOKEN
   return Object.assign(environment, overrides)
+}
+
+const REVIEWER_ENVIRONMENT_KEYS = new Set([
+  'APPDATA', 'COMSPEC', 'LOCALAPPDATA', 'NUMBER_OF_PROCESSORS', 'OS', 'PATH',
+  'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'PROGRAMDATA', 'PROGRAMFILES',
+  'PROGRAMFILES(X86)', 'PROGRAMW6432', 'SYSTEMROOT', 'TEMP', 'TMP',
+  'USERPROFILE', 'WINDIR',
+])
+
+/** Return a minimal process environment for an untrusted, read-only reviewer. */
+export function reviewerCredentialEnvironment(overrides = {}, source = process.env) {
+  const environment = {}
+  for (const [name, value] of Object.entries(source)) {
+    if (REVIEWER_ENVIRONMENT_KEYS.has(name.toUpperCase())) environment[name] = value
+  }
+  return Object.assign(environment, {
+    GCM_INTERACTIVE: 'Never',
+    GH_PROMPT_DISABLED: '1',
+    GIT_CONFIG_GLOBAL: 'NUL',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  }, overrides)
 }
 
 /** Return an environment that forces GitHub CLI to use the current Actions token. */
@@ -109,13 +174,18 @@ export function actionsCredentialEnvironment(overrides = {}, source = process.en
   return environment
 }
 
+/** Return the backtick-delimited branch explicitly declared by an Issue. */
+export function declaredIssueBranch(body) {
+  return String(body || '').match(/\b(?:branch|branch name)\s*:?\s*`([^`\r\n]+)`/i)?.[1]?.trim() || ''
+}
+
 /** Parse and validate the branch declared by an automation Issue. */
 export function issueBranch(body, fallback) {
-  const branch = body.match(/^\s*(?:[-*]\s*)?(?:branch|branch name)\s*:\s*`([^`]+)`\s*$/im)?.[1]?.trim()
+  const branch = declaredIssueBranch(body)
   if (!branch && Number.isSafeInteger(fallback?.number) && fallback.number > 0) {
     return `agent/issue-${fallback.number}`
   }
-  if (!branch) throw new Error('The Issue must declare `Branch: `name`` on its own line')
+  if (!branch) throw new Error('The Issue must declare a backtick-delimited branch name')
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(branch)
     || branch.includes('..')
     || branch.includes('@{')
@@ -129,6 +199,38 @@ export function issueBranch(body, fallback) {
 /** Return whether an Issue author may dispatch the privileged local agent. */
 export function trustedAssociation(association) {
   return ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association)
+}
+
+/** Return whether a marker was authored by the configured controller identity. */
+export function authenticatedMarker(comment, marker, login) {
+  return typeof login === 'string' && login.length > 0
+    && comment?.user?.login === login
+    && comment.body?.includes(marker)
+}
+
+/** Reject an Issue branch that would write the repository's protected default branch. */
+export function authorizedIssueBranch(issueNumber, branch, defaultBranch) {
+  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) throw new Error('Issue number must be positive')
+  if (typeof branch !== 'string' || !branch) throw new Error(`Issue #${issueNumber} has no work branch`)
+  if (branch === defaultBranch) throw new Error(`Issue #${issueNumber} cannot use the protected default branch ${defaultBranch}`)
+  return branch
+}
+
+/** Bind normal process cancellation signals to one controller-owned operation. */
+export function processCancellationSignal(processImpl = process) {
+  const controller = new AbortController()
+  const listeners = new Map()
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const listener = () => controller.abort(new Error(`Received ${signal}`))
+    listeners.set(signal, listener)
+    processImpl.once(signal, listener)
+  }
+  return {
+    signal: controller.signal,
+    dispose() {
+      for (const [signal, listener] of listeners) processImpl.removeListener(signal, listener)
+    },
+  }
 }
 
 /** Remove a job directory only when it is a strict descendant of its declared root. */

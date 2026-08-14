@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   createReviewRepairRequest,
+  createIssueImplementationRequest,
+  isReviewRepairRequestId,
   parseAgentWorkRequest,
   repositoryDispatchBody,
 } from '../src/work-request.mjs'
@@ -19,7 +21,7 @@ test('review repair is an immutable role request rather than an agent command', 
 
   assert.deepEqual(request, {
     version: 1,
-    requestId: `review-repair:${base}:${head}`,
+    requestId: `review-repair-${base}-${head}`,
     role: 'change',
     kind: 'review-repair',
     repository: 'owner/repository',
@@ -27,6 +29,16 @@ test('review repair is an immutable role request rather than an agent command', 
     revision: { base, head },
   })
   assert.equal(request.workerId, undefined)
+  assert.match(request.requestId, /^[A-Za-z0-9._-]{1,100}$/)
+  assert.equal(isReviewRepairRequestId(request.requestId, head), true)
+  assert.equal(isReviewRepairRequestId(request.requestId, base), false)
+})
+
+test('issue implementation requests use the same typed subject format as pull request work', () => {
+  const request = createIssueImplementationRequest({ repository: 'owner/repository', issueNumber: 7, base })
+  assert.deepEqual(request.subject, { type: 'issue', number: 7 })
+  assert.equal(request.kind, 'issue-implementation')
+  assert.throws(() => parseAgentWorkRequest({ ...request, subject: { type: 'pull-request', number: 7 } }), /subject/)
 })
 
 test('repository dispatch transports the complete work request', () => {

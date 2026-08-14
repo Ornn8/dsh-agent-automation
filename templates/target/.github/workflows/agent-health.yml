@@ -1,0 +1,20 @@
+name: Agent Pipeline Health
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  review-worker:
+    name: review worker
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/pipeline-health.yml@{{CONTROLLER_SHA}}
+    with:
+      role: review
+
+  change-worker:
+    name: change worker
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/pipeline-health.yml@{{CONTROLLER_SHA}}
+    with:
+      role: change

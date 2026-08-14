@@ -1,24 +1,28 @@
+import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
 import {
-  hostCredentialEnvironment,
-  loadConfig,
-  parseJson,
-  requiredEnv,
-  run,
-} from './common.mjs'
-import { evaluateLanding } from './landing-policy.mjs'
+  evaluateLanding,
+  hasTrustedExactReviewRun,
+  reviewRunIdFromDetailsUrl,
+} from './landing-policy.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const expectedHead = requiredEnv('HEAD_SHA')
 const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
-const config = await loadConfig()
-const githubEnvironment = hostCredentialEnvironment()
+const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
+const githubEnvironment = actionsCredentialEnvironment()
+const defaultBranch = requiredEnv('DEFAULT_BRANCH')
+const trustedReview = {
+  controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
+  controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
+  workflowPath: requiredEnv('TRUSTED_REVIEW_WORKFLOW_PATH'),
+}
 
-if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!/^[0-9a-f]{40}$/i.test(expectedHead)) throw new Error('HEAD_SHA must be a full commit SHA')
+if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
 if (!Number.isSafeInteger(requestedNumber) || requestedNumber < 0) throw new Error('Invalid PR_NUMBER')
 
 async function ghJson(args, description) {
-  const result = await run(config.ghExecutable, args, { env: githubEnvironment })
+  const result = await run(githubExecutable, args, { env: githubEnvironment })
   return parseJson(result.stdout, description)
 }
 
@@ -39,34 +43,89 @@ if (pullRequestNumber === 0) {
 async function readPullRequest() {
   return ghJson([
     'pr', 'view', String(pullRequestNumber), '--repo', repository,
-    '--json', 'state,isDraft,baseRefName,baseRefOid,headRefOid,mergeStateStatus,statusCheckRollup,url',
+    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefOid,mergeStateStatus,url',
   ], 'pull request for landing')
 }
 
+async function readRequiredChecks(baseRefName) {
+  const protection = await ghJson([
+    'api', `repos/${repository}/branches/${encodeURIComponent(baseRefName)}/protection`,
+  ], 'base branch protection')
+  const required = protection.required_status_checks
+  if (required?.strict !== true) {
+    throw new Error('The base branch must require branches to be up to date before merging')
+  }
+  const checks = required?.checks || []
+  const appBoundNames = new Set(checks.map(check => check.context))
+  return [
+    ...checks,
+    ...(required?.contexts || [])
+      .filter(context => !appBoundNames.has(context))
+      .map(context => ({ context, app_id: null })),
+  ]
+}
+
+async function readCheckRuns() {
+  const pages = await ghJson([
+    'api', `repos/${repository}/commits/${expectedHead}/check-runs`, '--paginate', '--slurp',
+  ], 'head check runs')
+  return pages.flatMap(page => page.check_runs || [])
+}
+
+async function readLatestReviewProof(pullRequest, checkRuns) {
+  const candidates = [...checkRuns]
+    .filter(checkRun => checkRun.name === 'codex/review')
+    .sort((left, right) => (right.id || 0) - (left.id || 0))
+  for (const checkRun of candidates) {
+    const runId = reviewRunIdFromDetailsUrl(checkRun.details_url, repository)
+    if (!runId) continue
+    const workflowRun = await ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `review workflow run ${runId}`)
+    const candidate = { checkRun, run: workflowRun }
+    if (hasTrustedExactReviewRun({ pullRequest, reviewProof: candidate, trustedReview })) return candidate
+  }
+  return null
+}
+
 const pullRequest = await readPullRequest()
-const comments = await ghJson([
-  'api', `repos/${repository}/issues/${pullRequestNumber}/comments`, '--paginate',
-], 'pull request comments for landing')
-const protection = await ghJson([
-  'api', `repos/${repository}/branches/${encodeURIComponent(pullRequest.baseRefName)}/protection`,
-], 'base branch protection')
-const requiredChecks = protection.required_status_checks?.contexts || []
+pullRequest.repository = repository
+if (pullRequest.baseRefName !== defaultBranch) {
+  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: base branch is not ${defaultBranch}.\n`)
+  process.exit(0)
+}
+const requiredChecks = await readRequiredChecks(pullRequest.baseRefName)
 if (requiredChecks.length === 0) throw new Error('The base branch has no required status checks')
 
-const decision = evaluateLanding({ pullRequest, expectedHead, requiredChecks, comments })
+const checkRuns = await readCheckRuns()
+const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)
+
+const decision = evaluateLanding({ pullRequest, expectedHead, requiredChecks, checkRuns, reviewProof, trustedReview })
 if (!decision.ready) {
   process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: ${decision.reason}.\n`)
   process.exit(0)
 }
 
 const current = await readPullRequest()
-if (current.baseRefOid !== pullRequest.baseRefOid
-  || current.headRefOid !== pullRequest.headRefOid
-  || current.mergeStateStatus !== 'CLEAN') {
-  throw new Error('Pull request changed after landing gates were evaluated')
+current.repository = repository
+if (current.baseRefName !== defaultBranch) {
+  throw new Error(`Pull request base changed before merge: expected ${defaultBranch}`)
+}
+const currentRequiredChecks = await readRequiredChecks(current.baseRefName)
+if (currentRequiredChecks.length === 0) throw new Error('The base branch has no required status checks')
+const currentCheckRuns = await readCheckRuns()
+const currentReviewProof = await readLatestReviewProof(current, currentCheckRuns)
+const currentDecision = evaluateLanding({
+  pullRequest: current,
+  expectedHead,
+  requiredChecks: currentRequiredChecks,
+  checkRuns: currentCheckRuns,
+  reviewProof: currentReviewProof,
+  trustedReview,
+})
+if (current.baseRefOid !== pullRequest.baseRefOid || !currentDecision.ready) {
+  throw new Error(`Pull request or landing evidence changed before merge: ${currentDecision.reason}`)
 }
 
-await run(config.ghExecutable, [
+await run(githubExecutable, [
   'pr', 'merge', String(pullRequestNumber), '--repo', repository,
   '--squash', '--delete-branch', '--match-head-commit', expectedHead,
 ], { env: githubEnvironment, tee: true })

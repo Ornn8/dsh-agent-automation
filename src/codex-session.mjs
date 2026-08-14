@@ -1,11 +1,63 @@
 import { spawn } from 'node:child_process'
 import readline from 'node:readline'
 
+const REVIEW_SHELL_ENVIRONMENT_KEYS = [
+  'COMSPEC', 'PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'TEMP',
+  'TMP', 'WINDIR', 'GCM_INTERACTIVE', 'GH_CONFIG_DIR', 'GH_PROMPT_DISABLED',
+  'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_TERMINAL_PROMPT',
+]
+
+function disabledEntries(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(Object.keys(value)
+    .filter(name => name !== '_default')
+    .map(name => [name, { enabled: false }]))
+}
+
+/** Build the task-local Codex configuration for a credential-free reviewer shell. */
+export function reviewThreadConfig(environment, effectiveConfig = {}) {
+  const set = {}
+  for (const name of REVIEW_SHELL_ENVIRONMENT_KEYS) {
+    if (typeof environment[name] === 'string' && environment[name]) set[name] = environment[name]
+  }
+  return {
+    shell_environment_policy: { inherit: 'none', set },
+    features: { memories: false },
+    memories: { generate_memories: false, use_memories: false },
+    agents: { enabled: false },
+    apps: {
+      _default: {
+        enabled: false,
+        destructive_enabled: false,
+        open_world_enabled: false,
+      },
+      ...disabledEntries(effectiveConfig.apps),
+    },
+    mcp_servers: disabledEntries(effectiveConfig.mcp_servers),
+    plugins: disabledEntries(effectiveConfig.plugins),
+    notify: [],
+    web_search: 'disabled',
+  }
+}
+
+/** Restrict a reviewer turn to one immutable checkout and no tool network. */
+export function reviewSandboxPolicy(taskCwd, reviewCwd) {
+  return {
+    type: 'readOnly',
+    access: {
+      type: 'restricted',
+      includePlatformDefaults: true,
+      readableRoots: [taskCwd, reviewCwd],
+    },
+    networkAccess: false,
+  }
+}
+
 /** Return stale automated review task ids while preserving the newest tasks. */
 export function reviewTaskIdsToArchive(threads, currentThreadId, keep = 6) {
   const reviews = threads.filter(thread => {
     const title = thread.name ?? thread.title
-    return title?.startsWith('[GitHub Review] ')
+    return title?.startsWith('[GitHub 审查] ') || title?.startsWith('[GitHub Review] ')
   })
   const retained = [
     currentThreadId,
@@ -21,13 +73,17 @@ export async function runReviewTask({
   prompt,
   title,
   projectCwd,
+  taskCwd = projectCwd,
+  reviewCwd = projectCwd,
   environment,
   model = 'gpt-5.6-sol',
   effort = 'medium',
   keep = 6,
   timeoutMs = 60 * 60 * 1000,
+  signal,
   onCreated = async () => undefined,
 }) {
+  if (signal?.aborted) throw new Error('Codex review task was cancelled before it started')
   const child = spawn(node, [codexScript, 'app-server', '--listen', 'stdio://'], {
     cwd: projectCwd,
     windowsHide: true,
@@ -36,9 +92,11 @@ export async function runReviewTask({
   })
   const pending = new Map()
   let nextId = 0
+  let threadId
   let turnId
   let finalMessage = ''
   let settled = false
+  let forceStopTimer
 
   function send(message) {
     child.stdin.write(`${JSON.stringify(message)}\n`)
@@ -105,22 +163,42 @@ export async function runReviewTask({
       finish(reject, error)
     })
   })
+  void completion.catch(() => undefined)
 
   child.stderr.on('data', chunk => process.stderr.write(chunk))
+
+  const cancel = () => {
+    if (!threadId || !turnId) {
+      child.kill()
+      return
+    }
+    try {
+      send({ id: ++nextId, method: 'turn/interrupt', params: { threadId, turnId } })
+      forceStopTimer = setTimeout(() => child.kill(), 5_000)
+    } catch {
+      child.kill()
+    }
+  }
+  signal?.addEventListener('abort', cancel, { once: true })
 
   try {
     await call('initialize', {
       clientInfo: { name: 'dsh_github_review', title: 'DSH GitHub Review', version: '1.0.0' },
     })
     send({ method: 'initialized', params: {} })
+    const configured = await call('config/read', { includeLayers: false })
+    if (!configured?.config || typeof configured.config !== 'object') {
+      throw new Error('Codex App Server did not return an effective configuration')
+    }
     const started = await call('thread/start', {
       cwd: projectCwd,
       model,
       approvalPolicy: 'never',
       sandbox: 'read-only',
       serviceName: 'dsh_github_review',
+      config: reviewThreadConfig(environment, configured.config),
     })
-    const threadId = started.thread.id
+    threadId = started.thread.id
     await call('thread/name/set', { threadId, name: title })
     await onCreated({ sessionId: threadId })
     process.stdout.write(`ChatGPT Desktop review task created: ${threadId}\n`)
@@ -138,8 +216,9 @@ export async function runReviewTask({
     const turn = await call('turn/start', {
       threadId,
       input: [{ type: 'text', text: prompt }],
+      cwd: taskCwd,
       approvalPolicy: 'never',
-      sandboxPolicy: { type: 'readOnly', access: { type: 'fullAccess' } },
+      sandboxPolicy: reviewSandboxPolicy(taskCwd, reviewCwd),
       model,
       effort,
     })
@@ -148,6 +227,8 @@ export async function runReviewTask({
     if (!finalMessage.trim()) throw new Error('Codex review task completed without a final assistant message')
     return { threadId, finalMessage: finalMessage.trim() }
   } finally {
+    signal?.removeEventListener('abort', cancel)
+    clearTimeout(forceStopTimer)
     child.stdin.end()
     child.kill()
   }

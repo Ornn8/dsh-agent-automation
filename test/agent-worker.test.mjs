@@ -146,7 +146,15 @@ test('the Codex adapter satisfies the worker interface without GitHub credential
 
   assert.equal(calls[0].model, 'gpt-5.6-sol')
   assert.equal(calls[0].effort, 'medium')
+  assert.equal(calls[0].projectCwd, 'F:\\project')
+  assert.equal(calls[0].reviewCwd, 'F:\\checkout')
+  assert.notEqual(calls[0].taskCwd, calls[0].reviewCwd)
+  assert.equal(calls[0].taskCwd.startsWith('F:\\codex-review-context-'), true)
   assert.equal(calls[0].environment.GITHUB_TOKEN, undefined)
+  assert.equal(calls[0].environment.GH_TOKEN, undefined)
+  assert.equal(calls[0].environment.DEEPSEEK_API_KEY, undefined)
+  assert.equal(calls[0].environment.GH_CONFIG_DIR, 'F:\\CodexData\\.dsh-agent-automation\\reviewer-gh')
+  assert.equal(calls[0].environment.GIT_CONFIG_GLOBAL, 'NUL')
   assert.equal(receipt.sessionId, 'codex-thread')
   assert.equal(receipt.output, 'PASS')
 })
@@ -182,4 +190,18 @@ test('worker health is adapter-specific and makes no task invocation', async () 
   })
   assert.equal(calls[0].workerId, 'reviewer')
   assert.deepEqual(result, { workerId: 'reviewer', detail: 'ready' })
+})
+
+test('a worker passes controller cancellation through its adapter invocation', async () => {
+  const controller = new AbortController()
+  let received
+  await runAgentWorker({
+    config: { workers: { dsh: { adapter: 'fake' } } }, workerId: 'dsh',
+    invocation: { taskId: 'cancel', cwd: 'F:\\checkout', title: 'Cancel', prompt: 'Stop.', timeoutMs: 1, signal: controller.signal },
+    adapters: { fake: async ({ invocation }) => {
+      received = invocation.signal
+      return { sessionId: 'session', outcome: 'failed' }
+    } },
+  })
+  assert.equal(received, controller.signal)
 })

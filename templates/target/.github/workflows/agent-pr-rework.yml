@@ -1,0 +1,42 @@
+name: Agent PR Rework
+
+# Configure DSH_AUTOMATION_CI_WORKFLOW to "{{CI_WORKFLOW_NAME}}" before enabling CI repair requests.
+
+on:
+  issue_comment:
+    types: [created]
+  repository_dispatch:
+    types: [dsh-repair, agent_work_requested]
+
+permissions:
+  contents: read
+
+jobs:
+  dsh-comment-rework:
+    if: >-
+      github.event_name == 'issue_comment'
+      && github.event.issue.pull_request
+      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      && (startsWith(github.event.comment.body, '@dsh ')
+        || startsWith(github.event.comment.body, 'DSH: '))
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/wake-rework.yml@{{CONTROLLER_SHA}}
+    with:
+      pull_request_number: ${{ github.event.issue.number }}
+      comment_id: ${{ github.event.comment.id }}
+
+  dsh-repair:
+    if: >-
+      github.event_name == 'repository_dispatch'
+      && (github.event.action == 'dsh-repair'
+        || (github.event.action == 'agent_work_requested'
+          && github.event.client_payload.version == 1
+          && github.event.client_payload.role == 'change'
+          && github.event.client_payload.kind == 'review-repair'
+          && github.event.client_payload.repository == github.repository
+          && github.event.client_payload.subject.type == 'pull-request'))
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-repair.yml@{{CONTROLLER_SHA}}
+    with:
+      pull_request_number: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.subject.number || github.event.client_payload.pr_number }}
+      head_sha: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.revision.head || github.event.client_payload.head_sha }}
+      request_id: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.requestId || github.event.client_payload.request_id }}
+      ci_workflow_name: ${{ vars.DSH_AUTOMATION_CI_WORKFLOW }}

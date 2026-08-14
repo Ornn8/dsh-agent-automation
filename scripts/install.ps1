@@ -1,0 +1,303 @@
+[CmdletBinding(SupportsShouldProcess)]
+param(
+  [Parameter(Mandatory)][string]$Configuration,
+  [ValidateSet('change', 'review')][string[]]$Roles = @('change', 'review'),
+  [string[]]$Repositories,
+  [switch]$NoStart,
+  [switch]$Migrate,
+  [switch]$ConfirmMigration,
+  [switch]$DryRun
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $repoRoot 'ops\Automation.Operations.psm1') -Force
+$loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun
+$ops = $loaded.Operations
+$runtimeSourceRoot = Join-Path $repoRoot 'ops'
+$runtimeSnapshot = Get-OperationsRuntimeSnapshotDefinition -SourceRoot $runtimeSourceRoot -InstallRoot $ops.installRoot
+$instances = @(Get-RunnerInstances -Loaded $loaded -Roles $Roles -Repositories $Repositories)
+if (-not $instances.Count) { throw 'The requested role/repository selection produced no runner instances' }
+if ($ConfirmMigration -and -not $Migrate) { throw '-ConfirmMigration requires -Migrate' }
+if ($Migrate -and -not $DryRun -and -not $ConfirmMigration) { throw 'A state migration requires -ConfirmMigration. Run -Migrate -DryRun first.' }
+$migrationRepositories = @($Repositories | Where-Object { $_ })
+$migrationRoles = @($Roles | Select-Object -Unique)
+if ($Migrate -and ($migrationRepositories.Count -or $migrationRoles.Count -ne 2)) { throw '-Migrate must reconcile the full configured topology; do not combine it with -Repositories or a partial -Roles selection.' }
+
+function Invoke-InstallAction {
+  param([string]$Description, [scriptblock]$Action)
+  if ($DryRun) { Write-OperationLog "DRY-RUN $Description"; return }
+  if ($PSCmdlet.ShouldProcess($Description, 'install')) { & $Action }
+}
+
+function Get-RunnerArchive {
+  $archivePath = Join-Path $ops.installRoot 'downloads\actions-runner.zip'
+  if ($DryRun) { Write-OperationLog "DRY-RUN download and SHA-256 verify $($ops.runner.downloadUri)"; return $archivePath }
+  Initialize-PrivateDirectory -Path (Split-Path -Parent $archivePath)
+  if (-not (Test-Path -LiteralPath $archivePath)) {
+    Write-OperationLog 'Downloading the pinned GitHub Actions runner archive'
+    Invoke-WebRequest -Uri $ops.runner.downloadUri -OutFile $archivePath -UseBasicParsing
+  }
+  $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+  if (-not $actual.Equals($ops.runner.sha256, [StringComparison]::OrdinalIgnoreCase)) { throw 'Runner archive SHA-256 mismatch; refusing to extract it' }
+  return $archivePath
+}
+
+function Register-InstanceTask {
+  param([Parameter(Mandatory)]$Instance)
+  $supervisor = Join-Path $runtimeSnapshot.root 'runner-supervisor.ps1'
+  $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$supervisor`" -Configuration `"$($loaded.Path)`" -InstanceId $($Instance.Id)"
+  $action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument $arguments
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+  $settings = New-ScheduledTaskSettingsSet -Hidden -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
+  Register-ScheduledTask -TaskName $Instance.TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+}
+
+function Register-DshWebTask {
+  $supervisor = Join-Path $runtimeSnapshot.root 'dsh-web-host-supervisor.ps1'
+  $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$supervisor`" -Configuration `"$($loaded.Path)`""
+  $action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument $arguments
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+  $settings = New-ScheduledTaskSettingsSet -Hidden -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
+  Register-ScheduledTask -TaskName (Get-DshWebTaskName) -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+}
+
+function Remove-InstalledInstance {
+  param([Parameter(Mandatory)]$Entry)
+  Stop-ManagedComponent -Operations $ops -InstanceId $Entry.id -TaskName $Entry.taskName | Out-Null
+  if (Test-Path -LiteralPath (Join-Path $Entry.runnerRoot '.runner')) {
+    $configCommand = Join-Path $Entry.runnerRoot 'config.cmd'
+    if (-not (Test-Path -LiteralPath $configCommand -PathType Leaf)) { throw "Registered runner is missing config.cmd: $($Entry.id)" }
+    $token = Get-RunnerToken -Instance $Entry -GhExecutable $loaded.Config.ghExecutable -Purpose remove
+    try {
+      Push-Location $Entry.runnerRoot
+      try { & $configCommand remove --unattended --token $token 1>$null 2>$null } finally { Pop-Location }
+      if ($LASTEXITCODE -ne 0) { throw "GitHub runner removal failed during migration for $($Entry.id)" }
+    } finally { $token = $null }
+  }
+  $task = Get-ScheduledTask -TaskName $Entry.taskName -ErrorAction SilentlyContinue
+  if ($task) { Unregister-ScheduledTask -TaskName $Entry.taskName -Confirm:$false }
+  Assert-ManagedDirectoryForRemoval -Path $Entry.runnerRoot -Root $manifest.installRoot
+  if (Test-Path -LiteralPath $Entry.runnerRoot) { Remove-Item -LiteralPath $Entry.runnerRoot -Recurse -Force }
+}
+
+function Assert-NoTaskReferencesRuntime {
+  param([Parameter(Mandatory)][string]$RuntimeRoot)
+  $references = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { @($_.Actions | Where-Object { ([string]$_.Arguments).IndexOf($RuntimeRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count })
+  if ($references.Count) { throw "Refusing to remove operations runtime still referenced by Scheduled Task: $($references[0].TaskName)" }
+}
+
+if ($ops.dshWebHost.enabled -and -not $DryRun -and -not (Test-Path -LiteralPath $ops.dshWebHost.executable -PathType Leaf)) { throw "DSH Web Host executable does not exist: $($ops.dshWebHost.executable)" }
+foreach ($required in @('pwsh.exe', $loaded.Config.ghExecutable, $loaded.Config.gitExecutable)) {
+  if (-not (Get-Command $required -ErrorAction SilentlyContinue)) { throw "Required executable is unavailable: $required" }
+}
+if (-not $DryRun) {
+  $principal = Test-HostGitHubLogin -Config $loaded.Config
+  if (-not $principal.Ok) { throw 'The authenticated GitHub CLI principal does not match github.login' }
+}
+
+$manifest = Read-InstallManifest -Loaded $loaded
+$managedState = Get-ManagedArtifactState -Loaded $loaded -Manifest $manifest -RuntimeSnapshot $runtimeSnapshot
+$unexpectedIds = @($managedState.UnexpectedTaskIds + $managedState.UnexpectedRunnerIds + $managedState.UnexpectedProcessRecordIds | Select-Object -Unique)
+$unexpectedRuntimeIds = @($managedState.UnexpectedRuntimeSnapshotIds)
+$desiredIds = @($managedState.Desired | ForEach-Object { $_.Id })
+if ($unexpectedIds.Count -and -not $Migrate) {
+  throw "Untracked managed artifacts were found: $($unexpectedIds -join ', '). Re-run with -Migrate -DryRun; do not change or delete them manually."
+}
+if (@($unexpectedIds | Where-Object { $_ -notin $desiredIds }).Count) {
+  throw "Untracked artifacts do not match the desired configuration: $($unexpectedIds -join ', '). Restore a configuration that selects those instances, adopt it with -Migrate, then migrate to this configuration."
+}
+if ($unexpectedRuntimeIds.Count -and -not $Migrate) { throw "Untracked operations runtime snapshots were found: $($unexpectedRuntimeIds -join ', '). Re-run with -Migrate -DryRun." }
+$removedEntries = if ($managedState.RunnerPackageChanged) { @($manifest.instances) } else { @($managedState.StaleEntries + $managedState.ChangedEntries | Sort-Object id -Unique) }
+$removedEntries = @($removedEntries)
+$requiresMigration = $managedState.ScopeChanged -or $managedState.RunnerPackageChanged -or $managedState.RuntimeSnapshotChanged -or $managedState.RuntimeSnapshotInvalid -or $removedEntries.Count -or $unexpectedIds.Count -or $unexpectedRuntimeIds.Count -or $managedState.DshWebUnexpected -or $managedState.DshWebStale
+if ($requiresMigration -and -not $Migrate) {
+  $oldIds = @($removedEntries | ForEach-Object { $_.id })
+  throw "Installed state differs from desired configuration: $($oldIds -join ', '). Re-run with -Migrate -DryRun, then -Migrate -ConfirmMigration."
+}
+if (-not $manifest) { $manifest = New-InstallManifest -Loaded $loaded -RuntimeSnapshot $runtimeSnapshot }
+
+$selectedRepositories = if ($ops.controller.registrationScope -eq 'organization') {
+  @($loaded.Config.repositories)
+} else {
+  @($instances | ForEach-Object { $_.Repository } | Where-Object { $_ } | Select-Object -Unique)
+}
+foreach ($mapping in @($ops.repositoryMappings | Where-Object { $_.repository -in $selectedRepositories })) {
+  Invoke-InstallAction "set DSH_AUTOMATION_CI_WORKFLOW for $($mapping.repository)" {
+    & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_CI_WORKFLOW --repo $mapping.repository --body $mapping.ciWorkflowName 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_CI_WORKFLOW for $($mapping.repository)" }
+  }
+  Invoke-InstallAction "ensure strict app-bound required checks, bootstrapping an unprotected default branch of $($mapping.repository)" {
+    Set-RepositoryRequiredStatusChecks -Mapping $mapping -GhExecutable $loaded.Config.ghExecutable
+  }
+}
+
+if ($Migrate) {
+  $runtimeNeedsMigration = $managedState.RuntimeSnapshotChanged -or $managedState.RuntimeSnapshotInvalid
+  if ($runtimeNeedsMigration -and $manifest) {
+    $removedIds = @($removedEntries | ForEach-Object { $_.id })
+    foreach ($entry in @($manifest.instances | Where-Object { $_.id -notin $removedIds })) {
+      if ($DryRun) {
+        Write-OperationLog "DRY-RUN stop $($entry.id) and detach its task from the installed operations runtime"
+      } else {
+        Stop-ManagedComponent -Operations $ops -InstanceId $entry.id -TaskName $entry.taskName | Out-Null
+        $task = Get-ScheduledTask -TaskName $entry.taskName -ErrorAction SilentlyContinue
+        if ($task) { Unregister-ScheduledTask -TaskName $entry.taskName -Confirm:$false }
+        $entry.taskEnabled = $false
+        Set-ManifestEntry -Manifest $manifest -Entry $entry
+        Write-InstallManifest -Loaded $loaded -Manifest $manifest
+      }
+    }
+    if ($manifest.dshWebManaged) {
+      if ($DryRun) {
+        Write-OperationLog 'DRY-RUN stop DSH Web Host and detach its task from the installed operations runtime'
+      } else {
+        Stop-ManagedComponent -Operations $ops -InstanceId 'dsh-web' -TaskName (Get-DshWebTaskName) | Out-Null
+        $task = Get-ScheduledTask -TaskName (Get-DshWebTaskName) -ErrorAction SilentlyContinue
+        if ($task) { Unregister-ScheduledTask -TaskName (Get-DshWebTaskName) -Confirm:$false }
+        $manifest.dshWebManaged = $false
+        Write-InstallManifest -Loaded $loaded -Manifest $manifest
+      }
+    }
+  }
+  if ($managedState.DshWebStale) {
+    if ($DryRun) {
+      Write-OperationLog 'DRY-RUN stop and unregister obsolete managed DSH Web Host task'
+    } else {
+      Stop-ManagedComponent -Operations $ops -InstanceId 'dsh-web' -TaskName (Get-DshWebTaskName) | Out-Null
+      $dshTask = Get-ScheduledTask -TaskName (Get-DshWebTaskName) -ErrorAction SilentlyContinue
+      if ($dshTask) { Unregister-ScheduledTask -TaskName (Get-DshWebTaskName) -Confirm:$false }
+      $manifest.dshWebManaged = $false
+      Write-InstallManifest -Loaded $loaded -Manifest $manifest
+    }
+  }
+  foreach ($entry in $removedEntries) {
+    if ($DryRun) {
+      Write-OperationLog "DRY-RUN stop, unregister, and purge obsolete managed instance $($entry.id)"
+    } else {
+      Remove-InstalledInstance -Entry $entry
+      Remove-ManifestEntry -Manifest $manifest -InstanceId $entry.id
+      Write-InstallManifest -Loaded $loaded -Manifest $manifest
+    }
+  }
+  foreach ($id in $unexpectedIds) {
+    $wanted = @($managedState.Desired | Where-Object { $_.Id -eq $id })[0]
+    $task = Get-ScheduledTask -TaskName $wanted.TaskName -ErrorAction SilentlyContinue
+    if ($task -and $task.State -eq 'Running' -and -not (Read-OwnedProcessRecord -Operations $ops -InstanceId $id)) {
+      throw "Cannot adopt running instance $id without an owned process record. Stop that legacy process explicitly before retrying migration."
+    }
+    if ($DryRun) {
+      Write-OperationLog "DRY-RUN stop and adopt exact desired managed instance $id into the install manifest"
+    } else {
+      Stop-ManagedComponent -Operations $ops -InstanceId $id -TaskName $wanted.TaskName | Out-Null
+      if ($task) { Unregister-ScheduledTask -TaskName $wanted.TaskName -Confirm:$false }
+      Set-ManifestEntry -Manifest $manifest -Entry (ConvertTo-ManifestEntry -Instance $wanted -TaskEnabled $false)
+      Write-InstallManifest -Loaded $loaded -Manifest $manifest
+    }
+  }
+  if ($managedState.DshWebUnexpected) {
+    $dshTask = Get-ScheduledTask -TaskName (Get-DshWebTaskName) -ErrorAction SilentlyContinue
+    if ($dshTask -and $dshTask.State -eq 'Running' -and -not (Read-OwnedProcessRecord -Operations $ops -InstanceId 'dsh-web')) {
+      throw 'Cannot adopt a running DSH Web Host task without an owned process record. Stop that legacy process explicitly before retrying migration.'
+    }
+    if ($DryRun -and $ops.dshWebHost.enabled) {
+      Write-OperationLog 'DRY-RUN adopt exact desired DSH Web Host task into the install manifest'
+    } elseif ($DryRun) {
+      Write-OperationLog 'DRY-RUN stop and unregister untracked disabled DSH Web Host task'
+    } elseif ($ops.dshWebHost.enabled) {
+      Stop-ManagedComponent -Operations $ops -InstanceId 'dsh-web' -TaskName (Get-DshWebTaskName) | Out-Null
+      if ($dshTask) { Unregister-ScheduledTask -TaskName (Get-DshWebTaskName) -Confirm:$false }
+      $manifest.dshWebManaged = $true
+      Write-InstallManifest -Loaded $loaded -Manifest $manifest
+    } else {
+      Stop-ManagedComponent -Operations $ops -InstanceId 'dsh-web' -TaskName (Get-DshWebTaskName) | Out-Null
+      if ($dshTask) { Unregister-ScheduledTask -TaskName (Get-DshWebTaskName) -Confirm:$false }
+    }
+  }
+  $snapshotsToRemove = @()
+  if ($runtimeNeedsMigration -and $manifest.psobject.Properties.Name -contains 'operationsRuntime' -and $manifest.operationsRuntime) { $snapshotsToRemove += [pscustomobject]@{ snapshot = $manifest.operationsRuntime; installRoot = $manifest.installRoot } }
+  foreach ($id in $unexpectedRuntimeIds) { $snapshotsToRemove += [pscustomobject]@{ snapshot = [pscustomobject]@{ id = $id; root = Join-Path $ops.installRoot (Join-Path 'operations-runtime' $id) }; installRoot = $ops.installRoot } }
+  foreach ($removal in @($snapshotsToRemove | Sort-Object { $_.snapshot.root } -Unique)) {
+    $snapshot = $removal.snapshot
+    if ($DryRun) {
+      Write-OperationLog "DRY-RUN remove exact unreferenced operations runtime snapshot $($snapshot.root)"
+    } else {
+      Assert-NoTaskReferencesRuntime -RuntimeRoot $snapshot.root
+      Remove-OperationsRuntimeSnapshot -Snapshot $snapshot -InstallRoot $removal.installRoot
+    }
+  }
+  if (-not $DryRun) {
+    $manifest.registrationScope = $ops.controller.registrationScope
+    $manifest.runnerVersion = $ops.runner.version
+    $manifest.runnerSha256 = $ops.runner.sha256
+    $manifest.configPath = $loaded.Path
+    $manifest.installRoot = $ops.installRoot
+    $manifest.logsRoot = $ops.logsRoot
+    Write-InstallManifest -Loaded $loaded -Manifest $manifest
+  }
+}
+
+Invoke-InstallAction 'create private runtime, state, logs, and fault directories' {
+  Initialize-PrivateDirectory -Path $ops.installRoot
+  Initialize-PrivateDirectory -Path $ops.stateRoot
+  Initialize-PrivateDirectory -Path $ops.logsRoot
+  Initialize-PrivateDirectory -Path (Join-Path $ops.stateRoot 'faults')
+}
+Invoke-InstallAction "deploy immutable operations runtime snapshot $($runtimeSnapshot.id)" {
+  Install-OperationsRuntimeSnapshot -Snapshot $runtimeSnapshot -SourceRoot $runtimeSourceRoot
+  if ($manifest.psobject.Properties.Name -contains 'operationsRuntime') { $manifest.operationsRuntime = $runtimeSnapshot } else { $manifest | Add-Member -NotePropertyName operationsRuntime -NotePropertyValue $runtimeSnapshot }
+  Write-InstallManifest -Loaded $loaded -Manifest $manifest
+}
+Invoke-InstallAction 'remove obsolete local controller supervisor task' {
+  $legacy = Get-ScheduledTask -TaskName 'DSH-Agent-Automation-controller' -ErrorAction SilentlyContinue
+  if ($legacy) {
+    if ($legacy.State -eq 'Running') { throw 'Obsolete controller task is running without an owned PID record; stop its process tree explicitly before installation' }
+    Unregister-ScheduledTask -TaskName 'DSH-Agent-Automation-controller' -Confirm:$false
+  }
+}
+$archive = Get-RunnerArchive
+
+foreach ($instance in $instances) {
+  if (-not $DryRun) {
+    Set-ManifestEntry -Manifest $manifest -Entry (ConvertTo-ManifestEntry -Instance $instance -TaskEnabled $false)
+    Write-InstallManifest -Loaded $loaded -Manifest $manifest
+  }
+  Invoke-InstallAction "install isolated runner instance $($instance.Id) at $($instance.RunnerRoot)" {
+    Initialize-PrivateDirectory -Path $instance.RunnerRoot
+    Initialize-PrivateDirectory -Path $instance.WorkDirectory
+    if (-not (Test-Path -LiteralPath (Join-Path $instance.RunnerRoot '.runner'))) {
+      Expand-Archive -LiteralPath $archive -DestinationPath $instance.RunnerRoot -Force
+      $token = Get-RunnerToken -Instance $instance -GhExecutable $loaded.Config.ghExecutable
+      try {
+        $registrationUrl = Get-RegistrationUrl -Instance $instance
+        Push-Location $instance.RunnerRoot
+        try {
+          & (Join-Path $instance.RunnerRoot 'config.cmd') --unattended --replace --url $registrationUrl --token $token --name $instance.RunnerName --labels ($instance.Labels -join ',') --work $instance.WorkDirectory
+        } finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0) { throw "GitHub runner configuration failed for $($instance.Id)" }
+      } finally { $token = $null }
+    }
+    Initialize-PrivateDirectory -Path $instance.RunnerRoot
+  }
+  Invoke-InstallAction "register hidden supervisor task $($instance.TaskName)" {
+    Register-InstanceTask -Instance $instance
+    Set-ManifestEntry -Manifest $manifest -Entry (ConvertTo-ManifestEntry -Instance $instance -TaskEnabled $true)
+    Write-InstallManifest -Loaded $loaded -Manifest $manifest
+  }
+}
+
+if ($ops.dshWebHost.enabled) {
+  Invoke-InstallAction 'register hidden DSH Web Host supervisor task' {
+    Register-DshWebTask
+    $manifest.dshWebManaged = $true
+    Write-InstallManifest -Loaded $loaded -Manifest $manifest
+  }
+}
+if (-not $NoStart) {
+  foreach ($instance in $instances) { Invoke-InstallAction "start supervisor $($instance.TaskName)" { Start-ManagedComponent -Operations $ops -InstanceId $instance.Id -TaskName $instance.TaskName | Out-Null } }
+  if ($ops.dshWebHost.enabled) { Invoke-InstallAction 'start DSH Web Host supervisor' { Start-ManagedComponent -Operations $ops -InstanceId 'dsh-web' -TaskName (Get-DshWebTaskName) | Out-Null } }
+}
+Write-OperationLog "Install completed for $($instances.Count) runner instance(s). Use scripts/doctor.ps1 -Online for post-install health checks."
