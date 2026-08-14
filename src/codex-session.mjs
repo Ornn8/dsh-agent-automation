@@ -98,6 +98,40 @@ export async function listAllActiveThreads(call) {
   return threads
 }
 
+/** Wait for a review turn, recovering its durable terminal state when a live notification is missed. */
+export async function waitForReviewTurn({
+  completion,
+  call,
+  threadId,
+  turnId,
+  pollMs = 5_000,
+  sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
+}) {
+  for (;;) {
+    const winner = await Promise.race([
+      completion.then(() => ({ source: 'notification' })),
+      (async () => {
+        await sleep(pollMs)
+        return {
+          source: 'poll',
+          value: await call('thread/read', { threadId, includeTurns: true }),
+        }
+      })(),
+    ])
+    if (winner.source === 'notification') return null
+    if (!Array.isArray(winner.value?.thread?.turns)) {
+      throw new Error('Codex App Server returned an invalid task snapshot')
+    }
+    const turn = winner.value.thread.turns.find(candidate => candidate.id === turnId)
+    if (!turn || turn.status === 'inProgress') continue
+    if (turn.status !== 'completed') throw new Error(`Codex review turn ended with ${turn.status}`)
+    const message = turn.items?.findLast(item => item?.type === 'agentMessage'
+      && typeof item.text === 'string')?.text
+    if (!message?.trim()) throw new Error('Codex review task completed without a final assistant message')
+    return message.trim()
+  }
+}
+
 /** Run a visible ChatGPT Desktop Codex task and return its final assistant message. */
 export async function runReviewTask({
   node,
@@ -253,7 +287,8 @@ export async function runReviewTask({
     })
     turnId = turn.turn.id
     await call('thread/settings/update', { threadId, cwd: projectCwd })
-    await completion
+    const recoveredMessage = await waitForReviewTurn({ completion, call, threadId, turnId })
+    if (recoveredMessage) finalMessage = recoveredMessage
     if (!finalMessage.trim()) throw new Error('Codex review task completed without a final assistant message')
     return { threadId, finalMessage: finalMessage.trim() }
   } finally {
