@@ -27,7 +27,7 @@ jobs:
   review:
     name: codex/review
     runs-on: [self-hosted, Windows, X64, dsh-agent]
-    timeout-minutes: 75
+    timeout-minutes: 255
     permissions:
       contents: write
       issues: write
@@ -64,6 +64,8 @@ jobs:
         run: git fetch --no-tags origin ${{ inputs.base_sha }}
 
       - name: Review exact PR head with Codex
+        id: review
+        continue-on-error: true
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
@@ -74,8 +76,20 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/codex-review.mjs
 
+      - name: Hand a blocking verdict directly to DSH
+        id: repair
+        if: steps.review.outcome == 'failure'
+        continue-on-error: true
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          REPAIR_REQUEST_ID: ''
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node controller/src/dsh-repair.mjs
+
       - name: Fail the exact-head review status when automation fails
-        if: failure()
+        if: steps.review.outcome == 'failure' && steps.repair.outcome == 'failure'
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           HEAD_SHA: ${{ inputs.head_sha }}
@@ -83,3 +97,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/review-failure.mjs
+
+      - name: Preserve the blocking review conclusion
+        if: steps.review.outcome == 'failure'
+        run: throw 'Codex did not return a passing verdict'

@@ -21,6 +21,7 @@ import {
 import {
   automaticRepairRequestId,
   githubReviewBody,
+  hasExactReviewVerdict,
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
 import { localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
@@ -127,9 +128,12 @@ test('Codex retention archives automated review tasks beyond six', () => {
   assert.deepEqual(reviewTaskIdsToArchive(threads, 'review-0', 6), ['review-6', 'review-7'])
 })
 
-test('DSH repair exposes a GitHub-audited bootstrap dispatch', async () => {
+test('Codex hands blocking verdicts directly to DSH in the same runner job', async () => {
+  const reviewWorkflow = await readFile(new URL('../.github/workflows/codex-review.yml', import.meta.url), 'utf8')
   const workflow = await readFile(new URL('../.github/workflows/dsh-repair.yml', import.meta.url), 'utf8')
-  assert.match(workflow, /workflow_dispatch:/)
+  assert.match(reviewWorkflow, /Hand a blocking verdict directly to DSH/)
+  assert.match(reviewWorkflow, /node controller\/src\/dsh-repair\.mjs/)
+  assert.doesNotMatch(workflow, /workflow_dispatch:/)
   assert.match(workflow, /controller_sha:/)
 })
 
@@ -345,4 +349,10 @@ test('automatic repair requests are idempotent for one exact review pair', () =>
   const head = 'b'.repeat(40)
   assert.equal(automaticRepairRequestId(base, head), `codex-${base}-${head}`)
   assert.throws(() => automaticRepairRequestId('main', head), /full commit SHA/)
+})
+
+test('a recorded BLOCK is not mislabeled as review automation failure', () => {
+  const head = 'a'.repeat(40)
+  assert.equal(hasExactReviewVerdict([{ body: `<!-- codex-review:${head} -->\n## Codex review: BLOCK` }], head), true)
+  assert.equal(hasExactReviewVerdict([{ body: '<!-- codex-review:other -->' }], head), false)
 })

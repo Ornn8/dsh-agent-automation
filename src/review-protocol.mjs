@@ -6,6 +6,12 @@ export function automaticRepairRequestId(base, head) {
   return `codex-${base.toLowerCase()}-${head.toLowerCase()}`
 }
 
+/** Return whether GitHub already records an automated verdict for this exact head. */
+export function hasExactReviewVerdict(comments, head) {
+  const marker = `<!-- codex-review:${head} -->`
+  return comments.some(comment => comment.body?.includes(marker))
+}
+
 /** Parse the hidden machine payload from a human-readable Codex final answer. */
 export function parseReviewMessage(message) {
   const match = message.match(/<details>\r?\n<summary>Automation result<\/summary>\r?\n\r?\n```json\r?\n([\s\S]*?)\r?\n```\r?\n<\/details>\s*$/)
