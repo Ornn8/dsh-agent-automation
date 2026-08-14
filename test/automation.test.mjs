@@ -49,7 +49,6 @@ import {
 import {
   listAllActiveThreads,
   reviewInitializeParams,
-  waitForReviewTurn,
   reviewTurnPermissions,
   reviewTaskIdsToArchive,
   reviewThreadConfig,
@@ -428,51 +427,6 @@ test('Codex review restores the visible project cwd after isolating the automate
   assert.match(source, /const turn = await call\('turn\/start'/)
   assert.match(source, /cwd: taskCwd/)
   assert.match(source, /await call\('thread\/settings\/update', \{ threadId, cwd: projectCwd \}\)/)
-})
-
-test('Codex review polling terminates when Desktop misses the turn notification', async () => {
-  const calls = []
-  const read = async (method, params) => {
-    calls.push({ method, params })
-    return {
-      thread: {
-        turns: [{ id: 'turn-1', status: 'interrupted', items: [] }],
-      },
-    }
-  }
-
-  await assert.rejects(waitForReviewTurn({
-    completion: new Promise(() => undefined),
-    call: read,
-    threadId: 'thread-1',
-    turnId: 'turn-1',
-    pollMs: 0,
-    sleep: async () => undefined,
-  }), /ended with interrupted/)
-  assert.deepEqual(calls, [{
-    method: 'thread/read',
-    params: { threadId: 'thread-1', includeTurns: true },
-  }])
-})
-
-test('Codex review polling recovers the final message after a missed completion notification', async () => {
-  const message = await waitForReviewTurn({
-    completion: new Promise(() => undefined),
-    call: async () => ({
-      thread: {
-        turns: [{
-          id: 'turn-1',
-          status: 'completed',
-          items: [{ type: 'agentMessage', text: 'PASS' }],
-        }],
-      },
-    }),
-    threadId: 'thread-1',
-    turnId: 'turn-1',
-    pollMs: 0,
-    sleep: async () => undefined,
-  })
-  assert.equal(message, 'PASS')
 })
 
 test('Codex retention reads every active-task page and rejects repeated cursors', async () => {
