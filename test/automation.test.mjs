@@ -48,6 +48,7 @@ import {
 } from '../src/dsh-work.mjs'
 import {
   listAllActiveThreads,
+  materializeReviewTask,
   reviewInitializeParams,
   reviewTurnPermissions,
   reviewTaskIdsToArchive,
@@ -549,6 +550,31 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.doesNotMatch(workflow, /issues: write/)
 })
 
+test('Codex materializes a fresh task before naming it', async () => {
+  const calls = []
+  const result = await materializeReviewTask(async (method, params) => {
+    calls.push({ method, params })
+    if (method === 'thread/start') return { thread: { id: 'fresh-review' } }
+    if (method === 'turn/start') return { turn: { id: 'review-turn' } }
+    return {}
+  }, {
+    title: '[DSH GitHub 审查] PR #32 @a01eadc',
+    prompt: 'Review the exact pair.',
+    projectCwd: 'F:\\dsh-gui',
+    taskCwd: 'F:\\isolated-task',
+    reviewCwd: 'F:\\exact-review',
+    environment: { PATH: 'bin' },
+    effectiveConfig: {},
+    model: 'gpt-5.6-sol',
+    effort: 'medium',
+  })
+
+  assert.deepEqual(result, { threadId: 'fresh-review', turnId: 'review-turn' })
+  assert.deepEqual(calls.map(call => call.method), ['thread/start', 'turn/start', 'thread/name/set'])
+  assert.equal(calls[1].params.threadId, 'fresh-review')
+  assert.equal(calls[2].params.threadId, 'fresh-review')
+})
+
 test('backlog Issue dispatch is not lost to GitHub token recursion suppression', async () => {
   const source = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
   assert.match(source, /event_type=dsh-issue/)
@@ -674,7 +700,7 @@ test('a blocked backlog repair requires a failed exact-pair Actions review from 
     },
     run: {
       id: 42, event: 'pull_request_target', status: 'completed', conclusion: 'failure',
-      repository: { full_name: 'Ornn8/deepseek-harness' }, head_repository: { full_name: 'Ornn8/deepseek-harness' }, head_sha: base,
+      repository: { full_name: 'Ornn8/deepseek-harness' }, head_repository: { full_name: 'Ornn8/deepseek-harness' }, head_sha: head,
       pull_requests: [{ number: 10, base: { sha: base }, head: { sha: head } }],
       referenced_workflows: [{ path: `Ornn8/dsh-agent-automation/.github/workflows/codex-review.yml@${controllerSha}`, sha: controllerSha }],
     },

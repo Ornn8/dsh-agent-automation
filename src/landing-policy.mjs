@@ -42,13 +42,15 @@ function hasExactPullRequest(run, pullRequest, repository) {
   if (run?.repository?.full_name !== repository
     || run.head_repository?.full_name !== repository
     || run.status !== 'completed'
-    || run.head_sha !== pullRequest.baseRefOid) return false
+    || !run.head_sha) return false
   if (run.event === 'repository_dispatch') {
-    return typeof pullRequest.baseRefName === 'string'
+    return run.head_sha === pullRequest.baseRefOid
+      && typeof pullRequest.baseRefName === 'string'
       && pullRequest.baseRefName.length > 0
       && run.head_branch === pullRequest.baseRefName
   }
   return run.event === 'pull_request_target'
+    && run.head_sha === pullRequest.headRefOid
     && run.pull_requests?.some(candidate => candidate.number === pullRequest.number
       && candidate.base?.sha === pullRequest.baseRefOid
       && candidate.head?.sha === pullRequest.headRefOid)

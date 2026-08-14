@@ -73,7 +73,7 @@ async function reviewSubject(run) {
   const candidates = (run.pull_requests || []).filter(pullRequest => Number.isSafeInteger(pullRequest.number)
     && /^[0-9a-f]{40}$/.test(pullRequest.base?.sha || '')
     && /^[0-9a-f]{40}$/.test(pullRequest.head?.sha || '')
-    && pullRequest.base.sha === run.head_sha)
+    && pullRequest.head.sha === run.head_sha)
   if (candidates.length === 1) {
     return {
       type: 'pull-request',
@@ -83,13 +83,17 @@ async function reviewSubject(run) {
     }
   }
   const title = /^Agent PR Review #(\d+) ([0-9a-f]{40})\.\.([0-9a-f]{40})$/.exec(String(run.display_title || ''))
-  if (title && title[2] === run.head_sha) {
+  if (title && ((run.event === 'pull_request_target' && title[3] === run.head_sha)
+    || (run.event === 'repository_dispatch' && title[2] === run.head_sha))) {
     return { type: 'pull-request', number: Number.parseInt(title[1], 10), base: title[2], head: title[3] }
   }
   const pullRequests = await pages(`repos/${repository}/pulls?state=open&per_page=100`, 'open pull requests for review recovery')
   const matches = []
   for (const pullRequest of pullRequests) {
-    if (pullRequest.base?.sha !== run.head_sha || pullRequest.head?.repo?.full_name !== repository) continue
+    const sourceRefMatches = run.event === 'pull_request_target'
+      ? pullRequest.head?.sha === run.head_sha
+      : pullRequest.base?.sha === run.head_sha
+    if (!sourceRefMatches || pullRequest.head?.repo?.full_name !== repository) continue
     const checkPages = await ghJson([
       'api', `repos/${repository}/commits/${pullRequest.head.sha}/check-runs`, '--paginate', '--slurp',
     ], `review checks for pull request #${pullRequest.number}`)
