@@ -1,6 +1,19 @@
 import { spawn } from 'node:child_process'
 import readline from 'node:readline'
 
+/** Return stale automated review task ids while preserving the newest tasks. */
+export function reviewTaskIdsToArchive(threads, currentThreadId, keep = 6) {
+  const reviews = threads.filter(thread => {
+    const title = thread.name ?? thread.title
+    return title?.startsWith('[GitHub Review] ')
+  })
+  const retained = [
+    currentThreadId,
+    ...reviews.map(thread => thread.id).filter(id => id !== currentThreadId),
+  ].slice(0, keep)
+  return reviews.map(thread => thread.id).filter(id => !retained.includes(id))
+}
+
 /** Run a visible ChatGPT Desktop Codex task and return its final assistant message. */
 export async function runReviewTask({
   node,
@@ -114,10 +127,8 @@ export async function runReviewTask({
       sortKey: 'created_at',
       sortDirection: 'desc',
     })
-    const reviews = listed.data.filter(thread => thread.name?.startsWith('[GitHub Review] '))
-    const retained = [threadId, ...reviews.map(thread => thread.id).filter(id => id !== threadId)].slice(0, keep)
-    for (const thread of reviews) {
-      if (!retained.includes(thread.id)) await call('thread/archive', { threadId: thread.id })
+    for (const staleThreadId of reviewTaskIdsToArchive(listed.data, threadId, keep)) {
+      await call('thread/archive', { threadId: staleThreadId })
     }
 
     const turn = await call('turn/start', {
@@ -137,4 +148,3 @@ export async function runReviewTask({
     child.kill()
   }
 }
-

@@ -19,6 +19,28 @@ on:
       controller_sha:
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Target owner/repository
+        required: true
+        type: string
+      pull_request_number:
+        description: Target pull request number
+        required: true
+        type: number
+      head_sha:
+        description: Exact target pull request head
+        required: true
+        type: string
+      request_id:
+        description: Trusted GitHub request id
+        required: true
+        type: string
+      controller_sha:
+        description: Immutable controller revision
+        required: true
+        type: string
 
 concurrency:
   group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}

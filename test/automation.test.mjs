@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
@@ -24,6 +24,7 @@ import {
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
 import { localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
+import { reviewTaskIdsToArchive } from '../src/codex-session.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -115,6 +116,21 @@ test('DSH Web session timeout cancels the controller-owned turn', async () => {
     now: () => times.shift() ?? 2,
   }), /timed out/)
   assert.equal(fake.calls.at(-1).method, 'session.cancel')
+})
+
+test('Codex retention archives automated review tasks beyond six', () => {
+  const threads = Array.from({ length: 8 }, (_, index) => ({
+    id: `review-${index}`,
+    title: `[GitHub Review] PR #12 @head-${index}`,
+  }))
+  threads.push({ id: 'control', title: '设置 PR 自动审核合并' })
+  assert.deepEqual(reviewTaskIdsToArchive(threads, 'review-0', 6), ['review-6', 'review-7'])
+})
+
+test('DSH repair exposes a GitHub-audited bootstrap dispatch', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/dsh-repair.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /workflow_dispatch:/)
+  assert.match(workflow, /controller_sha:/)
 })
 
 test('issueBranch accepts the documented branch field', () => {
