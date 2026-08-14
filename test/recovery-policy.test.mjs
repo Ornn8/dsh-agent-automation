@@ -26,7 +26,10 @@ test('only a failed or cancelled top-level agent run with immutable controller p
   assert.equal(trustedFailedAgentRun({ run: run(), repository, trust }), 'pull-request')
   assert.equal(trustedFailedAgentRun({ run: run({ name: 'Agent PR CI Repair' }), repository, trust }), 'pull-request')
   assert.equal(trustedFailedAgentRun({ run: run({ conclusion: 'cancelled' }), repository, trust }), 'pull-request')
-  assert.equal(trustedFailedAgentRun({ run: run({ name: 'Agent Recovery' }), repository, trust }), null)
+  assert.equal(trustedFailedAgentRun({ run: run({
+    name: 'Agent Recovery',
+    referenced_workflows: [{ path: `${controller}/.github/workflows/recover-backlog.yml@${sha}`, sha }],
+  }), repository, trust }), null)
   assert.equal(trustedFailedAgentRun({ run: run({ referenced_workflows: [] }), repository, trust }), null)
   assert.equal(trustedFailedAgentRun({ run: run({ referenced_workflows: [{ path: '.github/workflows/dsh-repair.yml', sha }] }), repository, trust }), null)
   assert.equal(trustedFailedAgentRun({ run: run({ referenced_workflows: [{ path: `${controller}/.github/workflows/dsh-repair.yml@${'d'.repeat(40)}`, sha: 'd'.repeat(40) }] }), repository, trust }), null)
@@ -63,10 +66,12 @@ test('recovery caps exact subjects at three durable attempts without recursive m
 test('a trusted intentional review BLOCK never schedules a second review, while reviewer infrastructure failure retries its exact pair', () => {
   const base = 'd'.repeat(40)
   const reviewRun = run({
-    name: 'Agent PR Review',
+    name: `Agent PR Review #12 ${base}..${head}`,
+    display_title: `Agent PR Review #12 ${base}..${head}`,
+    path: '.github/workflows/agent-pr-review.yml',
     event: 'pull_request_target',
     head_repository: { full_name: repository },
-    head_sha: base,
+    head_sha: head,
     pull_requests: [{ number: 12, base: { sha: base }, head: { sha: head } }],
     referenced_workflows: [{ path: `${controller}/.github/workflows/codex-review.yml@${sha}`, sha }],
   })
@@ -110,7 +115,7 @@ test('a trusted intentional review BLOCK never schedules a second review, while 
   }), { action: 'ignore' })
   assert.deepEqual(recoveryDecision({
     ...arguments_,
-    run: { ...reviewRun, head_sha: head },
+    run: { ...reviewRun, head_sha: base },
     jobs: reviewerInfrastructureFailure,
   }), { action: 'ignore' })
   assert.deepEqual(recoveryDecision({

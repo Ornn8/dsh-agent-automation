@@ -58,6 +58,35 @@ export function reviewInitializeParams() {
   }
 }
 
+/** Start the first turn before naming it so the App Server has materialized a durable task. */
+export async function materializeReviewTask(call, {
+  title, prompt, projectCwd, taskCwd, reviewCwd, environment, effectiveConfig, model, effort,
+}) {
+  const started = await call('thread/start', {
+    cwd: projectCwd,
+    model,
+    approvalPolicy: 'never',
+    sandbox: 'read-only',
+    serviceName: 'dsh_github_review',
+    config: reviewThreadConfig(environment, effectiveConfig),
+  })
+  const threadId = started?.thread?.id
+  if (typeof threadId !== 'string' || !threadId) throw new Error('Codex App Server did not create a review task')
+  const turn = await call('turn/start', {
+    threadId,
+    input: [{ type: 'text', text: prompt }],
+    cwd: taskCwd,
+    approvalPolicy: 'never',
+    ...reviewTurnPermissions(taskCwd, reviewCwd),
+    model,
+    effort,
+  })
+  const turnId = turn?.turn?.id
+  if (typeof turnId !== 'string' || !turnId) throw new Error('Codex App Server did not start the review turn')
+  await call('thread/name/set', { threadId, name: title })
+  return { threadId, turnId }
+}
+
 /** Return stale automated review task ids while preserving the newest tasks. */
 export function reviewTaskIdsToArchive(threads, currentThreadId, keep = 6) {
   const reviews = threads.filter(thread => {
@@ -224,16 +253,12 @@ export async function runReviewTask({
     if (!profiles?.data?.some(profile => profile.id === ':read-only' && profile.allowed === true)) {
       throw new Error('Codex App Server does not allow the required :read-only permission profile')
     }
-    const started = await call('thread/start', {
-      cwd: projectCwd,
-      model,
-      approvalPolicy: 'never',
-      sandbox: 'read-only',
-      serviceName: 'dsh_github_review',
-      config: reviewThreadConfig(environment, configured.config),
+    const started = await materializeReviewTask(call, {
+      title, prompt, projectCwd, taskCwd, reviewCwd, environment,
+      effectiveConfig: configured.config, model, effort,
     })
-    threadId = started.thread.id
-    await call('thread/name/set', { threadId, name: title })
+    threadId = started.threadId
+    turnId = started.turnId
     await onCreated({ sessionId: threadId })
     process.stdout.write(`ChatGPT Desktop review task created: ${threadId}\n`)
 
@@ -242,16 +267,6 @@ export async function runReviewTask({
       await call('thread/archive', { threadId: staleThreadId })
     }
 
-    const turn = await call('turn/start', {
-      threadId,
-      input: [{ type: 'text', text: prompt }],
-      cwd: taskCwd,
-      approvalPolicy: 'never',
-      ...reviewTurnPermissions(taskCwd, reviewCwd),
-      model,
-      effort,
-    })
-    turnId = turn.turn.id
     await call('thread/settings/update', { threadId, cwd: projectCwd })
     await completion
     if (!finalMessage.trim()) throw new Error('Codex review task completed without a final assistant message')

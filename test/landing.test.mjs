@@ -13,7 +13,7 @@ const pullRequest = (baseRefOid, headRefOid) => ({
 const proof = (base, head) => ({ checkRun: {
   name: 'codex/review', status: 'completed', conclusion: 'success', app: { id: 15368 },
   details_url: 'https://github.com/owner/repository/actions/runs/17',
-}, run: { id: 17, event: 'pull_request_target', status: 'completed', conclusion: 'success', head_sha: base,
+}, run: { id: 17, event: 'pull_request_target', status: 'completed', conclusion: 'success', head_sha: head,
   repository: { full_name: 'owner/repository' }, head_repository: { full_name: 'owner/repository' },
   pull_requests: [{ number: 12, base: { sha: base }, head: { sha: head } }],
   referenced_workflows: [{ path: `Ornn8/dsh-agent-automation/.github/workflows/codex-review.yml@${'c'.repeat(40)}`, sha: 'c'.repeat(40) }],
@@ -30,6 +30,17 @@ test('landing accepts only a current exact-pair PASS with every required check g
     requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: proof(base, head), trustedReview,
   })
   assert.deepEqual(decision, { ready: true, reason: 'exact review and required checks passed' })
+})
+
+test('landing rejects a pull_request_target run whose head_sha is the base commit', () => {
+  const base = 'a'.repeat(40)
+  const head = 'b'.repeat(40)
+  const reviewProof = proof(base, head)
+  reviewProof.run.head_sha = base
+  assert.equal(evaluateLanding({
+    pullRequest: pullRequest(base, head), expectedHead: head,
+    requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof, trustedReview,
+  }).ready, false)
 })
 
 test('landing rejects a head-only PASS after the base changes', () => {

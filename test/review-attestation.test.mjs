@@ -29,7 +29,7 @@ function proof(overrides = {}) {
     },
     run: {
       id: 17, event: 'pull_request_target', status: 'completed', conclusion: 'success',
-      repository: { full_name: repository }, head_repository: { full_name: repository }, head_sha: base,
+      repository: { full_name: repository }, head_repository: { full_name: repository }, head_sha: head,
       pull_requests: [{ number: 12, base: { sha: base }, head: { sha: head } }],
       referenced_workflows: [{ path: `${controllerRepository}/.github/workflows/codex-review.yml@${controllerSha}`,
         sha: controllerSha }],
@@ -80,6 +80,7 @@ test('landing accepts a recursion-safe dispatch run only from the exact current 
       ...proof().run,
       event: 'repository_dispatch',
       head_branch: 'main',
+      head_sha: base,
       pull_requests: [],
     },
   })

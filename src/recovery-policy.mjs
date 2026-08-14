@@ -5,18 +5,21 @@ function recoveryRole(run, repository, trust) {
   if (run?.repository?.full_name !== repository
     || run.status !== 'completed'
     || !['failure', 'cancelled'].includes(run.conclusion)) return null
-  const workflow = run.name === 'Agent Issues' ? '.github/workflows/dsh-issue.yml'
-    : ['Agent PR Rework', 'Agent PR CI Repair'].includes(run.name) ? '.github/workflows/dsh-repair.yml'
-      : run.name === 'Agent PR Review' ? '.github/workflows/codex-review.yml' : null
-  const expectedPath = `${trust?.controllerRepository}/${workflow}@${trust?.controllerSha}`
-  if (!workflow || !FULL_SHA.test(trust?.controllerSha || '') || !run.referenced_workflows?.some(reference => reference.path === expectedPath
-    && reference.sha === trust.controllerSha)) return null
+  if (!FULL_SHA.test(trust?.controllerSha || '')) return null
+  const workflow = [
+    '.github/workflows/dsh-issue.yml',
+    '.github/workflows/dsh-repair.yml',
+    '.github/workflows/codex-review.yml',
+  ].find(candidate => run.referenced_workflows?.some(reference => reference.path
+    === `${trust.controllerRepository}/${candidate}@${trust.controllerSha}`
+    && reference.sha === trust.controllerSha))
+  if (!workflow) return null
   if (workflow === '.github/workflows/dsh-issue.yml') return 'issue'
   if (workflow === '.github/workflows/codex-review.yml') {
     return run.head_repository?.full_name === repository
       && ((run.event === 'pull_request_target'
         && run.pull_requests?.some(pullRequest => FULL_SHA.test(pullRequest.base?.sha || '')
-          && FULL_SHA.test(pullRequest.head?.sha || '') && run.head_sha === pullRequest.base.sha))
+          && FULL_SHA.test(pullRequest.head?.sha || '') && run.head_sha === pullRequest.head.sha))
         || (run.event === 'repository_dispatch' && FULL_SHA.test(run.head_sha || '')))
       ? 'review' : null
   }
