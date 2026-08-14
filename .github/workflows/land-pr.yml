@@ -10,6 +10,10 @@ on:
       head_sha:
         required: true
         type: string
+      ci_check_name:
+        required: false
+        type: string
+        default: all checks passed
 
 concurrency:
   group: dsh-land-${{ github.repository }}-${{ inputs.pull_request_number }}-${{ inputs.head_sha }}
@@ -41,6 +45,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pull_request_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REQUIRED_CI_CHECK_NAME: ${{ inputs.ci_check_name }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/codex-review.yml

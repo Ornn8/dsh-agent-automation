@@ -12,7 +12,7 @@ function checkArguments(method, repository, checkId, fields) {
 /** Create the GitHub Actions-owned review CheckRun on the exact pull request head. */
 export async function startReviewCheck({ ghExecutable, repository, head, runUrl, env, execute = run }) {
   const result = await execute(ghExecutable, checkArguments('POST', repository, undefined, [
-    ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'in_progress'], ['details_url', runUrl],
+    ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'in_progress'], ['details_url', runUrl], ['external_id', runUrl],
     ['output[title]', 'Codex review in progress'], ['output[summary]', 'Reviewing this exact pull request head.'],
   ]), { env })
   const check = parseJson(result.stdout, 'created Codex review CheckRun')
@@ -33,7 +33,7 @@ export async function completeReviewCheck({ ghExecutable, repository, checkId, r
 /** Create a terminal exact-head CheckRun when review setup failed before one could start. */
 export async function failReviewCheck({ ghExecutable, repository, head, runUrl, summary, env, execute = run }) {
   await execute(ghExecutable, checkArguments('POST', repository, undefined, [
-    ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'completed'], ['conclusion', 'failure'], ['details_url', runUrl],
+    ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'completed'], ['conclusion', 'failure'], ['details_url', runUrl], ['external_id', runUrl],
     ['output[title]', 'Codex review failure'], ['output[summary]', summary],
   ]), { env })
 }

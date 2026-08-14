@@ -325,6 +325,22 @@ test('a transient DSH RPC reset retries with one id and resumes the original ses
   assert.deepEqual(rpcIds, [rpcIds[0], rpcIds[0]])
 })
 
+test('a transient DSH RPC reset remains retryable through the fetch error cause chain', async () => {
+  let calls = 0
+  const value = await dshRpc('http://127.0.0.1:3080', 'session.list', {}, async (_url, options) => {
+    const request = JSON.parse(options.body)
+    calls += 1
+    if (calls === 1) {
+      const reset = new Error('read ECONNRESET')
+      reset.code = 'ECONNRESET'
+      throw new TypeError('fetch failed', { cause: reset })
+    }
+    return rpcResponse(request, { items: [] })
+  }, { maxAttempts: 2, sleep: async () => undefined })
+  assert.deepEqual(value, { items: [] })
+  assert.equal(calls, 2)
+})
+
 test('a lost prompt response resumes the one durable DSH prompt instead of duplicating it', async () => {
   let sessionId
   let promptRpcId

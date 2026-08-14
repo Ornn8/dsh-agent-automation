@@ -15,9 +15,15 @@ export class DshWebRpcError extends Error {
 
 /** Classify only network failures that may safely be retried with the same RPC id. */
 export function dshFailureKind(error) {
-  if (error?.name === 'AbortError') return 'terminal'
-  if (TRANSIENT_CODES.has(error?.code)) return 'transient'
-  if (/\b(?:ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|UND_ERR_SOCKET)\b/.test(String(error?.message || ''))) return 'transient'
+  const seen = new Set()
+  let current = error
+  while (current && typeof current === 'object' && seen.size < 8 && !seen.has(current)) {
+    if (current.name === 'AbortError') return 'terminal'
+    if (TRANSIENT_CODES.has(current.code)) return 'transient'
+    if (/\b(?:ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|UND_ERR_SOCKET)\b/.test(String(current.message || ''))) return 'transient'
+    seen.add(current)
+    current = current.cause
+  }
   return 'terminal'
 }
 

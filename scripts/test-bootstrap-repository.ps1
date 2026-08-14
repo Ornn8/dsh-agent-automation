@@ -95,7 +95,7 @@ try {
   Assert-True ($reviewWorkflow -notmatch 'statuses: write|dsh-review') 'Agent PR Review retained an obsolete review trigger or permission.'
   Assert-True ($issuesWorkflow -match '(?m)^    types: \[dsh-issue\]\r?$') 'Agent Issues lacks the GitHub-token recursion-safe Issue trigger.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
-  Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR Review\]\r?$') 'Agent Recovery listens beyond the three trusted agent entry workflows.'
+  Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR CI Repair, Agent PR Review\]\r?$') 'Agent Recovery must include each trusted model-backed entry workflow.'
   Assert-True ($recoveryWorkflow -match [Regex]::Escape('contains(fromJSON(''["failure", "cancelled"]''), github.event.workflow_run.conclusion)')) 'Agent Recovery must retain cancelled-run recovery.'
 
   & git -C $temp add .github/workflows

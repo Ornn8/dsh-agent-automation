@@ -23,7 +23,7 @@ test('the controller creates and completes its exact-head review CheckRun', asyn
   assert.equal(checkId, 91)
   assert.deepEqual(created.calls[0][1], [
     'api', '--method', 'POST', `repos/${repository}/check-runs`,
-    '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=in_progress', '-f', `details_url=${runUrl}`,
+    '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=in_progress', '-f', `details_url=${runUrl}`, '-f', `external_id=${runUrl}`,
     '-f', 'output[title]=Codex review in progress', '-f', 'output[summary]=Reviewing this exact pull request head.',
   ])
 
@@ -39,8 +39,8 @@ test('the controller creates and completes its exact-head review CheckRun', asyn
 test('an infrastructure failure creates a terminal exact-head review CheckRun', async () => {
   const failed = recorder()
   await failReviewCheck({ ghExecutable: 'gh', repository, head, runUrl, summary: 'Infrastructure failure.', execute: failed.execute })
-  assert.deepEqual(failed.calls[0][1].slice(0, 14), [
+  assert.deepEqual(failed.calls[0][1].slice(0, 16), [
     'api', '--method', 'POST', `repos/${repository}/check-runs`,
-    '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=completed', '-f', 'conclusion=failure', '-f', `details_url=${runUrl}`,
+    '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=completed', '-f', 'conclusion=failure', '-f', `details_url=${runUrl}`, '-f', `external_id=${runUrl}`,
   ])
 })

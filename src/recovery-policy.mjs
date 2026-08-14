@@ -6,7 +6,7 @@ function recoveryRole(run, repository, trust) {
     || run.status !== 'completed'
     || !['failure', 'cancelled'].includes(run.conclusion)) return null
   const workflow = run.name === 'Agent Issues' ? '.github/workflows/dsh-issue.yml'
-    : run.name === 'Agent PR Rework' ? '.github/workflows/dsh-repair.yml'
+    : ['Agent PR Rework', 'Agent PR CI Repair'].includes(run.name) ? '.github/workflows/dsh-repair.yml'
       : run.name === 'Agent PR Review' ? '.github/workflows/codex-review.yml' : null
   const expectedPath = `${trust?.controllerRepository}/${workflow}@${trust?.controllerSha}`
   if (!workflow || !FULL_SHA.test(trust?.controllerSha || '') || !run.referenced_workflows?.some(reference => reference.path === expectedPath

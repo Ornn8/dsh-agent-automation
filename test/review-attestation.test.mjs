@@ -4,6 +4,7 @@ import {
   evaluateLanding,
   hasTrustedExactReviewProof,
   hasTrustedExactReviewRun,
+  reviewRunIdFromCheckRun,
   reviewRunIdFromDetailsUrl,
 } from '../src/landing-policy.mjs'
 
@@ -115,4 +116,15 @@ test('review check details URL identifies one GitHub Actions run only', () => {
   assert.equal(reviewRunIdFromDetailsUrl('https://github.com/owner/repository/actions/runs/17/job/1', repository), 17)
   assert.equal(reviewRunIdFromDetailsUrl('https://github.com/other/repository/actions/runs/17', repository), null)
   assert.equal(reviewRunIdFromDetailsUrl('https://github.com/owner/repository/actions/runs/nope', repository), null)
+})
+
+test('review check provenance survives GitHub normalizing its visible details URL', () => {
+  const normalized = proof({ checkRun: {
+    ...proof().checkRun,
+    details_url: 'https://github.com/owner/repository/runs/91',
+    external_id: 'https://github.com/owner/repository/actions/runs/17',
+  } })
+  const trustedReview = { controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml' }
+  assert.equal(reviewRunIdFromCheckRun(normalized.checkRun, repository), 17)
+  assert.equal(hasTrustedExactReviewProof({ pullRequest: pullRequest(), reviewProof: normalized, trustedReview }), true)
 })
