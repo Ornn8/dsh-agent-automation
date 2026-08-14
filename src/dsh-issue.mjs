@@ -109,6 +109,11 @@ const jobPath = await mkdtemp(join(runnerTemp, `dsh-issue-${issueNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
 
 try {
+  for (const label of ['agent/dsh-blocked', 'agent/dsh-failed']) {
+    await run(config.ghExecutable, [
+      'issue', 'edit', String(issueNumber), '--repo', repository, '--remove-label', label,
+    ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+  }
   await upsertStatus(statusBody('running', branch, 'The GitHub event started a fresh DSH session.'))
   await run(config.ghExecutable, [
     'repo', 'clone', repository, checkoutPath, '--', '--filter=blob:none', '--no-checkout',
@@ -157,32 +162,50 @@ try {
     adapters: createAgentAdapters(),
   })
 
-  const pullRequests = await ghJson([
-    'pr', 'list', '--repo', repository, '--state', 'open', '--head', branch,
-    '--json', 'number,body,headRefName,baseRefName,url,headRefOid',
-  ], 'resulting pull requests')
-  const pullRequest = pullRequests.find(pr => pr.headRefName === branch
-    && pr.baseRefName === defaultBranch
-    && closesIssue(pr))
-  if (!pullRequest) {
-    throw new Error(`DSH exited successfully but did not create an open ${branch} -> ${defaultBranch} pull request that closes #${issueNumber}`)
-  }
+  if (workerReceipt.outcome === 'blocked') {
+    await run(config.ghExecutable, [
+      'label', 'create', 'agent/dsh-blocked', '--repo', repository,
+      '--description', 'DSH reached a valid terminal block without producing a pull request', '--color', 'B60205',
+    ], { env: hostCredentialEnvironment() }).catch(() => undefined)
+    await run(config.ghExecutable, [
+      'issue', 'edit', String(issueNumber), '--repo', repository,
+      '--remove-label', 'agent/dsh', '--add-label', 'agent/dsh-blocked',
+    ], { env: hostCredentialEnvironment() })
+    await upsertStatus(statusBody('blocked', branch,
+      `Session ${workerReceipt.sessionId} reached a valid terminal block: ${workerReceipt.detail}`))
+    process.stdout.write(`${workerId} ended Issue #${issueNumber} as blocked; no retry was scheduled.\n`)
+  } else {
+    if (workerReceipt.outcome !== 'completed') {
+      throw new Error(`DSH worker ended Issue #${issueNumber} with ${workerReceipt.outcome}`)
+    }
+    const pullRequests = await ghJson([
+      'pr', 'list', '--repo', repository, '--state', 'open', '--head', branch,
+      '--json', 'number,body,headRefName,baseRefName,url,headRefOid',
+    ], 'resulting pull requests')
+    const pullRequest = pullRequests.find(pr => pr.headRefName === branch
+      && pr.baseRefName === defaultBranch
+      && closesIssue(pr))
+    if (!pullRequest) {
+      throw new Error(`DSH exited successfully but did not create an open ${branch} -> ${defaultBranch} pull request that closes #${issueNumber}`)
+    }
 
-  const remoteHead = (await run(config.gitExecutable, [
-    'ls-remote', '--heads', 'origin', `refs/heads/${branch}`,
-  ], { cwd: checkoutPath })).stdout.trim().split(/\s+/)[0]
-  if (!remoteHead || remoteHead !== pullRequest.headRefOid) {
-    throw new Error(`Pull request head ${pullRequest.headRefOid} does not match remote branch head ${remoteHead || '<missing>'}`)
-  }
+    const remoteHead = (await run(config.gitExecutable, [
+      'ls-remote', '--heads', 'origin', `refs/heads/${branch}`,
+    ], { cwd: checkoutPath })).stdout.trim().split(/\s+/)[0]
+    if (!remoteHead || remoteHead !== pullRequest.headRefOid) {
+      throw new Error(`Pull request head ${pullRequest.headRefOid} does not match remote branch head ${remoteHead || '<missing>'}`)
+    }
 
-  await upsertStatus(statusBody('complete', branch, `Session ${workerReceipt.sessionId} produced a pull request for independent review: ${pullRequest.url}`))
-  process.stdout.write(`${workerId} produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
+    await upsertStatus(statusBody('complete', branch, `Session ${workerReceipt.sessionId} produced a pull request for independent review: ${pullRequest.url}`))
+    process.stdout.write(`${workerId} produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
+  }
 } catch (error) {
   await upsertStatus(statusBody('failed', branch, `The run failed: ${String(error.message).slice(0, 1000)}`))
     .catch(() => undefined)
   await run(config.ghExecutable, [
     'issue', 'edit', String(issueNumber), '--repo', repository,
-    '--remove-label', 'agent/dsh', '--add-label', 'agent/dsh-failed',
+    '--remove-label', 'agent/dsh', '--remove-label', 'agent/dsh-blocked',
+    '--add-label', 'agent/dsh-failed',
   ], { env: hostCredentialEnvironment() }).catch(() => undefined)
   throw error
 } finally {

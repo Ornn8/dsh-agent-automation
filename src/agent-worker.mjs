@@ -62,6 +62,7 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
     outcome,
     detail: typeof value.detail === 'string' ? value.detail : '',
     output: value.output,
+    ...(value.automationResult === undefined ? {} : { automationResult: value.automationResult }),
   }
 }
 

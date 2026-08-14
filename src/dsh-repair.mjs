@@ -28,6 +28,11 @@ import {
   MAX_AUTOMATIC_REPAIR_ATTEMPTS,
   recordedRepairState,
 } from './repair-state.mjs'
+import {
+  ciBaselineIssueFromReceipt,
+  nonBaselineBlockFromReceipt,
+  trustedBaselineIssue,
+} from './baseline-issue.mjs'
 import { isReviewRepairRequestId } from './work-request.mjs'
 import { DSH_REPAIR_SKILL, dshWorkPrompt } from './dsh-work.mjs'
 
@@ -105,6 +110,8 @@ async function setRepairLabels({ add = [], remove = [] }) {
   for (const [name, description, color] of [
     ['automation/review-blocked', 'Codex found a blocking defect at the current PR head', 'B60205'],
     ['automation/ci-failed', 'A failed CI run requires DSH repair at the current PR head', 'D93F0B'],
+    ['automation/ci-baseline', 'The failed CI condition is tracked by a separate default-branch Issue', '1D76DB'],
+    ['automation/repair-blocked', 'DSH ended this repair with a valid blocked outcome', 'B60205'],
     ['automation/repairing', 'DSH is addressing the current blocking review', 'FBCA04'],
     ['agent/dsh-failed', 'DSH execution failed; an explicit recovery request is required', 'D93F0B'],
   ]) {
@@ -188,7 +195,7 @@ if (automaticRepair) {
       `Automatic repair limit reached: ${MAX_AUTOMATIC_REPAIR_ATTEMPTS} attempts under controller ${controllerSha}. A trusted explicit rework command may still request repair.`)
     await setRepairLabels({
       add: ['agent/dsh-failed'],
-      remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/repairing'],
+      remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing'],
     })
     cancellation.dispose()
     process.stdout.write(`Automatic repair limit reached for pull request #${pullRequestNumber}; wrote dead-letter status without starting a model.\n`)
@@ -202,7 +209,9 @@ await upsertStatus('running', branch, explicitRequest
   : 'The blocking Codex verdict started a fresh DSH repair session.')
 await setRepairLabels({
   add: ciRequest ? ['automation/repairing'] : ['automation/review-blocked', 'automation/repairing'],
-  remove: ciRequest ? ['automation/ci-failed', 'agent/dsh-failed'] : ['agent/dsh-failed'],
+  remove: ciRequest
+    ? ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed']
+    : ['automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed'],
 })
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-repair-${pullRequestNumber}-`))
@@ -251,24 +260,61 @@ try {
     adapters: createAgentAdapters(),
   })
 
-  const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
-  if (current.head.sha !== expectedHead) {
-    await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/repairing', 'agent/dsh-failed'] })
-    await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; GitHub will review the newer head.`)
-    process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
-  } else if (!ciRequest && current.labels.some(label => label.name === 'automation/review-ready')) {
-    await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-    await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
-    process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
+  const baselineReference = ciRequest
+    ? ciBaselineIssueFromReceipt({ receipt: workerReceipt, repository })
+    : null
+  if (baselineReference) {
+    const baselineIssue = await ghJson([
+      'api', `repos/${repository}/issues/${baselineReference.number}`,
+    ], 'reported CI baseline Issue')
+    const verifiedBaseline = trustedBaselineIssue({
+      issue: baselineIssue,
+      repository,
+      reference: baselineReference,
+      trustedAssociation,
+      workflowName: ciWorkflowName,
+      branch,
+      pullRequestBody: pullRequest.body,
+    })
+    await setRepairLabels({
+      add: ['automation/ci-baseline'],
+      remove: ['automation/ci-failed', 'automation/repairing', 'automation/repair-blocked', 'agent/dsh-failed'],
+    })
+    await upsertStatus('blocked-baseline', branch,
+      `Session ${workerReceipt.sessionId} verified the separate default-branch baseline Issue: ${baselineReference.url} (${verifiedBaseline.identity.key}).`)
+    process.stdout.write(`DSH identified CI baseline Issue #${baselineReference.number}; the pull request remains unchanged.\n`)
   } else {
-    throw new Error('DSH exited successfully without advancing the head or requesting the documented same-head rereview')
+    if (workerReceipt.outcome === 'blocked') {
+      const blocked = nonBaselineBlockFromReceipt(workerReceipt)
+      if (!blocked) throw new Error('DSH reported blocked without a terminal automation result')
+      await setRepairLabels({
+        add: ['automation/repair-blocked'],
+        remove: ['automation/ci-failed', 'automation/repairing', 'agent/dsh-failed'],
+      })
+      await upsertStatus('blocked', branch,
+        `Session ${workerReceipt.sessionId} ended with the valid ${blocked.reason} outcome; no baseline Issue was dispatched.`)
+      process.stdout.write(`DSH ended repair for pull request #${pullRequestNumber} with ${blocked.reason}; no retry was scheduled.\n`)
+    } else {
+      const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
+      if (current.head.sha !== expectedHead) {
+        await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
+        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; GitHub will review the newer head.`)
+        process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
+      } else if (!ciRequest && current.labels.some(label => label.name === 'automation/review-ready')) {
+        await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
+        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
+        process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
+      } else {
+        throw new Error('DSH exited successfully without advancing the head or requesting the documented same-head rereview')
+      }
+    }
   }
 } catch (error) {
   await upsertStatus('failed', branch, `The repair run failed: ${String(error.message).slice(0, 1000)}`)
     .catch(() => undefined)
   await setRepairLabels({
     add: ciRequest ? ['agent/dsh-failed'] : ['automation/review-blocked', 'agent/dsh-failed'],
-    remove: ['automation/ci-failed', 'automation/repairing'],
+    remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing'],
   })
   throw error
 } finally {
