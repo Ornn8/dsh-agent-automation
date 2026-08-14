@@ -18,6 +18,7 @@ import {
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
+import { baselineIssueWorkItem } from './baseline-issue.mjs'
 import { DSH_ISSUE_SKILL, dshWorkPrompt } from './dsh-work.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
@@ -84,7 +85,9 @@ if (!issue.labels?.some(label => label.name === 'agent/dsh')) {
 
 const branch = authorizedIssueBranch(
   issueNumber,
-  issueBranch(issue.body || '', /^\[BUG\]\s+/i.test(issue.title || '') ? { number: issueNumber } : undefined),
+  issueBranch(issue.body || '', /^\[BUG\]\s+/i.test(issue.title || '') || baselineIssueWorkItem(issue)
+    ? { number: issueNumber }
+    : undefined),
   defaultBranch,
 )
 const existing = await ghJson([

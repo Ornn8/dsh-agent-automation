@@ -562,6 +562,12 @@ test('a valid blocked Issue result becomes terminal state without recovery failu
   assert.match(source, /no retry was scheduled/)
 })
 
+test('the Issue worker gives its own CI baseline handoff a deterministic branch', async () => {
+  const source = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
+  assert.match(source, /baselineIssueWorkItem\(issue\)/)
+  assert.match(source, /\? \{ number: issueNumber \}/)
+})
+
 test('reviewer instructions come from the verified base rather than the pull request head', async () => {
   const source = await readFile(new URL('../src/codex-review.mjs', import.meta.url), 'utf8')
   assert.match(source, /git -C \$\{reviewCheckout\} show \$\{expectedBase\}:AGENTS\.md/)
@@ -779,6 +785,20 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
   assert.deepEqual(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
   }), { type: 'issue', number: 3 })
+})
+
+test('backlog dispatch consumes the CI baseline Issue emitted by the repair Skill', () => {
+  const baseline = {
+    number: 27,
+    state: 'open',
+    title: 'CI baseline: CI [5c8f1b07289d2c6e]',
+    body: '<!-- dsh-ci-baseline:v1:5c8f1b07289d2c6e -->\n\nThe default branch reproduces the failure.',
+    author_association: 'OWNER',
+    labels: [{ name: 'agent/dsh' }],
+  }
+  assert.deepEqual(selectBacklogWork({ repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [baseline] }), {
+    type: 'issue', number: 27,
+  })
 })
 
 test('explicit rework commands are deliberate and case insensitive', () => {
