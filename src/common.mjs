@@ -159,7 +159,7 @@ export function reviewerCredentialEnvironment(overrides = {}, source = process.e
   return Object.assign(environment, {
     GCM_INTERACTIVE: 'Never',
     GH_PROMPT_DISABLED: '1',
-    GIT_CONFIG_GLOBAL: 'NUL',
+    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_TERMINAL_PROMPT: '0',
   }, overrides)
