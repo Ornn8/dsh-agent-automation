@@ -8,10 +8,22 @@ function checkPassed(check) {
     && ['SUCCESS', 'SKIPPED', 'NEUTRAL'].includes(check.conclusion)
 }
 
+// The Codex review comment is published by the job-scoped Actions token, which
+// GitHub attributes to github-actions[bot]. Only that bot identity may satisfy
+// the landing gate: matching the body text alone would let a pull request
+// author post a forged PASS comment for the exact base and head pair and then
+// merge through the successful-CI landing path without an authentic verdict.
+const TRUSTED_REVIEWER_LOGIN = 'github-actions[bot]'
+
+function isTrustedReviewer(comment) {
+  return comment.user?.type === 'Bot' && comment.user?.login === TRUSTED_REVIEWER_LOGIN
+}
+
 function hasExactPassingReview(comments, base, head) {
   const marker = `<!-- codex-review:${head} -->`
   const exactPair = `_Reviewed exact head \`${head}\` against base \`${base}\``
-  return comments.some(comment => comment.body?.includes(marker)
+  return comments.some(comment => isTrustedReviewer(comment)
+    && comment.body?.includes(marker)
     && comment.body.includes('## Codex review: PASS')
     && comment.body.includes(exactPair))
 }

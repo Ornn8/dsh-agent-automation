@@ -56,7 +56,7 @@ No controller workflow needs agent-specific branches. For a command-line agent, 
 1. Adding the exact `agent/dsh` label to a trusted Issue starts the configured change Worker. The backlog dispatcher selects one ready Issue after each default-branch merge and respects explicit dependencies.
 2. Opening or updating a same-repository pull request starts the configured review Worker on the review runner. The current Codex Adapter creates a visible ChatGPT Desktop task using `gpt-5.6-sol` at medium reasoning and archives automated review tasks beyond the newest six.
 3. A blocking exact-pair review publishes one idempotent change WorkRequest. Failed CI and trusted review feedback use the same change queue through their validated request forms.
-4. PASS requests deterministic landing. The landing controller requires the current exact base/head PASS and all protected checks, revalidates the pair, and performs the squash merge.
+4. PASS requests deterministic landing. The landing controller requires the current exact base/head PASS authored by the trusted `github-actions[bot]` review identity and all protected checks, revalidates the pair, and performs the squash merge.
 
 The runners are idle outbound GitHub listeners. They make no model calls while no matching job exists. Landing, reconciliation, dispatch, and health checks are deterministic.
 
@@ -81,6 +81,7 @@ Stopping the review runner leaves change work operational. Stopping the change r
 - Privileged Issue and feedback requests revalidate author association and live repository state.
 - Review workers receive no GitHub token and inspect pull request code without executing it.
 - Review comments and WorkRequests bind full base and head SHAs. Ref movement makes the result stale.
+- Landing authenticates the PASS comment by its `github-actions[bot]` publisher, not its body text, so a pull request author cannot forge an exact pair PASS.
 - Missing or malformed worker output never becomes PASS.
 - Each exact blocked pair has one idempotency key. A new head creates a new review; a same-head rebuttal creates at most one rereview.
 - Reusable workflows reject mutable controller revisions and pin third-party Actions by full commit SHA.
