@@ -15,6 +15,8 @@ import {
   removeJobDirectory,
   resolveRepositoryWorker,
   trustedAssociation,
+  validateConfigSchemaVersion,
+  validateDshWorkerConfig,
   verifyGithubIdentity,
 } from '../src/common.mjs'
 import {
@@ -31,7 +33,7 @@ import {
   hasExactReviewVerdict,
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
-import { dshRpc, localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
+import { dshModelSelection, dshRpc, localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
 import {
   reviewSandboxPolicy,
   reviewTaskIdsToArchive,
@@ -61,6 +63,7 @@ function visibleSessionFetch(reason = 'completed') {
     calls.push(request)
     switch (request.method) {
       case 'session.create': return rpcResponse(request, { sessionId: 'session-visible' })
+      case 'session.selectModel': return rpcResponse(request, { selected: request.payload })
       case 'session.rename': return rpcResponse(request, { title: request.payload.title, seq: 1 })
       case 'session.prompt': return rpcResponse(request, { accepted: true })
       case 'session.cancel': return rpcResponse(request, { accepted: true })
@@ -77,9 +80,24 @@ function visibleSessionFetch(reason = 'completed') {
   return { calls, fetchImpl }
 }
 
+const dshModel = { provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max' }
+
 test('DSH Web sessions stay on the loopback Host', () => {
   assert.equal(localDshWebBaseUrl('http://localhost:3080'), 'http://localhost:3080')
   assert.throws(() => localDshWebBaseUrl('https://example.com'), /loopback/)
+})
+
+test('DSH model selection configuration is complete and fails closed', () => {
+  assert.deepEqual(dshModelSelection({ provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max' }), dshModel)
+  assert.throws(() => dshModelSelection({ provider: 'opencode-go', model: 'deepseek-v4-flash' }), /reasoningEffort/)
+  assert.throws(() => validateDshWorkerConfig({ workers: {
+    dsh: { adapter: 'dsh-web', baseUrl: 'http://127.0.0.1:3080', provider: 'opencode-go', model: 'deepseek-v4-flash' },
+  } }), /workers\.dsh.*reasoningEffort/)
+})
+
+test('the controller rejects the removed configuration schema before starting a worker', () => {
+  assert.doesNotThrow(() => validateConfigSchemaVersion({ schemaVersion: 2, operations: { schemaVersion: 2 } }))
+  assert.throws(() => validateConfigSchemaVersion({ schemaVersion: 1, operations: { schemaVersion: 1 } }), /schemaVersion must be 2/)
 })
 
 test('DSH Web session is titled, prompted once, and observed to completion', async () => {
@@ -90,6 +108,7 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
     cwd: 'F:\\runner\\checkout',
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
+    modelSelection: dshModel,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
     onCreated: async value => { created = value },
@@ -97,10 +116,11 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
   assert.deepEqual(result, { sessionId: 'session-visible', reason: 'completed' })
   assert.deepEqual(created, { sessionId: 'session-visible' })
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.rename', 'session.prompt',
+    'session.create', 'session.selectModel', 'session.rename', 'session.prompt',
     'session.list', 'session.list', 'session.history',
   ])
-  assert.equal(fake.calls[2].payload.content[0].text, 'Do the work.')
+  assert.deepEqual(fake.calls[1].payload, { sessionId: 'session-visible', ...dshModel })
+  assert.equal(fake.calls[3].payload.content[0].text, 'Do the work.')
 })
 
 test('DSH Web session interruption fails the controller', async () => {
@@ -110,9 +130,27 @@ test('DSH Web session interruption fails the controller', async () => {
     cwd: 'F:\\runner\\checkout',
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
+    modelSelection: dshModel,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
   }), /ended with interrupted/)
+})
+
+test('DSH model selection failure reaches the durable worker failure without prompting', async () => {
+  const fake = visibleSessionFetch()
+  const fetchImpl = async (url, options) => {
+    const request = JSON.parse(options.body)
+    if (request.method === 'session.selectModel') {
+      fake.calls.push(request)
+      return rpcResponse(request, { code: 'model-unavailable', message: 'configured model is unavailable' }, false)
+    }
+    return fake.fetchImpl(url, options)
+  }
+  await assert.rejects(runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080', cwd: 'F:\\runner\\checkout', title: 'Select model', prompt: 'Work.',
+    modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
+  }), /session\.selectModel failed: model-unavailable/)
+  assert.deepEqual(fake.calls.map(call => call.method), ['session.create', 'session.selectModel', 'session.cancel'])
 })
 
 test('a transient DSH RPC reset retries with one id and resumes the original session', async () => {
@@ -146,6 +184,7 @@ test('a cancellation signal cancels the original visible DSH session', async () 
   const controller = new AbortController()
   const result = runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080', cwd: 'F:\\runner\\checkout', title: 'Cancel me', prompt: 'Work.',
+    modelSelection: dshModel,
     fetchImpl: fake.fetchImpl, sleep: async () => { controller.abort() }, signal: controller.signal,
   })
   await assert.rejects(result, /cancelled by controller signal/)
@@ -160,6 +199,7 @@ test('DSH Web session timeout cancels the controller-owned turn', async () => {
     cwd: 'F:\\runner\\checkout',
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
+    modelSelection: dshModel,
     timeoutMs: 1,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,

@@ -33,6 +33,19 @@ export function localDshWebBaseUrl(value) {
   return url.origin
 }
 
+/** Validate the complete per-session DSH model selection required before prompting. */
+export function dshModelSelection(value) {
+  if (!value || typeof value !== 'object') throw new Error('DSH worker must declare a model selection')
+  const selection = {}
+  for (const field of ['provider', 'model', 'reasoningEffort']) {
+    if (typeof value[field] !== 'string' || !value[field].trim()) {
+      throw new Error(`DSH worker ${field} must be a non-empty string`)
+    }
+    selection[field] = value[field].trim()
+  }
+  return selection
+}
+
 /** Call one DSH Web Host RPC method and unwrap its result. */
 export async function dshRpc(baseUrl, method, payload, fetchImpl = fetch, {
   maxAttempts = 3,
@@ -82,17 +95,20 @@ export async function runDshWebSession({
   onCreated = async () => undefined,
   rpcAttempts = 3,
   signal,
+  modelSelection,
 }) {
   const endpoint = localDshWebBaseUrl(baseUrl)
   const rpc = (method, payload) => dshRpc(endpoint, method, payload, fetchImpl, {
     maxAttempts: rpcAttempts, sleep, signal,
   })
+  const selectedModel = dshModelSelection(modelSelection)
   const created = await rpc('session.create', { cwd })
   const sessionId = created?.sessionId
   if (typeof sessionId !== 'string' || !sessionId) throw new Error('DSH Web Host did not return a session id')
   process.stdout.write(`Created visible DSH session ${sessionId}: ${title}\n`)
 
   try {
+    await rpc('session.selectModel', { sessionId, ...selectedModel })
     await rpc('session.rename', { sessionId, title })
     await onCreated({ sessionId })
     await rpc('session.prompt', {

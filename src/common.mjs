@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { readFile, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { normalizeWorkerConfig } from './agent-worker.mjs'
+import { dshModelSelection } from './dsh-web-session.mjs'
 
 /** Run a process without a command shell and return its captured output. */
 export function run(command, args, options = {}) {
@@ -79,6 +80,7 @@ export function parseJson(text, description) {
 export async function loadConfig() {
   const path = resolve(requiredEnv('DSH_AGENT_CONFIG'))
   const config = normalizeWorkerConfig(parseJson(await readFile(path, 'utf8'), 'runner configuration'))
+  validateConfigSchemaVersion(config)
   const required = ['repositories', 'ghExecutable', 'gitExecutable']
   for (const name of required) {
     if (name === 'repositories') {
@@ -96,8 +98,28 @@ export async function loadConfig() {
     resolveRepositoryWorker(config, repository, 'change')
     resolveRepositoryWorker(config, repository, 'review')
   }
+  validateDshWorkerConfig(config)
   githubLogin(config)
   return config
+}
+
+/** Reject configuration formats that predate explicit worker declarations. */
+export function validateConfigSchemaVersion(config) {
+  if (config?.schemaVersion !== 2 || config?.operations?.schemaVersion !== 2) {
+    throw new Error('runner configuration schemaVersion must be 2')
+  }
+}
+
+/** Validate that every local DSH worker has an explicit complete model selection. */
+export function validateDshWorkerConfig(config) {
+  for (const [workerId, worker] of Object.entries(config?.workers || {})) {
+    if (worker?.adapter !== 'dsh-web') continue
+    try {
+      dshModelSelection(worker)
+    } catch (error) {
+      throw new Error(`workers.${workerId} ${error.message}`)
+    }
+  }
 }
 
 /** Resolve a worker from the one local mapping permitted for a repository role. */

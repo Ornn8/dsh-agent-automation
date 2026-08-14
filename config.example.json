@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Ornn8/dsh-agent-automation/master/ops/config.schema.json",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "repositories": ["Ornn8/deepseek-harness"],
   "ghExecutable": "gh.exe",
   "gitExecutable": "git.exe",
@@ -10,7 +10,10 @@
   "workers": {
     "dsh": {
       "adapter": "dsh-web",
-      "baseUrl": "http://127.0.0.1:3080"
+      "baseUrl": "http://127.0.0.1:3080",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "reasoningEffort": "max"
     },
     "codex": {
       "adapter": "codex-app",
@@ -30,7 +33,7 @@
     }
   },
   "operations": {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "installRoot": "F:\\dsh-agent-automation-runtime",
     "stateRoot": "F:\\dsh-agent-automation-state",
     "logsRoot": "F:\\dsh-agent-automation-state\\logs",

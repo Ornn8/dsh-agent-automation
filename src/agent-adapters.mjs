@@ -7,7 +7,7 @@ import {
   run,
 } from './common.mjs'
 import { runReviewTask } from './codex-session.mjs'
-import { dshRpc, runDshWebSession } from './dsh-web-session.mjs'
+import { dshModelSelection, dshRpc, runDshWebSession } from './dsh-web-session.mjs'
 
 /** Build the machine-local adapter registry used by the Agent Worker module. */
 export function createAgentAdapters({
@@ -24,6 +24,7 @@ export function createAgentAdapters({
           cwd: invocation.cwd,
           title: invocation.title,
           prompt: invocation.prompt,
+          modelSelection: dshModelSelection(worker),
           timeoutMs: invocation.timeoutMs,
           signal: invocation.signal,
           onCreated: invocation.onStarted,

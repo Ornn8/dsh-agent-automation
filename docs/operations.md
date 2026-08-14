@@ -13,13 +13,13 @@ Two registration modes are supported:
 
 Target-repository instances have deterministic IDs derived from the full repository name plus a short SHA-256 suffix. Each instance has its own GitHub registration, Scheduled Task, runner root, work directory, supervisor log, and fault marker. Stopping `change` for one repository does not stop its `review` runner or either runner for another repository. Organization runners are intentionally shared across all mapped repositories, so repository-level selection is rejected in that mode.
 
-The optional `dsh-web` task is host-wide. Its hidden supervisor probes the loopback RPC endpoint and restarts only the process it started after repeated failures. Supervisor lifecycle and health logs are in `logsRoot`; GitHub runner diagnostics remain in each private runner directory.
+The optional `dsh-web` task is host-wide. Its hidden supervisor probes the loopback RPC endpoint and restarts only the process it started after repeated failures. Each configured `dsh-web` worker must include a nonempty provider, model, and reasoning effort. The controller applies that complete selection through `session.selectModel` after session creation and before every task prompt; missing configuration or a rejected selection fails the job rather than using a UI default. Supervisor lifecycle and health logs are in `logsRoot`; GitHub runner diagnostics remain in each private runner directory.
 
 ## Configuration and paths
 
 Use a dedicated Windows account. Install PowerShell 7 (`pwsh`), Git, GitHub CLI, Node, the DSH Web Host, and the configured review adapter. Model credentials remain in those products' existing local configuration.
 
-Copy [config.example.json](../config.example.json) to a machine-local file inside `stateRoot` on a data volume, for example `F:\dsh-agent-automation-state\agent-config.json`. Installed tasks continue to read that file, so it must not remain in a Git checkout. The example is ready for an `Ornn8` personal-account topology and demonstrates repository-level registration; replace executable paths, runner release/version/hash, and target mappings as needed.
+Copy [config.example.json](../config.example.json) to a machine-local file inside `stateRoot` on a data volume, for example `F:\dsh-agent-automation-state\agent-config.json`. Installed tasks continue to read that file, so it must not remain in a Git checkout. Configuration schema version 2 requires explicit `workers` and repository mappings; legacy top-level worker fields are rejected. The example is ready for an `Ornn8` personal-account topology and demonstrates repository-level registration; replace executable paths, runner release/version/hash, and target mappings as needed.
 
 Set `github.login` to the exact GitHub CLI login on the host. Install and online doctor call `gh api user` and compare only the login, preventing another cached identity from operating the runners. They do not display the login returned by GitHub or any token.
 
