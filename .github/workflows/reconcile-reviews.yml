@@ -10,14 +10,10 @@ concurrency:
 jobs:
   reconcile:
     name: codex/reconcile-base
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, agent-change]
     timeout-minutes: 15
     permissions:
-      actions: read
-      checks: read
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
     steps:
       - name: Check out automation controller
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -34,5 +30,4 @@ jobs:
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/codex-review.yml
-          GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/reconcile-reviews.mjs

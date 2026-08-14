@@ -1,16 +1,20 @@
 import {
-  actionsCredentialEnvironment,
+  hostCredentialEnvironment,
+  loadConfig,
   parseJson,
   requiredEnv,
   run,
+  verifyGithubIdentity,
 } from './common.mjs'
 import { needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
 import { hasTrustedExactReviewRun, reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
-const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
-const githubEnvironment = actionsCredentialEnvironment()
+const config = await loadConfig()
+await verifyGithubIdentity({ config })
+const githubExecutable = config.ghExecutable
+const githubEnvironment = hostCredentialEnvironment()
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
@@ -81,7 +85,7 @@ async function waitForUpdatedPair(pullRequest) {
   throw new Error(`Pull request #${pullRequest.number} did not expose its updated exact pair`)
 }
 
-let dispatched = 0
+let reconciled = 0
 for (const summary of summaries.flat()) {
   const pullRequest = await ghJson([
     'api', `repos/${repository}/pulls/${summary.number}`,
@@ -94,10 +98,9 @@ for (const summary of summaries.flat()) {
       'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequest.number}/update-branch`,
       '-f', `expected_head_sha=${pullRequest.head.sha}`,
     ], { env: githubEnvironment })
-    const updatedPullRequest = await waitForUpdatedPair(pullRequest)
-    await requestReview(updatedPullRequest)
-    dispatched += 1
-    process.stdout.write(`Updated pull request #${pullRequest.number} from ${defaultBranch} and dispatched its new exact pair.\n`)
+    await waitForUpdatedPair(pullRequest)
+    reconciled += 1
+    process.stdout.write(`Updated pull request #${pullRequest.number} from ${defaultBranch}; GitHub will deliver its new exact pair to CI and review listeners.\n`)
     continue
   }
   const landingPullRequest = {
@@ -129,6 +132,6 @@ for (const summary of summaries.flat()) {
   if (!needsExactReview({ repository, defaultBranch, pullRequest, reviewProof })) continue
 
   await requestReview(pullRequest)
-  dispatched += 1
+  reconciled += 1
 }
-process.stdout.write(`Dispatched ${dispatched} exact-pair review reconciliation request(s).\n`)
+process.stdout.write(`Reconciled ${reconciled} pull request(s).\n`)
