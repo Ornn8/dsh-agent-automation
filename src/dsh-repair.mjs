@@ -17,6 +17,7 @@ import {
 } from './dispatch-policy.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
+import { interruptedRepairMayRetry, recordedRepairState } from './repair-state.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -164,8 +165,16 @@ const priorComments = await ghJson([
 ], 'pull request comments')
 const priorRun = priorComments.find(comment => comment.body?.includes(marker))
 if (priorRun) {
-  process.stdout.write(`DSH already consumed repair request ${marker}; leaving its recorded state for inspection.\n`)
-  process.exit(0)
+  const recorded = recordedRepairState(priorRun.body)
+  const priorActionRun = recorded.runId
+    ? await ghJson(['api', `repos/${repository}/actions/runs/${recorded.runId}`], 'prior repair workflow run')
+    : null
+  if (interruptedRepairMayRetry(priorRun.body, priorActionRun)) {
+    process.stdout.write(`Reclaiming repair request ${marker} after interrupted run ${recorded.runId}.\n`)
+  } else {
+    process.stdout.write(`DSH already consumed repair request ${marker}; leaving its recorded state for inspection.\n`)
+    process.exit(0)
+  }
 }
 
 const branch = pullRequest.head.ref

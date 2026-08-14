@@ -26,6 +26,7 @@ import {
 } from '../src/review-protocol.mjs'
 import { localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
 import { reviewTaskIdsToArchive } from '../src/codex-session.mjs'
+import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -360,6 +361,35 @@ test('automatic repair requests are idempotent for one exact review pair', () =>
   const head = 'b'.repeat(40)
   assert.equal(automaticRepairRequestId(base, head), `codex-${base}-${head}`)
   assert.throws(() => automaticRepairRequestId('main', head), /full commit SHA/)
+})
+
+test('an interrupted running repair request can be reclaimed exactly once', () => {
+  const body = [
+    '<!-- dsh-review-repair:head:request -->',
+    '### DSH review repair',
+    '',
+    '- Status: **running**',
+    '- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/31775196648',
+  ].join('\n')
+  assert.deepEqual(recordedRepairState(body), {
+    status: 'running',
+    runId: '31775196648',
+  })
+  assert.equal(interruptedRepairMayRetry(body, {
+    id: 31775196648,
+    status: 'completed',
+    conclusion: 'failure',
+  }), true)
+  assert.equal(interruptedRepairMayRetry(body, {
+    id: 31775196648,
+    status: 'in_progress',
+    conclusion: null,
+  }), false)
+  assert.equal(interruptedRepairMayRetry(body.replace('running', 'failed'), {
+    id: 31775196648,
+    status: 'completed',
+    conclusion: 'failure',
+  }), false)
 })
 
 test('a recorded BLOCK is not mislabeled as review automation failure', () => {
