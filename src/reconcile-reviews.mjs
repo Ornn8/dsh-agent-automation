@@ -17,6 +17,8 @@ const trustedReview = {
   workflowPath: requiredEnv('TRUSTED_REVIEW_WORKFLOW_PATH'),
 }
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
+const updatePollAttempts = 10
+const updatePollDelayMs = 1_000
 
 async function ghJson(args, description) {
   const result = await run(githubExecutable, args, { env: githubEnvironment })
@@ -53,6 +55,25 @@ async function requestReview(pullRequest) {
   ], { env: githubEnvironment })
 }
 
+async function waitForUpdatedPair(pullRequest) {
+  for (let attempt = 1; attempt <= updatePollAttempts; attempt += 1) {
+    const current = await ghJson([
+      'api', `repos/${repository}/pulls/${pullRequest.number}`,
+    ], `updated pull request #${pullRequest.number}`)
+    if (current.state !== 'open'
+      || current.draft
+      || current.base?.ref !== defaultBranch
+      || current.head?.repo?.full_name !== repository) {
+      throw new Error(`Pull request #${pullRequest.number} changed while updating its base`)
+    }
+    if (current.base.sha === defaultBranchHead && current.head.sha !== pullRequest.head.sha) return current
+    if (attempt < updatePollAttempts) {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, updatePollDelayMs))
+    }
+  }
+  throw new Error(`Pull request #${pullRequest.number} did not expose its updated exact pair`)
+}
+
 let dispatched = 0
 for (const summary of summaries.flat()) {
   const pullRequest = await ghJson([
@@ -66,7 +87,10 @@ for (const summary of summaries.flat()) {
       'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequest.number}/update-branch`,
       '-f', `expected_head_sha=${pullRequest.head.sha}`,
     ], { env: githubEnvironment })
-    process.stdout.write(`Updated pull request #${pullRequest.number} from ${defaultBranch}; synchronize will request review.\n`)
+    const updatedPullRequest = await waitForUpdatedPair(pullRequest)
+    await requestReview(updatedPullRequest)
+    dispatched += 1
+    process.stdout.write(`Updated pull request #${pullRequest.number} from ${defaultBranch} and dispatched its new exact pair.\n`)
     continue
   }
   const landingPullRequest = {
