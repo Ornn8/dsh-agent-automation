@@ -102,7 +102,12 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
     runDshSession: async input => {
       calls.push(input)
       await input.onCreated({ sessionId: 'dsh-visible' })
-      return { sessionId: 'dsh-visible', reason: 'completed' }
+      return {
+        sessionId: 'dsh-visible',
+        reason: 'completed',
+        finalMessage: '完成。\n<!-- dsh-automation-result\n{"version":1,"outcome":"completed","summary":"完成"}\n-->',
+        automationResult: { version: 1, outcome: 'completed', summary: '完成' },
+      }
     },
   })
   const receipt = await runAgentWorker({
@@ -126,6 +131,8 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
   assert.deepEqual(started, [{ sessionId: 'dsh-visible' }])
   assert.equal(receipt.workerId, 'implementer')
   assert.equal(receipt.outcome, 'completed')
+  assert.equal(receipt.detail, '完成')
+  assert.equal(receipt.automationResult.outcome, 'completed')
 })
 
 test('the Codex adapter satisfies the worker interface without GitHub credentials', async () => {

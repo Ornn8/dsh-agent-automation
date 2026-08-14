@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { parseDshAutomationResult } from './dsh-work.mjs'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 const TRANSIENT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_SOCKET'])
@@ -167,8 +168,20 @@ export async function runDshWebSession({
         if (turnEnd) {
           const reason = turnEnd.data?.reason?.kind || 'unknown'
           if (reason !== 'completed') throw new Error(`Visible DSH session ${sessionId} ended with ${reason}`)
+          const turn = turnEnd.data?.turn
+          if (!Number.isSafeInteger(turn) || turn < 1) {
+            throw new Error(`Visible DSH session ${sessionId} completed without a valid terminal turn`)
+          }
+          const finalAssistantEvent = history.events.map(item => item.event)
+            .findLast(event => event?.type === 'assistant/message' && event.data?.turn === turn)
+          const finalMessage = finalAssistantEvent?.data?.message?.content
+            ?.filter(block => block?.type === 'text' && typeof block.text === 'string')
+            .map(block => block.text)
+            .join('')
+          if (!finalMessage) throw new Error(`Visible DSH session ${sessionId} completed without a final assistant message`)
+          const automationResult = parseDshAutomationResult(finalMessage)
           process.stdout.write(`Visible DSH session ${sessionId} completed.\n`)
-          return { sessionId, reason }
+          return { sessionId, reason, finalMessage, automationResult }
         }
       }
       await sleep(Math.min(pollMs, Math.max(1, deadline - now())))

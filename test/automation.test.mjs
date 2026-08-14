@@ -40,7 +40,12 @@ import {
   localDshWebBaseUrl,
   runDshWebSession,
 } from '../src/dsh-web-session.mjs'
-import { DSH_ISSUE_SKILL, DSH_REPAIR_SKILL, dshWorkPrompt } from '../src/dsh-work.mjs'
+import {
+  DSH_ISSUE_SKILL,
+  DSH_REPAIR_SKILL,
+  dshWorkPrompt,
+  parseDshAutomationResult as parseDshWorkResult,
+} from '../src/dsh-work.mjs'
 import {
   listAllActiveThreads,
   reviewInitializeParams,
@@ -64,7 +69,13 @@ function rpcResponse(request, value, ok = true) {
   }
 }
 
-function visibleSessionFetch(reason = 'completed') {
+function dshFinalMessage(automationResult = {
+  version: 1, outcome: 'completed', summary: '任务已完成',
+}) {
+  return `本地会话结束。\n<!-- dsh-automation-result\n${JSON.stringify(automationResult)}\n-->`
+}
+
+function visibleSessionFetch(reason = 'completed', automationResult) {
   const calls = []
   let lists = 0
   let sessionId
@@ -88,7 +99,10 @@ function visibleSessionFetch(reason = 'completed') {
         return rpcResponse(request, { items: [{ sessionId, running: lists === 1 }] })
       }
       case 'session.history': return rpcResponse(request, {
-        events: [{ event: { type: 'turn/end', data: { reason: { kind: reason } } } }],
+        events: [
+          { event: { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: dshFinalMessage(automationResult) }] } } } },
+          { event: { type: 'turn/end', data: { turn: 1, reason: { kind: reason } } } },
+        ],
       })
       default: throw new Error(`Unexpected method ${request.method}`)
     }
@@ -132,7 +146,12 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
     sleep: async () => undefined,
     onCreated: async value => { created = value },
   })
-  assert.deepEqual(result, { sessionId: identity.sessionId, reason: 'completed' })
+  assert.deepEqual(result, {
+    sessionId: identity.sessionId,
+    reason: 'completed',
+    finalMessage: dshFinalMessage(),
+    automationResult: { version: 1, outcome: 'completed', summary: '任务已完成' },
+  })
   assert.deepEqual(created, { sessionId: identity.sessionId })
   assert.deepEqual(fake.calls.map(call => call.method), [
     'session.create', 'session.selectModel', 'session.rename', 'skill.list', 'session.history', 'session.prompt',
@@ -150,6 +169,62 @@ test('DSH work is a structured explicit skill invocation', () => {
     kind: 'issue', repository: 'owner/repository', issueNumber: 7,
   }), '/github-issue-work {"kind":"issue","repository":"owner/repository","issueNumber":7}')
   assert.throws(() => dshWorkPrompt('unknown', {}), /Unknown DSH work skill/)
+})
+
+test('DSH terminal automation results are strict and fail closed', () => {
+  const completed = parseDshWorkResult(dshFinalMessage())
+  assert.deepEqual(completed, { version: 1, outcome: 'completed', summary: '任务已完成' })
+  const blocked = parseDshWorkResult(dshFinalMessage({
+    version: 1, outcome: 'blocked', summary: '外部服务不可用', blockedReason: 'cannot-complete',
+  }))
+  assert.deepEqual(blocked, {
+    version: 1, outcome: 'blocked', summary: '外部服务不可用', blockedReason: 'cannot-complete',
+  })
+  assert.deepEqual(parseDshWorkResult(dshFinalMessage({
+    version: 1, outcome: 'blocked', summary: '外部依赖不可用', blockedReason: 'external',
+  })), {
+    version: 1, outcome: 'blocked', summary: '外部依赖不可用', blockedReason: 'external',
+  })
+  const baseline = parseDshWorkResult(dshFinalMessage({
+    version: 1, outcome: 'blocked', summary: '基线 CI 失败', blockedReason: 'ci-baseline',
+    issue: { number: 7, url: 'https://github.com/owner/repository/issues/7' },
+  }))
+  assert.deepEqual(baseline, {
+    version: 1, outcome: 'blocked', summary: '基线 CI 失败', blockedReason: 'ci-baseline',
+    issue: { number: 7, url: 'https://github.com/owner/repository/issues/7' },
+  })
+  assert.throws(() => parseDshWorkResult('<!-- dsh-automation-result\n{"version":1,"outcome":"completed","summary":"ok"}\n-->\nextra'), /must end/)
+  assert.throws(() => parseDshWorkResult(`${dshFinalMessage()}\n${dshFinalMessage()}`), /must end/)
+  assert.throws(() => parseDshWorkResult(dshFinalMessage({
+    version: 1, outcome: 'blocked', summary: '缺失 Issue', blockedReason: 'ci-baseline',
+  })), /unexpected fields/)
+  assert.throws(() => parseDshWorkResult(dshFinalMessage({
+    version: 1, outcome: 'blocked', summary: '未知字段', blockedReason: 'cannot-complete', extra: true,
+  })), /unexpected fields/)
+  assert.throws(() => parseDshWorkResult(dshFinalMessage({
+    version: 1, outcome: 'blocked', summary: 'URL 不匹配', blockedReason: 'ci-baseline',
+    issue: { number: 7, url: 'https://github.com/owner/repository/issues/8' },
+  })), /canonical GitHub HTTPS/)
+  assert.throws(() => parseDshWorkResult(dshFinalMessage({
+    version: 1, outcome: 'blocked', summary: '非规范 URL', blockedReason: 'ci-baseline',
+    issue: { number: 7, url: 'HTTPS://github.com/owner/repository/issues/7' },
+  })), /canonical GitHub HTTPS/)
+})
+
+test('DSH Web refuses a receipt from an earlier turn', async () => {
+  const fake = visibleSessionFetch()
+  const fetchImpl = async (url, options) => {
+    const request = JSON.parse(options.body)
+    if (request.method !== 'session.history') return fake.fetchImpl(url, options)
+    return rpcResponse(request, { events: [
+      { event: { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: dshFinalMessage() }] } } } },
+      { event: { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } } },
+    ] })
+  }
+  await assert.rejects(runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080', taskId: 'old-receipt', cwd: 'F:\\runner\\checkout',
+    title: 'Old receipt', prompt: 'Work.', modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
+  }), /without a final assistant message/)
 })
 
 test('DSH Web fails before prompting when its work plugin is absent', async () => {
@@ -274,7 +349,8 @@ test('a lost prompt response resumes the one durable DSH prompt instead of dupli
     if (request.method === 'session.history') {
       return rpcResponse(request, { events: recorded ? [
         { event: { type: 'user/message', data: { source: { kind: 'user', rpcId: promptRpcId } } } },
-        { event: { type: 'turn/end', data: { reason: { kind: 'completed' } } } },
+        { event: { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: dshFinalMessage() }] } } } },
+        { event: { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } },
       ] : [] })
     }
     if (request.method === 'session.list') {
@@ -433,6 +509,8 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.match(source, /current\.head\.sha !== pullRequest\.head\.sha/)
   assert.match(source, /requestReview\(updatedPullRequest\)/)
   assert.doesNotMatch(source, /synchronize will request review/)
+  assert.match(source, /'automation\/ci-baseline', 'automation\/repair-blocked'/)
+  assert.match(source, /'--remove-label', label/)
   assert.match(source, /--add-label', 'automation\/review-ready'/)
   assert.match(source, /event_type=codex-review/)
   assert.match(source, /client_payload\[base_sha\]/)
@@ -446,6 +524,13 @@ test('backlog Issue dispatch is not lost to GitHub token recursion suppression',
   const source = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
   assert.match(source, /event_type=dsh-issue/)
   assert.match(source, /client_payload\[issue_number\]/)
+})
+
+test('a valid blocked Issue result becomes terminal state without recovery failure', async () => {
+  const source = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
+  assert.match(source, /workerReceipt\.outcome === 'blocked'/)
+  assert.match(source, /'--remove-label', 'agent\/dsh', '--add-label', 'agent\/dsh-blocked'/)
+  assert.match(source, /no retry was scheduled/)
 })
 
 test('reviewer instructions come from the verified base rather than the pull request head', async () => {
@@ -598,6 +683,16 @@ test('backlog dispatch leaves failed or active repairs for their explicit recove
   assert.equal(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [pullRequest], issues: [],
   }), null)
+
+  for (const label of ['automation/repair-blocked', 'automation/ci-baseline']) {
+    pullRequest.labels = [
+      { name: 'automation/review-blocked' },
+      { name: label },
+    ]
+    assert.equal(selectBacklogWork({
+      repository: 'Ornn8/deepseek-harness', pullRequests: [pullRequest], issues: [],
+    }), null)
+  }
 })
 
 test('backlog dispatch waits for open dependencies and skips trackers', () => {
@@ -638,6 +733,12 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
   assert.deepEqual(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
   }), { type: 'issue', number: 2 })
+
+  issues[1].labels = [{ name: 'agent/dsh-blocked' }]
+  assert.deepEqual(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
+  }), { type: 'issue', number: 11 })
+  issues[1].labels = [{ name: 'agent/dsh' }]
 
   assert.deepEqual(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness',

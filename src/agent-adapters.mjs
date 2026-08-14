@@ -33,8 +33,10 @@ export function createAgentAdapters({
         })
         return {
           sessionId: result.sessionId,
-          outcome: result.reason === 'completed' ? 'completed' : 'failed',
-          detail: result.reason || '',
+          outcome: result.automationResult.outcome,
+          detail: result.automationResult.summary,
+          output: result.finalMessage,
+          automationResult: result.automationResult,
         }
       },
       health: async ({ worker }) => {

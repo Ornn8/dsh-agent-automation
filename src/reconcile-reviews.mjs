@@ -37,6 +37,13 @@ if (!/^[0-9a-f]{40}$/i.test(defaultBranchHead || '')) {
 }
 
 async function requestReview(pullRequest) {
+  for (const label of ['automation/ci-baseline', 'automation/repair-blocked']) {
+    if (!pullRequest.labels?.some(candidate => candidate.name === label)) continue
+    await run(githubExecutable, [
+      'pr', 'edit', String(pullRequest.number), '--repo', repository,
+      '--remove-label', label,
+    ], { env: githubEnvironment })
+  }
   await run(githubExecutable, [
     'label', 'create', 'automation/review-ready', '--repo', repository,
     '--description', 'Request one exact-pair Codex review', '--color', '0E8A16',

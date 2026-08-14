@@ -72,6 +72,8 @@ export function selectBacklogWork({ repository, pullRequests, issues, trustedBlo
       && labelNames(pullRequest).has('automation/review-blocked')
       && trustedBlockedRepairNumbers.has(pullRequest.number)
       && !labelNames(pullRequest).has('automation/repairing')
+      && !labelNames(pullRequest).has('automation/repair-blocked')
+      && !labelNames(pullRequest).has('automation/ci-baseline')
       && !labelNames(pullRequest).has('agent/dsh-failed'))
     .sort((left, right) => left.number - right.number)[0]
   if (repair) return { type: 'repair', number: repair.number, head: repair.head.sha }
@@ -84,6 +86,7 @@ export function selectBacklogWork({ repository, pullRequests, issues, trustedBlo
       && trustedAssociation(candidate.author_association)
       && actionableIssue(candidate)
       && !labelNames(candidate).has('agent/dsh-failed')
+      && !labelNames(candidate).has('agent/dsh-blocked')
       && issueDependencies(candidate.body).every(number => !openIssueNumbers.has(number))
       && !pullRequests.some(pullRequest => closesIssue(pullRequest, candidate.number)))
     .sort((left, right) => left.number - right.number)[0]
