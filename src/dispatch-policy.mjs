@@ -83,7 +83,6 @@ export function selectBacklogWork({ repository, pullRequests, issues, trustedBlo
     .filter(candidate => candidate.state === 'open'
       && trustedAssociation(candidate.author_association)
       && actionableIssue(candidate)
-      && !labelNames(candidate).has('agent/dsh')
       && !labelNames(candidate).has('agent/dsh-failed')
       && issueDependencies(candidate.body).every(number => !openIssueNumbers.has(number))
       && !pullRequests.some(pullRequest => closesIssue(pullRequest, candidate.number)))

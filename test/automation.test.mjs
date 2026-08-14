@@ -33,9 +33,17 @@ import {
   hasExactReviewVerdict,
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
-import { dshModelSelection, dshRpc, localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
+import {
+  dshModelSelection,
+  dshRpc,
+  dshSessionIdentity,
+  localDshWebBaseUrl,
+  runDshWebSession,
+} from '../src/dsh-web-session.mjs'
 import { DSH_ISSUE_SKILL, DSH_REPAIR_SKILL, dshWorkPrompt } from '../src/dsh-work.mjs'
 import {
+  listAllActiveThreads,
+  reviewInitializeParams,
   reviewTurnPermissions,
   reviewTaskIdsToArchive,
   reviewThreadConfig,
@@ -59,11 +67,15 @@ function rpcResponse(request, value, ok = true) {
 function visibleSessionFetch(reason = 'completed') {
   const calls = []
   let lists = 0
+  let sessionId
   const fetchImpl = async (_url, options) => {
     const request = JSON.parse(options.body)
     calls.push(request)
     switch (request.method) {
-      case 'session.create': return rpcResponse(request, { sessionId: 'session-visible' })
+      case 'session.create': {
+        sessionId = request.payload.sessionId
+        return rpcResponse(request, { sessionId })
+      }
       case 'session.selectModel': return rpcResponse(request, { selected: request.payload })
       case 'session.rename': return rpcResponse(request, { title: request.payload.title, seq: 1 })
       case 'skill.list': return rpcResponse(request, { skills: [
@@ -73,7 +85,7 @@ function visibleSessionFetch(reason = 'completed') {
       case 'session.cancel': return rpcResponse(request, { accepted: true })
       case 'session.list': {
         lists += 1
-        return rpcResponse(request, { items: [{ sessionId: 'session-visible', running: lists === 1 }] })
+        return rpcResponse(request, { items: [{ sessionId, running: lists === 1 }] })
       }
       case 'session.history': return rpcResponse(request, {
         events: [{ event: { type: 'turn/end', data: { reason: { kind: reason } } } }],
@@ -107,8 +119,10 @@ test('the controller rejects the removed configuration schema before starting a 
 test('DSH Web session is titled, prompted once, and observed to completion', async () => {
   const fake = visibleSessionFetch()
   let created
+  const identity = dshSessionIdentity('repair-12')
   const result = await runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080',
+    taskId: 'repair-12',
     cwd: 'F:\\runner\\checkout',
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
@@ -118,15 +132,17 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
     sleep: async () => undefined,
     onCreated: async value => { created = value },
   })
-  assert.deepEqual(result, { sessionId: 'session-visible', reason: 'completed' })
-  assert.deepEqual(created, { sessionId: 'session-visible' })
+  assert.deepEqual(result, { sessionId: identity.sessionId, reason: 'completed' })
+  assert.deepEqual(created, { sessionId: identity.sessionId })
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.selectModel', 'session.rename', 'skill.list', 'session.prompt',
+    'session.create', 'session.selectModel', 'session.rename', 'skill.list', 'session.history', 'session.prompt',
     'session.list', 'session.list', 'session.history',
   ])
-  assert.deepEqual(fake.calls[1].payload, { sessionId: 'session-visible', ...dshModel })
-  assert.deepEqual(fake.calls[3].payload, { sessionId: 'session-visible' })
-  assert.equal(fake.calls[4].payload.content[0].text, 'Do the work.')
+  assert.deepEqual(fake.calls[0].payload, { cwd: 'F:\\runner\\checkout', sessionId: identity.sessionId })
+  assert.deepEqual(fake.calls[1].payload, { sessionId: identity.sessionId, ...dshModel })
+  assert.deepEqual(fake.calls[3].payload, { sessionId: identity.sessionId })
+  assert.equal(fake.calls[5].payload.content[0].text, 'Do the work.')
+  assert.equal(fake.calls[5].rpcId, identity.promptRpcId)
 })
 
 test('DSH work is a structured explicit skill invocation', () => {
@@ -147,7 +163,7 @@ test('DSH Web fails before prompting when its work plugin is absent', async () =
     return fake.fetchImpl(url, options)
   }
   await assert.rejects(runDshWebSession({
-    baseUrl: 'http://127.0.0.1:3080', cwd: 'F:\\runner\\checkout', title: 'Plugin required',
+    baseUrl: 'http://127.0.0.1:3080', taskId: 'plugin-required', cwd: 'F:\\runner\\checkout', title: 'Plugin required',
     prompt: '/github-issue-work {}', requiredSkill: DSH_ISSUE_SKILL,
     modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
   }), /cannot invoke required skill github-issue-work/)
@@ -189,6 +205,7 @@ test('DSH Web session interruption fails the controller', async () => {
   const fake = visibleSessionFetch('interrupted')
   await assert.rejects(runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080',
+    taskId: 'interrupted',
     cwd: 'F:\\runner\\checkout',
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
@@ -209,7 +226,7 @@ test('DSH model selection failure reaches the durable worker failure without pro
     return fake.fetchImpl(url, options)
   }
   await assert.rejects(runDshWebSession({
-    baseUrl: 'http://127.0.0.1:3080', cwd: 'F:\\runner\\checkout', title: 'Select model', prompt: 'Work.',
+    baseUrl: 'http://127.0.0.1:3080', taskId: 'select-model', cwd: 'F:\\runner\\checkout', title: 'Select model', prompt: 'Work.',
     modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
   }), /session\.selectModel failed: model-unavailable/)
   assert.deepEqual(fake.calls.map(call => call.method), ['session.create', 'session.selectModel', 'session.cancel'])
@@ -233,6 +250,47 @@ test('a transient DSH RPC reset retries with one id and resumes the original ses
   assert.deepEqual(rpcIds, [rpcIds[0], rpcIds[0]])
 })
 
+test('a lost prompt response resumes the one durable DSH prompt instead of duplicating it', async () => {
+  let sessionId
+  let promptRpcId
+  let recorded = false
+  const methods = []
+  const fetchImpl = async (_url, options) => {
+    const request = JSON.parse(options.body)
+    methods.push(request.method)
+    if (request.method === 'session.create') {
+      sessionId = request.payload.sessionId
+      return rpcResponse(request, { sessionId })
+    }
+    if (request.method === 'session.selectModel') return rpcResponse(request, { selected: true })
+    if (request.method === 'session.rename') return rpcResponse(request, { title: request.payload.title, seq: 1 })
+    if (request.method === 'session.prompt') {
+      promptRpcId = request.rpcId
+      recorded = true
+      const error = new Error('socket reset after admission')
+      error.code = 'ECONNRESET'
+      throw error
+    }
+    if (request.method === 'session.history') {
+      return rpcResponse(request, { events: recorded ? [
+        { event: { type: 'user/message', data: { source: { kind: 'user', rpcId: promptRpcId } } } },
+        { event: { type: 'turn/end', data: { reason: { kind: 'completed' } } } },
+      ] : [] })
+    }
+    if (request.method === 'session.list') {
+      return rpcResponse(request, { items: [{ sessionId, running: false }] })
+    }
+    throw new Error(`Unexpected method ${request.method}`)
+  }
+  const result = await runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080', taskId: 'lost-response', cwd: 'F:\\runner\\checkout',
+    title: 'Resume prompt', prompt: 'Work.', modelSelection: dshModel,
+    fetchImpl, sleep: async () => undefined,
+  })
+  assert.equal(result.reason, 'completed')
+  assert.equal(methods.filter(method => method === 'session.prompt').length, 1)
+})
+
 test('a bounded transient DSH failure remains classified for the durable dead-letter', async () => {
   await assert.rejects(dshRpc('http://127.0.0.1:3080', 'session.list', {}, async () => {
     const error = new Error('socket reset')
@@ -245,7 +303,7 @@ test('a cancellation signal cancels the original visible DSH session', async () 
   const fake = visibleSessionFetch()
   const controller = new AbortController()
   const result = runDshWebSession({
-    baseUrl: 'http://127.0.0.1:3080', cwd: 'F:\\runner\\checkout', title: 'Cancel me', prompt: 'Work.',
+    baseUrl: 'http://127.0.0.1:3080', taskId: 'cancel', cwd: 'F:\\runner\\checkout', title: 'Cancel me', prompt: 'Work.',
     modelSelection: dshModel,
     fetchImpl: fake.fetchImpl, sleep: async () => { controller.abort() }, signal: controller.signal,
   })
@@ -258,6 +316,7 @@ test('DSH Web session timeout cancels the controller-owned turn', async () => {
   const times = [0, 0, 2, 2]
   await assert.rejects(runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080',
+    taskId: 'timeout',
     cwd: 'F:\\runner\\checkout',
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
@@ -273,10 +332,34 @@ test('DSH Web session timeout cancels the controller-owned turn', async () => {
 test('Codex retention archives automated review tasks beyond six', () => {
   const threads = Array.from({ length: 8 }, (_, index) => ({
     id: `review-${index}`,
-    title: `${index === 7 ? '[GitHub Review]' : '[GitHub 审查]'} PR #12 @head-${index}`,
+    title: `[DSH GitHub 审查] PR #12 @head-${index}`,
   }))
+  threads.push({ id: 'manual-lookalike', title: '[GitHub 审查] PR #12 @manual' })
   threads.push({ id: 'control', title: '设置 PR 自动审核合并' })
   assert.deepEqual(reviewTaskIdsToArchive(threads, 'review-0', 6), ['review-6', 'review-7'])
+})
+
+test('Codex review negotiates experimental workspace roots before using them', () => {
+  assert.deepEqual(reviewInitializeParams(), {
+    clientInfo: { name: 'dsh_github_review', title: 'DSH GitHub Review', version: '1.0.0' },
+    capabilities: { experimentalApi: true },
+  })
+})
+
+test('Codex retention reads every active-task page and rejects repeated cursors', async () => {
+  const requests = []
+  const pages = [
+    { data: [{ id: 'first' }], nextCursor: 'next' },
+    { data: [{ id: 'second' }], nextCursor: null },
+  ]
+  assert.deepEqual(await listAllActiveThreads(async (method, params) => {
+    requests.push({ method, params })
+    return pages.shift()
+  }), [{ id: 'first' }, { id: 'second' }])
+  assert.deepEqual(requests.map(request => request.params.cursor), [null, 'next'])
+
+  await assert.rejects(listAllActiveThreads(async () => ({ data: [], nextCursor: 'same' })),
+    /repeated task-list cursor/)
 })
 
 test('a blocking review publishes an independent change work request', async () => {
@@ -342,6 +425,8 @@ test('base reconciliation updates a behind default-branch pull request before re
   const source = await readFile(new URL('../src/reconcile-reviews.mjs', import.meta.url), 'utf8')
   const workflow = await readFile(new URL('../.github/workflows/reconcile-reviews.yml', import.meta.url), 'utf8')
   assert.match(source, /pulls\/\$\{pullRequest\.number\}\/update-branch/)
+  assert.match(source, /needsDefaultBranchUpdate/)
+  assert.doesNotMatch(source, /mergeable_state === 'behind'/)
   assert.match(source, /expected_head_sha=/)
   assert.match(source, /--add-label', 'automation\/review-ready'/)
   assert.match(source, /event_type=codex-review/)
@@ -547,6 +632,12 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
   ]
   assert.deepEqual(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
+  }), { type: 'issue', number: 2 })
+
+  assert.deepEqual(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness',
+    pullRequests: [{ body: 'Closes #2' }],
+    issues,
   }), { type: 'issue', number: 11 })
 
   issues[1].state = 'closed'

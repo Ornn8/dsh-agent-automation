@@ -120,6 +120,7 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
   })
 
   assert.equal(calls[0].baseUrl, 'http://localhost:3080')
+  assert.equal(calls[0].taskId, 'issue-7')
   assert.deepEqual(calls[0].modelSelection, { provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max' })
   assert.equal(calls[0].requiredSkill, 'github-issue-work')
   assert.deepEqual(started, [{ sessionId: 'dsh-visible' }])

@@ -6,6 +6,9 @@ on:
       issue_number:
         required: true
         type: number
+      request_id:
+        required: true
+        type: string
 
 concurrency:
   group: dsh-issue-${{ github.repository }}-${{ inputs.issue_number }}
@@ -31,6 +34,7 @@ jobs:
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_REQUEST_ID: ${{ inputs.request_id }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}

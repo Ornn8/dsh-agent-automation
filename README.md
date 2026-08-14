@@ -61,7 +61,7 @@ No controller workflow needs agent-specific branches. For a command-line agent, 
 
 The runners are idle outbound GitHub listeners. They make no model calls while no matching job exists. Landing, reconciliation, dispatch, and health checks are deterministic.
 
-DSH change work uses the bundled `dsh-github-work` Cordis plugin. The installer adds it to the existing `web` profile, and the controller sends a structured WorkRequest through the user-explicit `/github-issue-work` or `/github-pr-repair` Skill gesture. DSH's host injects the selected Skill before the first model step, so controller scripts do not duplicate agent procedure text. Sessions still use the ordinary Web agent factory and `session/event` stream and therefore remain visible in the DSH Web UI. ACP is not used because DSH defines it as an automation transport without UI integration.
+DSH change work uses the bundled `dsh-github-work` Cordis plugin. The installer adds it to the existing `web` profile, and the controller sends a structured WorkRequest through the user-explicit `/github-issue-work` or `/github-pr-repair` Skill gesture. DSH's host injects the selected Skill before the first model step, so controller scripts do not duplicate agent procedure text. Sessions still use the ordinary Web agent factory and `session/event` stream and therefore remain visible in the DSH Web UI. The controller preallocates one stable session id per work request and recovers a lost prompt response from the durable user-message event instead of submitting the prompt twice. ACP is not used because DSH defines it as an automation transport without UI integration.
 
 ## Local configuration
 

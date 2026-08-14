@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import readline from 'node:readline'
 
+export const REVIEW_TASK_TITLE_PREFIX = '[DSH GitHub 审查] '
+
 const REVIEW_SHELL_ENVIRONMENT_KEYS = [
   'COMSPEC', 'PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'TEMP',
   'TMP', 'WINDIR', 'GCM_INTERACTIVE', 'GH_CONFIG_DIR', 'GH_PROMPT_DISABLED',
@@ -48,17 +50,52 @@ export function reviewTurnPermissions(taskCwd, reviewCwd) {
   }
 }
 
+/** Negotiate every App Server capability required by the review turn. */
+export function reviewInitializeParams() {
+  return {
+    clientInfo: { name: 'dsh_github_review', title: 'DSH GitHub Review', version: '1.0.0' },
+    capabilities: { experimentalApi: true },
+  }
+}
+
 /** Return stale automated review task ids while preserving the newest tasks. */
 export function reviewTaskIdsToArchive(threads, currentThreadId, keep = 6) {
   const reviews = threads.filter(thread => {
     const title = thread.name ?? thread.title
-    return title?.startsWith('[GitHub 审查] ') || title?.startsWith('[GitHub Review] ')
+    return title?.startsWith(REVIEW_TASK_TITLE_PREFIX)
   })
   const retained = [
     currentThreadId,
     ...reviews.map(thread => thread.id).filter(id => id !== currentThreadId),
   ].slice(0, keep)
   return reviews.map(thread => thread.id).filter(id => !retained.includes(id))
+}
+
+
+/** Read every active task without silently truncating retention at one page. */
+export async function listAllActiveThreads(call) {
+  const threads = []
+  const cursors = new Set()
+  let cursor = null
+  do {
+    const listed = await call('thread/list', {
+      archived: false,
+      cursor,
+      limit: 100,
+      sortKey: 'created_at',
+      sortDirection: 'desc',
+    })
+    if (!Array.isArray(listed?.data)) throw new Error('Codex App Server returned an invalid task list')
+    threads.push(...listed.data)
+    cursor = listed.nextCursor ?? null
+    if (cursor !== null) {
+      if (typeof cursor !== 'string' || cursors.has(cursor)) {
+        throw new Error('Codex App Server returned an invalid repeated task-list cursor')
+      }
+      cursors.add(cursor)
+    }
+  } while (cursor !== null)
+  return threads
 }
 
 /** Run a visible ChatGPT Desktop Codex task and return its final assistant message. */
@@ -177,9 +214,7 @@ export async function runReviewTask({
   signal?.addEventListener('abort', cancel, { once: true })
 
   try {
-    await call('initialize', {
-      clientInfo: { name: 'dsh_github_review', title: 'DSH GitHub Review', version: '1.0.0' },
-    })
+    await call('initialize', reviewInitializeParams())
     send({ method: 'initialized', params: {} })
     const configured = await call('config/read', { includeLayers: false })
     if (!configured?.config || typeof configured.config !== 'object') {
@@ -202,13 +237,8 @@ export async function runReviewTask({
     await onCreated({ sessionId: threadId })
     process.stdout.write(`ChatGPT Desktop review task created: ${threadId}\n`)
 
-    const listed = await call('thread/list', {
-      archived: false,
-      limit: 100,
-      sortKey: 'created_at',
-      sortDirection: 'desc',
-    })
-    for (const staleThreadId of reviewTaskIdsToArchive(listed.data, threadId, keep)) {
+    const activeThreads = await listAllActiveThreads(call)
+    for (const staleThreadId of reviewTaskIdsToArchive(activeThreads, threadId, keep)) {
       await call('thread/archive', { threadId: staleThreadId })
     }
 

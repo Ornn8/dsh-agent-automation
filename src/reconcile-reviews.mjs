@@ -4,7 +4,7 @@ import {
   requiredEnv,
   run,
 } from './common.mjs'
-import { needsExactReview } from './reconciliation-policy.mjs'
+import { needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
 import { hasTrustedExactReviewRun, reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
@@ -26,6 +26,13 @@ async function ghJson(args, description) {
 const summaries = await ghJson([
   'api', `repos/${repository}/pulls?state=open&per_page=100`, '--paginate', '--slurp',
 ], 'open pull requests')
+const defaultBranchReference = await ghJson([
+  'api', `repos/${repository}/git/ref/heads/${encodeURIComponent(defaultBranch)}`,
+], `default branch ${defaultBranch}`)
+const defaultBranchHead = defaultBranchReference?.object?.sha
+if (!/^[0-9a-f]{40}$/i.test(defaultBranchHead || '')) {
+  throw new Error(`Default branch ${defaultBranch} did not resolve to a commit SHA`)
+}
 
 async function requestReview(pullRequest) {
   await run(githubExecutable, [
@@ -54,7 +61,7 @@ for (const summary of summaries.flat()) {
   if (pullRequest.draft
     || pullRequest.base?.ref !== defaultBranch
     || pullRequest.head?.repo?.full_name !== repository) continue
-  if (pullRequest.mergeable_state === 'behind') {
+  if (needsDefaultBranchUpdate({ defaultBranch, defaultBranchHead, pullRequest })) {
     await run(githubExecutable, [
       'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequest.number}/update-branch`,
       '-f', `expected_head_sha=${pullRequest.head.sha}`,

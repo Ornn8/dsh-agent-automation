@@ -16,7 +16,7 @@ This Module owns the stable invocation and terminal receipt Interface. Its Depth
 
 Adapters translate the Worker Interface to one runtime:
 
-- `dsh-web` uses the local DeepSeek Harness Web Host. Change work is a structured WorkRequest sent through a controller-installed, user-explicit Cordis Skill; the Adapter verifies the Skill is present before prompting and does not carry the role procedure itself.
+- `dsh-web` uses the local DeepSeek Harness Web Host. Change work is a structured WorkRequest sent through a controller-installed, user-explicit Cordis Skill; the Adapter verifies the Skill is present before prompting and does not carry the role procedure itself. The Adapter preallocates the visible session from the immutable task id and treats the durable prompt rpc id as the admission receipt, so transport recovery cannot create a second turn.
 - `codex-app` creates and observes a visible ChatGPT Desktop task.
 - `command-json` supports any executable that accepts JSON stdin and returns a JSON receipt.
 
