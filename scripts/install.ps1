@@ -90,10 +90,58 @@ function Assert-NoTaskReferencesRuntime {
   if ($references.Count) { throw "Refusing to remove operations runtime still referenced by Scheduled Task: $($references[0].TaskName)" }
 }
 
+function Get-DshCliInvocation {
+  $hostConfig = $ops.dshWebHost
+  $arguments = @($hostConfig.arguments)
+  $executableName = [IO.Path]::GetFileName([string]$hostConfig.executable)
+  if (($executableName -match '^(?i:node(?:\.exe)?)$') -and ($arguments.Count -ge 2) -and ($arguments[1] -eq 'web') -and ([IO.Path]::GetExtension([string]$arguments[0]) -in @('.js', '.mjs', '.cjs'))) {
+    return [pscustomobject]@{ Executable = [string]$hostConfig.executable; Prefix = @([string]$arguments[0]) }
+  }
+  if ($executableName -match '^(?i:dsh(?:\.exe|\.cmd)?)$' -and $arguments.Count -ge 1 -and $arguments[0] -eq 'web') {
+    return [pscustomobject]@{ Executable = [string]$hostConfig.executable; Prefix = @() }
+  }
+  throw 'dshWebHost must launch either node <dsh-bin> web or dsh web so the installer can use the same CLI'
+}
+
+function Install-DshWorkPlugin {
+  $pluginRoot = Join-Path $repoRoot 'dsh-plugin'
+  $pluginManifest = Join-Path $pluginRoot 'package.json'
+  if (-not (Test-Path -LiteralPath $pluginManifest -PathType Leaf)) { throw "DSH work plugin package is missing: $pluginManifest" }
+  $packageRoot = Join-Path $ops.stateRoot 'packages'
+  Initialize-PrivateDirectory -Path $packageRoot
+  $staging = Join-Path $packageRoot ".dsh-plugin-pack.$([Guid]::NewGuid().ToString('N')).tmp"
+  try {
+    Initialize-PrivateDirectory -Path $staging
+    Push-Location $pluginRoot
+    try { & pnpm.cmd pack --pack-destination $staging 1>$null } finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0) { throw 'Could not pack the DSH work plugin' }
+    $archives = @(Get-ChildItem -LiteralPath $staging -Filter '*.tgz' -File)
+    if ($archives.Count -ne 1 -or $archives[0].Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'DSH work plugin pack did not produce one regular tarball' }
+    $hash = (Get-FileHash -LiteralPath $archives[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $archive = Join-Path $packageRoot "dsh-github-work-$hash.tgz"
+    Assert-PathInside -Child $archive -Parent $packageRoot -Name 'DSH work plugin archive'
+    if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { Move-Item -LiteralPath $archives[0].FullName -Destination $archive }
+
+    $cli = Get-DshCliInvocation
+    & $cli.Executable @($cli.Prefix) plugin --profile web add $archive 1>$null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install the DSH work plugin into the web profile' }
+    $dump = (& $cli.Executable @($cli.Prefix) --profile web --dump-config 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $dump -notmatch '(?m)^- id: github-work-skills\r?$' -or $dump -notmatch '(?m)^\s+name: dsh-github-work\r?$') {
+      throw 'The DSH web profile does not contain the installed GitHub work plugin row'
+    }
+  } finally {
+    if (Test-Path -LiteralPath $staging) {
+      Assert-ManagedDirectoryForRemoval -Path $staging -Root $packageRoot
+      Remove-Item -LiteralPath $staging -Recurse -Force
+    }
+  }
+}
+
 if ($ops.dshWebHost.enabled -and -not $DryRun -and -not (Test-Path -LiteralPath $ops.dshWebHost.executable -PathType Leaf)) { throw "DSH Web Host executable does not exist: $($ops.dshWebHost.executable)" }
 foreach ($required in @('pwsh.exe', $loaded.Config.ghExecutable, $loaded.Config.gitExecutable)) {
   if (-not (Get-Command $required -ErrorAction SilentlyContinue)) { throw "Required executable is unavailable: $required" }
 }
+if ($ops.dshWebHost.enabled -and -not (Get-Command pnpm.cmd -ErrorAction SilentlyContinue)) { throw 'Required executable is unavailable: pnpm.cmd' }
 if (-not $DryRun) {
   $principal = Test-HostGitHubLogin -Config $loaded.Config
   if (-not $principal.Ok) { throw 'The authenticated GitHub CLI principal does not match github.login' }
@@ -250,6 +298,16 @@ Invoke-InstallAction "deploy immutable operations runtime snapshot $($runtimeSna
   Install-OperationsRuntimeSnapshot -Snapshot $runtimeSnapshot -SourceRoot $runtimeSourceRoot
   if ($manifest.psobject.Properties.Name -contains 'operationsRuntime') { $manifest.operationsRuntime = $runtimeSnapshot } else { $manifest | Add-Member -NotePropertyName operationsRuntime -NotePropertyValue $runtimeSnapshot }
   Write-InstallManifest -Loaded $loaded -Manifest $manifest
+}
+if ($ops.dshWebHost.enabled) {
+  if ($manifest -and [bool]$manifest.dshWebManaged) {
+    Invoke-InstallAction 'stop the managed DSH Web Host before updating its plugin profile' {
+      Stop-ManagedComponent -Operations $ops -InstanceId 'dsh-web' -TaskName (Get-DshWebTaskName) | Out-Null
+    }
+  }
+  Invoke-InstallAction 'pack and install the DSH GitHub work plugin into the web profile' {
+    Install-DshWorkPlugin
+  }
 }
 Invoke-InstallAction 'remove obsolete local controller supervisor task' {
   $legacy = Get-ScheduledTask -TaskName 'DSH-Agent-Automation-controller' -ErrorAction SilentlyContinue

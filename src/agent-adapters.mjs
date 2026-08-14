@@ -24,6 +24,7 @@ export function createAgentAdapters({
           cwd: invocation.cwd,
           title: invocation.title,
           prompt: invocation.prompt,
+          requiredSkill: invocation.requiredSkill,
           modelSelection: dshModelSelection(worker),
           timeoutMs: invocation.timeoutMs,
           signal: invocation.signal,

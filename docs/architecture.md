@@ -16,7 +16,7 @@ This Module owns the stable invocation and terminal receipt Interface. Its Depth
 
 Adapters translate the Worker Interface to one runtime:
 
-- `dsh-web` uses the local DeepSeek Harness Web Host.
+- `dsh-web` uses the local DeepSeek Harness Web Host. Change work is a structured WorkRequest sent through a controller-installed, user-explicit Cordis Skill; the Adapter verifies the Skill is present before prompting and does not carry the role procedure itself.
 - `codex-app` creates and observes a visible ChatGPT Desktop task.
 - `command-json` supports any executable that accepts JSON stdin and returns a JSON receipt.
 
@@ -59,6 +59,7 @@ There is no direct Agent-to-Agent call. GitHub records the handoff before the pr
 - A stopped role runner leaves its matching GitHub job queued. Other runner labels continue to accept work.
 - Landing terminates with merged, deferred for checks, stale revision, blocked, or failed. It requires strict protected checks, rereads the current branch protection, checks, and trusted review immediately before merging, and never reuses a verdict from another base/head pair.
 - DSH Web RPC retries only bounded transient transport failures with the same RPC id and the original visible session. A cancellation signal cancels that session. Exhausted failures retain their transient or terminal classification in the durable failed handoff; no controller waits indefinitely for a disconnected local host.
+- The DSH work bundle contributes only `github-issue-work` and `github-pr-repair` as user-explicit, model-hidden runtime Skills. The ordinary Web profile owns agent creation, model selection, durable events, tools, and presentation. A missing Skill fails before the first model call; ACP is not a substitute because its sessions are automation transport rather than Web UI sessions.
 - A completed failed or cancelled top-level Agent Issues or Agent PR Rework run wakes one model-free recovery workflow. Recovery verifies the recorded reusable controller reference, revalidates the current Issue or pull request head, and records at most three exact-subject retry attempts. The cap is a visible `agent/dsh-failed` dead-letter; labels and comments are audit state and cannot authorize recovery.
 - Issue implementation uses the trusted Issue's validated branch declaration, or `agent/issue-<number>` for a bug without one. The controller rejects the protected default branch and any declared branch already used by another open pull request. Marker authorship is audit data used only to avoid overwriting another actor's comment; it never authorizes landing or privileged work.
 

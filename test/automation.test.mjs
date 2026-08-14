@@ -34,6 +34,7 @@ import {
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
 import { dshModelSelection, dshRpc, localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
+import { DSH_ISSUE_SKILL, DSH_REPAIR_SKILL, dshWorkPrompt } from '../src/dsh-work.mjs'
 import {
   reviewSandboxPolicy,
   reviewTaskIdsToArchive,
@@ -65,6 +66,9 @@ function visibleSessionFetch(reason = 'completed') {
       case 'session.create': return rpcResponse(request, { sessionId: 'session-visible' })
       case 'session.selectModel': return rpcResponse(request, { selected: request.payload })
       case 'session.rename': return rpcResponse(request, { title: request.payload.title, seq: 1 })
+      case 'skill.list': return rpcResponse(request, { skills: [
+        { name: DSH_ISSUE_SKILL }, { name: DSH_REPAIR_SKILL },
+      ] })
       case 'session.prompt': return rpcResponse(request, { accepted: true })
       case 'session.cancel': return rpcResponse(request, { accepted: true })
       case 'session.list': {
@@ -108,6 +112,7 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
     cwd: 'F:\\runner\\checkout',
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
+    requiredSkill: DSH_REPAIR_SKILL,
     modelSelection: dshModel,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
@@ -116,11 +121,51 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
   assert.deepEqual(result, { sessionId: 'session-visible', reason: 'completed' })
   assert.deepEqual(created, { sessionId: 'session-visible' })
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.selectModel', 'session.rename', 'session.prompt',
+    'session.create', 'session.selectModel', 'session.rename', 'skill.list', 'session.prompt',
     'session.list', 'session.list', 'session.history',
   ])
   assert.deepEqual(fake.calls[1].payload, { sessionId: 'session-visible', ...dshModel })
-  assert.equal(fake.calls[3].payload.content[0].text, 'Do the work.')
+  assert.deepEqual(fake.calls[3].payload, { sessionId: 'session-visible' })
+  assert.equal(fake.calls[4].payload.content[0].text, 'Do the work.')
+})
+
+test('DSH work is a structured explicit skill invocation', () => {
+  assert.equal(dshWorkPrompt(DSH_ISSUE_SKILL, {
+    kind: 'issue', repository: 'owner/repository', issueNumber: 7,
+  }), '/github-issue-work {"kind":"issue","repository":"owner/repository","issueNumber":7}')
+  assert.throws(() => dshWorkPrompt('unknown', {}), /Unknown DSH work skill/)
+})
+
+test('DSH Web fails before prompting when its work plugin is absent', async () => {
+  const fake = visibleSessionFetch()
+  const fetchImpl = async (url, options) => {
+    const request = JSON.parse(options.body)
+    if (request.method === 'skill.list') {
+      fake.calls.push(request)
+      return rpcResponse(request, { skills: [] })
+    }
+    return fake.fetchImpl(url, options)
+  }
+  await assert.rejects(runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080', cwd: 'F:\\runner\\checkout', title: 'Plugin required',
+    prompt: '/github-issue-work {}', requiredSkill: DSH_ISSUE_SKILL,
+    modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
+  }), /cannot invoke required skill github-issue-work/)
+  assert.deepEqual(fake.calls.map(call => call.method), [
+    'session.create', 'session.selectModel', 'session.rename', 'skill.list', 'session.cancel',
+  ])
+})
+
+test('the DSH bundle registers only explicit GitHub work skills', async () => {
+  const registrations = []
+  const plugin = await import('../dsh-plugin/index.js')
+  plugin.apply({ skills: { register: skill => registrations.push(skill) } })
+  assert.deepEqual(registrations.map(skill => skill.name), [DSH_ISSUE_SKILL, DSH_REPAIR_SKILL])
+  for (const skill of registrations) {
+    assert.deepEqual(skill.invocation, { modelInvocable: false, userInvocable: true })
+    assert.match(skill.content, /JSON WorkRequest/)
+    assert.match(skill.content, /GitHub-visible.*English/)
+  }
 })
 
 test('DSH Web session interruption fails the controller', async () => {

@@ -18,6 +18,7 @@ import {
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
+import { DSH_ISSUE_SKILL, dshWorkPrompt } from './dsh-work.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
@@ -131,19 +132,13 @@ try {
     ], { tee: true })
   }
 
-  const prompt = `Execute GitHub Issue #${issueNumber} in ${repository}.
-
-GitHub is the only coordination channel. Read the live Issue, its comments, the repository instructions, and the current \`${defaultBranch}\` branch before deciding what to do. Use English for every GitHub comment, commit, branch, and pull request field.
-
-You own the implementation end to end:
-1. If no valid claim exists, comment exactly \`CLAIMED: starting ${branch}\` on Issue #${issueNumber}.
-2. Work only on branch \`${branch}\` in the current checkout. Do not delegate implementation to Codex or another agent.
-3. Implement the Issue completely, add required tests and documentation, and run the repository checks appropriate to the actual diff.
-4. Commit and push the work yourself.
-5. Open or update one pull request to \`${defaultBranch}\`; its body must contain \`Closes #${issueNumber}\` and must report only checks actually run.
-6. If you cannot complete the work, leave one English \`BLOCKED:\` Issue comment with concrete evidence and do not claim success.
-
-Do not wait for another local process or WebUI session. Finish only after the pull request exists at the declared branch and exact pushed head, or after posting the BLOCKED handoff.`
+  const prompt = dshWorkPrompt(DSH_ISSUE_SKILL, {
+    kind: 'issue',
+    repository,
+    issueNumber,
+    defaultBranch,
+    branch,
+  })
 
   const workerReceipt = await runAgentWorker({
     config,
@@ -152,7 +147,8 @@ Do not wait for another local process or WebUI session. Finish only after the pu
       taskId: `issue-${issueNumber}`,
       cwd: checkoutPath,
       title: `[Agent: ${workerId}] 执行 Issue #${issueNumber}`,
-      prompt: `${prompt}\n\nFinish this local agent session with a concise Chinese report. Keep all GitHub-visible content in English.`,
+      prompt,
+      requiredSkill: DSH_ISSUE_SKILL,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
       onStarted: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible ${workerId} session: ${sessionId}.`)),
