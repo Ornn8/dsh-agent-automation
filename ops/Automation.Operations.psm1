@@ -922,11 +922,15 @@ function Test-DshWebHost {
 }
 
 function Invoke-OperationsSelfTest {
+  $selfTestRoot = Join-Path ([IO.Path]::GetPathRoot($PSScriptRoot)) 'dsh-agent-automation-selftest'
+  $selfTestInstallRoot = Join-Path $selfTestRoot 'ops-runtime'
+  $selfTestStateRoot = Join-Path $selfTestRoot 'ops-state'
+  $selfTestConfigPath = Join-Path $selfTestStateRoot 'agent-config.json'
   $results = @()
   $results += [pscustomobject]@{ Name = 'rejects C drive'; Passed = $false }
   try { Resolve-OperationPath -Path 'C:\unsafe' -Name 'test' | Out-Null } catch { $results[-1].Passed = $true }
   $results += [pscustomobject]@{ Name = 'rejects volume root'; Passed = $false }
-  try { Resolve-OperationPath -Path 'F:\' -Name 'test' | Out-Null } catch { $results[-1].Passed = $true }
+  try { Resolve-OperationPath -Path ([IO.Path]::GetPathRoot($PSScriptRoot)) -Name 'test' | Out-Null } catch { $results[-1].Passed = $true }
   $orgInstance = [pscustomobject]@{ RegistrationKind = 'organization'; RegistrationOwner = 'owner' }
   $repoInstance = [pscustomobject]@{ RegistrationKind = 'repository'; RegistrationOwner = 'owner/repo' }
   $results += [pscustomobject]@{ Name = 'organization endpoint'; Passed = ((Get-RegistrationEndpoint -Instance $orgInstance) -eq 'orgs/owner/actions/runners/registration-token') }
@@ -934,9 +938,9 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'repository keys are stable'; Passed = ((Get-RepositoryKey 'owner/repo') -eq (Get-RepositoryKey 'owner/repo')) }
   $results += [pscustomobject]@{ Name = 'repository keys avoid normalized collision'; Passed = ((Get-RepositoryKey 'owner/a.b') -ne (Get-RepositoryKey 'owner/a-b')) }
   $fakeOps = [pscustomobject]@{
-    installRoot = 'F:\ops-runtime'
-    stateRoot = 'F:\ops-state'
-    logsRoot = 'F:\ops-state\logs'
+    installRoot = $selfTestInstallRoot
+    stateRoot = $selfTestStateRoot
+    logsRoot = (Join-Path $selfTestStateRoot 'logs')
     controller = [pscustomobject]@{ registrationScope = 'target-repositories'; organization = $null }
     dshWebHost = [pscustomobject]@{ enabled = $false }
     runner = [pscustomobject]@{ version = '1.0.0'; sha256 = ('a' * 64) }
@@ -969,7 +973,7 @@ function Invoke-OperationsSelfTest {
 
   $manifest = [pscustomobject][ordered]@{
     schemaVersion = 1
-    configPath = 'F:\config.json'
+    configPath = $selfTestConfigPath
     registrationScope = 'target-repositories'
     runnerVersion = $fakeOps.runner.version
     runnerSha256 = $fakeOps.runner.sha256
@@ -988,10 +992,10 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'manifest reconciliation detects removed repository instances'; Passed = ($removedMappingState.StaleEntries.Count -eq 2) }
   $fakeOps.repositoryMappings = @([pscustomobject]@{ repository = 'owner/one' }, [pscustomobject]@{ repository = 'owner/two' })
   $fakeLoaded.Config.repositories = @('owner/one', 'owner/two')
-  $fakeOps.installRoot = 'F:\ops-runtime-moved'
+  $fakeOps.installRoot = "$selfTestInstallRoot-moved"
   $changedRootState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
   $results += [pscustomobject]@{ Name = 'manifest reconciliation detects changed managed paths'; Passed = ($changedRootState.ChangedEntries.Count -eq 4) }
-  $fakeOps.installRoot = 'F:\ops-runtime'
+  $fakeOps.installRoot = $selfTestInstallRoot
   $fakeOps.runner.version = '2.0.0'
   $changedPackageState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
   $results += [pscustomobject]@{ Name = 'manifest reconciliation detects runner package changes'; Passed = $changedPackageState.RunnerPackageChanged }
@@ -1025,8 +1029,9 @@ function Invoke-OperationsSelfTest {
   $runtimeOrphanState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $runtimeManifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DiscoveredProcessRecordIds @() -DiscoveredRuntimeSnapshotIds @($runtimeA.id, $orphanRuntimeId) -DshWebTaskPresent $false -DshWebProcessRecordPresent $false -RuntimeSnapshot $runtimeA -RuntimeSnapshotValid $true
   $results += [pscustomobject]@{ Name = 'runtime reconciliation detects an orphan snapshot'; Passed = ($runtimeOrphanState.UnexpectedRuntimeSnapshotIds -contains $orphanRuntimeId) }
   $expectedRuntimeScript = Join-Path $runtimeA.root 'runner-supervisor.ps1'
-  $snapshotTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'C:\Program Files\PowerShell\7\pwsh.exe'; Arguments = "-NoProfile -File `"$expectedRuntimeScript`" -Configuration `"F:\ops-state\agent-config.json`"" }) }
-  $checkoutTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'pwsh.exe'; Arguments = '-NoProfile -File "F:\checkout\ops\runner-supervisor.ps1" -Configuration "F:\ops-state\agent-config.json"' }) }
+  $snapshotTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'C:\Program Files\PowerShell\7\pwsh.exe'; Arguments = "-NoProfile -File `"$expectedRuntimeScript`" -Configuration `"$selfTestConfigPath`"" }) }
+  $checkoutScript = Join-Path $selfTestRoot 'checkout\ops\runner-supervisor.ps1'
+  $checkoutTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'pwsh.exe'; Arguments = "-NoProfile -File `"$checkoutScript`" -Configuration `"$selfTestConfigPath`"" }) }
   $results += [pscustomobject]@{ Name = 'task runtime validation accepts only the manifest snapshot path'; Passed = ((Test-ScheduledTaskRuntimePath -Task $snapshotTask -ExpectedScript $expectedRuntimeScript).Ok -and -not (Test-ScheduledTaskRuntimePath -Task $checkoutTask -ExpectedScript $expectedRuntimeScript).Ok) }
   $fakeOps.controller.registrationScope = 'organization'
   $fakeOps.controller.organization = 'owner'
