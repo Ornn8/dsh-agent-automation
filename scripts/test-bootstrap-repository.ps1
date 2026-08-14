@@ -96,6 +96,7 @@ try {
   Assert-True ($issuesWorkflow -match '(?m)^    types: \[dsh-issue\]\r?$') 'Agent Issues lacks the GitHub-token recursion-safe Issue trigger.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
   Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR Review\]\r?$') 'Agent Recovery listens beyond the three trusted agent entry workflows.'
+  Assert-True ($recoveryWorkflow -match [Regex]::Escape('contains(fromJSON(''["failure", "cancelled"]''), github.event.workflow_run.conclusion)')) 'Agent Recovery must retain cancelled-run recovery.'
 
   & git -C $temp add .github/workflows
   & git -C $temp -c user.name=Bootstrap -c user.email=bootstrap@example.invalid commit -qm 'bootstrap fixtures'
