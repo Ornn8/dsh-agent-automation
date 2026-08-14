@@ -25,6 +25,20 @@ export function baselineIssueIdentity({ workflowName, issueBody }) {
   }
 }
 
+/** Return the verified workflow identity of a DSH-created CI baseline Issue. */
+export function baselineIssueWorkItem(issue) {
+  const title = /^CI baseline: (.{1,120}) \[([0-9a-f]{16})\]$/.exec(String(issue?.title || ''))
+  if (!title) return null
+  try {
+    const identity = baselineIssueIdentity({ workflowName: title[1], issueBody: issue?.body })
+    return identity.key === title[2] && identity.title === issue.title
+      ? { workflowName: title[1], ...identity }
+      : null
+  } catch {
+    return null
+  }
+}
+
 function isPlainRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     && Object.getPrototypeOf(value) === Object.prototype

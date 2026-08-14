@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   baselineIssueIdentity,
+  baselineIssueWorkItem,
   canonicalIssueUrl,
   ciBaselineIssueFromReceipt,
   nonBaselineBlockFromReceipt,
@@ -52,6 +53,17 @@ test('CI baseline receipts bind a canonical Issue URL to the configured reposito
   assert.throws(() => ciBaselineIssueFromReceipt({
     receipt: receipt({ automationResult: { ...receipt().automationResult, extra: true } }), repository,
   }), /unexpected fields/)
+})
+
+test('a DSH baseline Issue is itself an actionable work item', () => {
+  assert.deepEqual(baselineIssueWorkItem(issue()), {
+    workflowName,
+    key,
+    marker,
+    title: issue().title,
+  })
+  assert.equal(baselineIssueWorkItem(issue({ title: `CI baseline: ${workflowName} [0000000000000000]` })), null)
+  assert.equal(baselineIssueWorkItem(issue({ body: '<!-- dsh-ci-baseline:v1:0000000000000000 -->\n' })), null)
 })
 
 test('a valid non-baseline DSH block is terminal state rather than an infrastructure failure', () => {

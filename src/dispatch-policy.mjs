@@ -1,4 +1,5 @@
 import { declaredIssueBranch, trustedAssociation } from './common.mjs'
+import { baselineIssueWorkItem } from './baseline-issue.mjs'
 import { hasTrustedExactReviewRun } from './landing-policy.mjs'
 
 function labelNames(item) {
@@ -56,7 +57,9 @@ function hasDeclaredBranch(body) {
 }
 
 function actionableIssue(issue) {
-  return hasDeclaredBranch(issue.body) || /^\[BUG\]\s+/i.test(issue.title || '')
+  return hasDeclaredBranch(issue.body)
+    || /^\[BUG\]\s+/i.test(issue.title || '')
+    || Boolean(baselineIssueWorkItem(issue))
 }
 
 function closesIssue(pullRequest, issueNumber) {
