@@ -441,11 +441,17 @@ function Read-OwnedProcessRecord {
   return $record
 }
 
+function Get-OwnedProcessStartTimeUtcText {
+  param([Parameter(Mandatory)]$Record)
+  if ($Record.rootStartTimeUtc -is [DateTime]) { return $Record.rootStartTimeUtc.ToUniversalTime().ToString('O') }
+  return [string]$Record.rootStartTimeUtc
+}
+
 function Test-OwnedProcessIdentity {
   param([Parameter(Mandatory)]$Record, $Process)
   if (-not $Process) { return [pscustomobject]@{ Ok = $false; Running = $false; Detail = 'stale process record' } }
   $actual = $Process.StartTime.ToUniversalTime().ToString('O')
-  if ($actual -ne $Record.rootStartTimeUtc) { return [pscustomobject]@{ Ok = $false; Running = $false; Detail = 'PID was reused by another process' } }
+  if ($actual -ne (Get-OwnedProcessStartTimeUtcText -Record $Record)) { return [pscustomobject]@{ Ok = $false; Running = $false; Detail = 'PID was reused by another process' } }
   return [pscustomobject]@{ Ok = $true; Running = $true; Detail = "owned root PID $($Record.rootPid)" }
 }
 
@@ -489,18 +495,19 @@ function Stop-OwnedProcessTree {
     & $RecordRemover $Operations $InstanceId ([int]$record.rootPid)
     return [pscustomobject]@{ Stopped = $true; Detail = 'owned process already exited' }
   }
+  $recordedStart = Get-OwnedProcessStartTimeUtcText -Record $record
   $actual = $process.StartTime.ToUniversalTime().ToString('O')
-  if ($actual -ne $record.rootStartTimeUtc) { throw "Refusing to stop reused PID $($record.rootPid) for $InstanceId" }
+  if ($actual -ne $recordedStart) { throw "Refusing to stop reused PID $($record.rootPid) for $InstanceId" }
   & $TreeTerminator ([int]$record.rootPid)
   $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
   do {
     & $Sleeper 200
     $remaining = & $ProcessResolver ([int]$record.rootPid)
     if (-not $remaining) { break }
-    if ($remaining.StartTime.ToUniversalTime().ToString('O') -ne $record.rootStartTimeUtc) { break }
+    if ($remaining.StartTime.ToUniversalTime().ToString('O') -ne $recordedStart) { break }
   } while ([DateTime]::UtcNow -lt $deadline)
   $remaining = & $ProcessResolver ([int]$record.rootPid)
-  if ($remaining -and $remaining.StartTime.ToUniversalTime().ToString('O') -eq $record.rootStartTimeUtc) {
+  if ($remaining -and $remaining.StartTime.ToUniversalTime().ToString('O') -eq $recordedStart) {
     throw "Owned process tree for $InstanceId did not exit within $TimeoutSeconds seconds"
   }
   & $RecordRemover $Operations $InstanceId ([int]$record.rootPid)
@@ -981,6 +988,8 @@ function Invoke-OperationsSelfTest {
   $ownedProcess = [pscustomobject]@{ Id = 42; StartTime = $ownedStart }
   $reusedProcess = [pscustomobject]@{ Id = 42; StartTime = $ownedStart.AddSeconds(1) }
   $results += [pscustomobject]@{ Name = 'owned PID identity requires exact start time'; Passed = (Test-OwnedProcessIdentity -Record $ownedRecord -Process $ownedProcess).Ok }
+  $jsonRoundTripRecord = $ownedRecord | ConvertTo-Json -Compress | ConvertFrom-Json
+  $results += [pscustomobject]@{ Name = 'owned PID identity accepts PowerShell date deserialization'; Passed = (Test-OwnedProcessIdentity -Record $jsonRoundTripRecord -Process $ownedProcess).Ok }
   $results += [pscustomobject]@{ Name = 'owned PID identity rejects PID reuse'; Passed = (-not (Test-OwnedProcessIdentity -Record $ownedRecord -Process $reusedProcess).Ok) }
   $terminationState = @{ Terminated = $false; TerminatedPid = 0; RemovedPid = 0 }
   $processResolver = { param($RootProcessId) if ($terminationState.Terminated) { return $null }; return $ownedProcess }

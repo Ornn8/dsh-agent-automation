@@ -48,7 +48,7 @@ function Register-InstanceTask {
   param([Parameter(Mandatory)]$Instance)
   $supervisor = Join-Path $runtimeSnapshot.root 'runner-supervisor.ps1'
   $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$supervisor`" -Configuration `"$($loaded.Path)`" -InstanceId $($Instance.Id)"
-  $action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument $arguments
+  $action = New-ScheduledTaskAction -Execute $pwshExecutable -Argument $arguments
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -Hidden -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
@@ -58,7 +58,7 @@ function Register-InstanceTask {
 function Register-DshWebTask {
   $supervisor = Join-Path $runtimeSnapshot.root 'dsh-web-host-supervisor.ps1'
   $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$supervisor`" -Configuration `"$($loaded.Path)`""
-  $action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument $arguments
+  $action = New-ScheduledTaskAction -Execute $pwshExecutable -Argument $arguments
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -Hidden -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
@@ -86,7 +86,16 @@ function Remove-InstalledInstance {
 
 function Assert-NoTaskReferencesRuntime {
   param([Parameter(Mandatory)][string]$RuntimeRoot)
-  $references = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { @($_.Actions | Where-Object { ([string]$_.Arguments).IndexOf($RuntimeRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count })
+  $references = @()
+  foreach ($task in @(Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+    foreach ($action in @($task.Actions)) {
+      $arguments = $action.PSObject.Properties['Arguments']
+      if ($arguments -and ([string]$arguments.Value).IndexOf($RuntimeRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $references += $task
+        break
+      }
+    }
+  }
   if ($references.Count) { throw "Refusing to remove operations runtime still referenced by Scheduled Task: $($references[0].TaskName)" }
 }
 
@@ -141,6 +150,8 @@ if ($ops.dshWebHost.enabled -and -not $DryRun -and -not (Test-Path -LiteralPath 
 foreach ($required in @('pwsh.exe', $loaded.Config.ghExecutable, $loaded.Config.gitExecutable)) {
   if (-not (Get-Command $required -ErrorAction SilentlyContinue)) { throw "Required executable is unavailable: $required" }
 }
+$pwshExecutable = (Get-Command pwsh.exe -ErrorAction Stop).Source
+if (-not [IO.Path]::IsPathFullyQualified($pwshExecutable) -or -not (Test-Path -LiteralPath $pwshExecutable -PathType Leaf)) { throw 'pwsh.exe did not resolve to an absolute executable path' }
 if ($ops.dshWebHost.enabled -and -not (Get-Command pnpm.cmd -ErrorAction SilentlyContinue)) { throw 'Required executable is unavailable: pnpm.cmd' }
 if (-not $DryRun) {
   $principal = Test-HostGitHubLogin -Config $loaded.Config
