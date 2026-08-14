@@ -1,0 +1,22 @@
+{
+  "name": "dsh-github-work",
+  "version": "0.1.0",
+  "description": "Explicit GitHub Issue and pull request repair Skills for DeepSeek Harness.",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "README.md",
+    "cordis.patch.yml",
+    "skills"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

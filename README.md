@@ -20,7 +20,8 @@ The public Worker invocation is:
   "taskId": "stable-idempotency-key",
   "cwd": "X:\\isolated-checkout",
   "title": "visible local task title",
-  "prompt": "role-specific instructions",
+  "prompt": "adapter input",
+  "requiredSkill": "optional adapter capability",
   "timeoutMs": 10800000
 }
 ```
@@ -60,9 +61,11 @@ No controller workflow needs agent-specific branches. For a command-line agent, 
 
 The runners are idle outbound GitHub listeners. They make no model calls while no matching job exists. Landing, reconciliation, dispatch, and health checks are deterministic.
 
+DSH change work uses the bundled `dsh-github-work` Cordis plugin. The installer adds it to the existing `web` profile, and the controller sends a structured WorkRequest through the user-explicit `/github-issue-work` or `/github-pr-repair` Skill gesture. DSH's host injects the selected Skill before the first model step, so controller scripts do not duplicate agent procedure text. Sessions still use the ordinary Web agent factory and `session/event` stream and therefore remain visible in the DSH Web UI. ACP is not used because DSH defines it as an automation transport without UI integration.
+
 ## Local configuration
 
-Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). The file contains paths and repository allowlists, not provider keys. Every `dsh-web` worker must declare `provider`, `model`, and `reasoningEffort`; the controller calls `session.selectModel` with that complete selection after creating each session and before prompting it. The example pins DSH work to `opencode-go`, `deepseek-v4-flash`, and `max`. Each agent continues to use its own existing provider configuration.
+Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). The file contains paths and repository allowlists, not provider keys. Every `dsh-web` worker must declare `provider`, `model`, and `reasoningEffort`; the controller calls `session.selectModel` with that complete selection after creating each session, verifies the required plugin Skill through `skill.list`, and only then submits the structured WorkRequest. The example pins DSH work to `opencode-go`, `deepseek-v4-flash`, and `max`. Each agent continues to use its own existing provider configuration.
 
 Configuration schema version 2 accepts only explicit `workers` and `repositoryMappings`; legacy `dshWebBaseUrl` and `codex*` fields are rejected. Existing installations must add the required `github.login`, `workers`, and `operations` fields before using the open-source installer.
 
@@ -90,7 +93,7 @@ pwsh -NoProfile -File "$controller\scripts\install.ps1" -Configuration $config -
 
 `ControllerSha` must be a published lowercase 40-character SHA that remains permanently reachable from the controller default branch. If a controller PR is squash- or rebase-merged, first verify that the published commit tree exactly matches the reviewed PR-head tree, then pin the published commit; never pin a PR head from a branch that may be deleted. The offline bootstrap renderer does not verify GitHub reachability.
 
-Review the rendered workflows and dry-run output before removing `-DryRun`. The actual installer validates the active GitHub identity, runner archive checksum, immutable operations snapshot, repository variable, and branch protection before it starts either worker. It stores no model or GitHub credential in this repository.
+Review the rendered workflows and dry-run output before removing `-DryRun`. The actual installer validates the active GitHub identity, runner archive checksum, immutable operations snapshot, repository variable, and branch protection, then packs and installs the repository's credential-free DSH bundle into the existing Web profile before either worker starts. It stores no model or GitHub credential in this repository.
 
 ## Runner isolation
 

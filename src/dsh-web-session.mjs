@@ -96,6 +96,7 @@ export async function runDshWebSession({
   rpcAttempts = 3,
   signal,
   modelSelection,
+  requiredSkill,
 }) {
   const endpoint = localDshWebBaseUrl(baseUrl)
   const rpc = (method, payload) => dshRpc(endpoint, method, payload, fetchImpl, {
@@ -110,6 +111,12 @@ export async function runDshWebSession({
   try {
     await rpc('session.selectModel', { sessionId, ...selectedModel })
     await rpc('session.rename', { sessionId, title })
+    if (requiredSkill) {
+      const catalog = await rpc('skill.list', { sessionId })
+      if (!catalog?.skills?.some(skill => skill?.name === requiredSkill)) {
+        throw new Error(`Visible DSH session ${sessionId} cannot invoke required skill ${requiredSkill}`)
+      }
+    }
     await onCreated({ sessionId })
     await rpc('session.prompt', {
       sessionId,

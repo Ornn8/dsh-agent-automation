@@ -37,6 +37,9 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
     cwd: requiredText(invocation?.cwd, 'invocation.cwd'),
     title: requiredText(invocation?.title, 'invocation.title'),
     prompt: requiredText(invocation?.prompt, 'invocation.prompt'),
+    requiredSkill: invocation?.requiredSkill === undefined
+      ? undefined
+      : requiredText(invocation.requiredSkill, 'invocation.requiredSkill'),
     timeoutMs: invocation?.timeoutMs,
     signal: invocation?.signal,
     onStarted: typeof invocation?.onStarted === 'function' ? invocation.onStarted : async () => undefined,
