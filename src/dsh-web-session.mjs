@@ -45,6 +45,7 @@ export async function runDshWebSession({
   pollMs = 2_000,
   fetchImpl = fetch,
   sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
+  now = Date.now,
 }) {
   const endpoint = localDshWebBaseUrl(baseUrl)
   const created = await dshRpc(endpoint, 'session.create', { cwd }, fetchImpl)
@@ -52,38 +53,47 @@ export async function runDshWebSession({
   if (typeof sessionId !== 'string' || !sessionId) throw new Error('DSH Web Host did not return a session id')
   process.stdout.write(`Created visible DSH session ${sessionId}: ${title}\n`)
 
-  await dshRpc(endpoint, 'session.rename', { sessionId, title }, fetchImpl)
-  const permission = await dshRpc(endpoint, 'session.prompt', {
-    sessionId,
-    mode: 'queue',
-    content: [{ type: 'text', text: '/permission danger-full-access' }],
-  }, fetchImpl)
-  if (permission?.accepted !== true) {
-    throw new Error('DSH Web Host did not accept the danger-full-access permission command')
-  }
-  await dshRpc(endpoint, 'session.prompt', {
-    sessionId,
-    mode: 'queue',
-    content: [{ type: 'text', text: prompt }],
-  }, fetchImpl)
-
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const listed = await dshRpc(endpoint, 'session.list', {}, fetchImpl)
-    const session = listed?.items?.find(item => item.sessionId === sessionId)
-    if (!session) throw new Error(`Visible DSH session ${sessionId} disappeared`)
-    if (!session.running) {
-      const history = await dshRpc(endpoint, 'session.history', { sessionId, maxMessages: 1 }, fetchImpl)
-      const turnEnd = history?.events?.map(item => item.event)
-        .findLast(event => event?.type === 'turn/end')
-      if (turnEnd) {
-        const reason = turnEnd.data?.reason?.kind || 'unknown'
-        if (reason !== 'completed') throw new Error(`Visible DSH session ${sessionId} ended with ${reason}`)
-        process.stdout.write(`Visible DSH session ${sessionId} completed.\n`)
-        return { sessionId, reason }
-      }
+  try {
+    await dshRpc(endpoint, 'session.rename', { sessionId, title }, fetchImpl)
+    const permission = await dshRpc(endpoint, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: '/permission danger-full-access' }],
+    }, fetchImpl)
+    if (permission?.accepted !== true) {
+      throw new Error('DSH Web Host did not accept the danger-full-access permission command')
     }
-    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())))
+    await dshRpc(endpoint, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: prompt }],
+    }, fetchImpl)
+
+    const deadline = now() + timeoutMs
+    while (now() < deadline) {
+      const listed = await dshRpc(endpoint, 'session.list', {}, fetchImpl)
+      const session = listed?.items?.find(item => item.sessionId === sessionId)
+      if (!session) throw new Error(`Visible DSH session ${sessionId} disappeared`)
+      if (!session.running) {
+        const history = await dshRpc(endpoint, 'session.history', { sessionId, maxMessages: 1 }, fetchImpl)
+        const turnEnd = history?.events?.map(item => item.event)
+          .findLast(event => event?.type === 'turn/end')
+        if (turnEnd) {
+          const reason = turnEnd.data?.reason?.kind || 'unknown'
+          if (reason !== 'completed') throw new Error(`Visible DSH session ${sessionId} ended with ${reason}`)
+          process.stdout.write(`Visible DSH session ${sessionId} completed.\n`)
+          return { sessionId, reason }
+        }
+      }
+      await sleep(Math.min(pollMs, Math.max(1, deadline - now())))
+    }
+    throw new Error(`Visible DSH session ${sessionId} timed out after ${timeoutMs} ms`)
+  } catch (error) {
+    try {
+      await dshRpc(endpoint, 'session.cancel', { sessionId }, fetchImpl)
+    } catch (cancelError) {
+      process.stderr.write(`Failed to cancel visible DSH session ${sessionId}: ${cancelError.message}\n`)
+    }
+    throw error
   }
-  throw new Error(`Visible DSH session ${sessionId} timed out after ${timeoutMs} ms`)
 }

@@ -36,6 +36,7 @@ function visibleSessionFetch(reason = 'completed') {
       case 'session.create': return rpcResponse(request, { sessionId: 'session-visible' })
       case 'session.rename': return rpcResponse(request, { title: request.payload.title, seq: 1 })
       case 'session.prompt': return rpcResponse(request, { accepted: true })
+      case 'session.cancel': return rpcResponse(request, { accepted: true })
       case 'session.list': {
         lists += 1
         return rpcResponse(request, { items: [{ sessionId: 'session-visible', running: lists === 1 }] })
@@ -83,6 +84,22 @@ test('DSH Web session interruption fails the controller', async () => {
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
   }), /ended with interrupted/)
+})
+
+test('DSH Web session timeout cancels the controller-owned turn', async () => {
+  const fake = visibleSessionFetch()
+  const times = [0, 0, 2, 2]
+  await assert.rejects(runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080',
+    cwd: 'F:\\runner\\checkout',
+    title: '[DSH] 修复 PR #12',
+    prompt: 'Do the work.',
+    timeoutMs: 1,
+    fetchImpl: fake.fetchImpl,
+    sleep: async () => undefined,
+    now: () => times.shift() ?? 2,
+  }), /timed out/)
+  assert.equal(fake.calls.at(-1).method, 'session.cancel')
 })
 
 test('issueBranch accepts the documented branch field', () => {
