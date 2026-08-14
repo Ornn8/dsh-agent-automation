@@ -40,16 +40,11 @@ export function reviewThreadConfig(environment, effectiveConfig = {}) {
   }
 }
 
-/** Restrict a reviewer turn to one immutable checkout and no tool network. */
-export function reviewSandboxPolicy(taskCwd, reviewCwd) {
+/** Select the current read-only profile and its only runtime workspace roots. */
+export function reviewTurnPermissions(taskCwd, reviewCwd) {
   return {
-    type: 'readOnly',
-    access: {
-      type: 'restricted',
-      includePlatformDefaults: true,
-      readableRoots: [taskCwd, reviewCwd],
-    },
-    networkAccess: false,
+    permissions: ':read-only',
+    runtimeWorkspaceRoots: [taskCwd, reviewCwd],
   }
 }
 
@@ -190,6 +185,10 @@ export async function runReviewTask({
     if (!configured?.config || typeof configured.config !== 'object') {
       throw new Error('Codex App Server did not return an effective configuration')
     }
+    const profiles = await call('permissionProfile/list', {})
+    if (!profiles?.data?.some(profile => profile.id === ':read-only' && profile.allowed === true)) {
+      throw new Error('Codex App Server does not allow the required :read-only permission profile')
+    }
     const started = await call('thread/start', {
       cwd: projectCwd,
       model,
@@ -218,7 +217,7 @@ export async function runReviewTask({
       input: [{ type: 'text', text: prompt }],
       cwd: taskCwd,
       approvalPolicy: 'never',
-      sandboxPolicy: reviewSandboxPolicy(taskCwd, reviewCwd),
+      ...reviewTurnPermissions(taskCwd, reviewCwd),
       model,
       effort,
     })

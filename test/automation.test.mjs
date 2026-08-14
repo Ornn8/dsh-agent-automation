@@ -36,7 +36,7 @@ import {
 import { dshModelSelection, dshRpc, localDshWebBaseUrl, runDshWebSession } from '../src/dsh-web-session.mjs'
 import { DSH_ISSUE_SKILL, DSH_REPAIR_SKILL, dshWorkPrompt } from '../src/dsh-work.mjs'
 import {
-  reviewSandboxPolicy,
+  reviewTurnPermissions,
   reviewTaskIdsToArchive,
   reviewThreadConfig,
 } from '../src/codex-session.mjs'
@@ -655,14 +655,9 @@ test('Codex reviewer turns disable network, memory injection, and environment in
     notify: [],
     web_search: 'disabled',
   })
-  assert.deepEqual(reviewSandboxPolicy('F:\\neutral-context', 'F:\\exact-review'), {
-    type: 'readOnly',
-    access: {
-      type: 'restricted',
-      includePlatformDefaults: true,
-      readableRoots: ['F:\\neutral-context', 'F:\\exact-review'],
-    },
-    networkAccess: false,
+  assert.deepEqual(reviewTurnPermissions('F:\\neutral-context', 'F:\\exact-review'), {
+    permissions: ':read-only',
+    runtimeWorkspaceRoots: ['F:\\neutral-context', 'F:\\exact-review'],
   })
 })
 
