@@ -107,6 +107,23 @@ try {
   & git -C $temp diff --exit-code
   if ($LASTEXITCODE -ne 0) { throw 'Explicit update did not restore the exact generated workflow.' }
 
+  Add-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-health.yml') -Value '# committed stale render'
+  & git -C $temp add .github/workflows/agent-health.yml
+  & git -C $temp -c user.name=Bootstrap -c user.email=bootstrap@example.invalid commit -qm 'stale health fixture'
+  if ($LASTEXITCODE -ne 0) { throw 'Could not commit stale health fixture.' }
+  Add-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Value '# later local edit'
+  $beforeFailedPreflight = @{}
+  foreach ($name in $names) {
+    $path = Join-Path $temp ".github\workflows\$name"
+    $beforeFailedPreflight[$name] = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+  }
+  Invoke-Bootstrap -Arguments $arguments -ExpectedExitCode 1
+  foreach ($name in $names) {
+    $path = Join-Path $temp ".github\workflows\$name"
+    $actual = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+    Assert-True ($actual -ceq $beforeFailedPreflight[$name]) "Failed dirty-overlap preflight changed $name."
+  }
+
   Invoke-Bootstrap -Arguments @(
     '-TargetCheckout', $temp,
     '-ControllerRepository', $repository,
