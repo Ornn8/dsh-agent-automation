@@ -1,5 +1,6 @@
 import { actionsCredentialEnvironment, authenticatedMarker, parseJson, requiredEnv, run, trustedAssociation } from './common.mjs'
 import { recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
+import { reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('RECOVERY_SOURCE_RUN_ID')
@@ -68,18 +69,37 @@ async function reviewJobs() {
   return result.flatMap(page => page.jobs || [])
 }
 
-function reviewSubject(run) {
+async function reviewSubject(run) {
   const candidates = (run.pull_requests || []).filter(pullRequest => Number.isSafeInteger(pullRequest.number)
     && /^[0-9a-f]{40}$/.test(pullRequest.base?.sha || '')
     && /^[0-9a-f]{40}$/.test(pullRequest.head?.sha || '')
     && pullRequest.base.sha === run.head_sha)
-  if (candidates.length !== 1) return null
-  return {
-    type: 'pull-request',
-    number: candidates[0].number,
-    base: candidates[0].base.sha,
-    head: candidates[0].head.sha,
+  if (candidates.length === 1) {
+    return {
+      type: 'pull-request',
+      number: candidates[0].number,
+      base: candidates[0].base.sha,
+      head: candidates[0].head.sha,
+    }
   }
+  const title = /^Agent PR Review #(\d+) ([0-9a-f]{40})\.\.([0-9a-f]{40})$/.exec(String(run.display_title || ''))
+  if (title && title[2] === run.head_sha) {
+    return { type: 'pull-request', number: Number.parseInt(title[1], 10), base: title[2], head: title[3] }
+  }
+  const pullRequests = await pages(`repos/${repository}/pulls?state=open&per_page=100`, 'open pull requests for review recovery')
+  const matches = []
+  for (const pullRequest of pullRequests) {
+    if (pullRequest.base?.sha !== run.head_sha || pullRequest.head?.repo?.full_name !== repository) continue
+    const checkPages = await ghJson([
+      'api', `repos/${repository}/commits/${pullRequest.head.sha}/check-runs`, '--paginate', '--slurp',
+    ], `review checks for pull request #${pullRequest.number}`)
+    if (checkPages.flatMap(page => page.check_runs || []).some(checkRun => checkRun.name === 'codex/review'
+      && checkRun.app?.id === 15368
+      && reviewRunIdFromDetailsUrl(checkRun.details_url, repository) === Number.parseInt(sourceRunId, 10))) {
+      matches.push({ type: 'pull-request', number: pullRequest.number, base: pullRequest.base.sha, head: pullRequest.head.sha })
+    }
+  }
+  return matches.length === 1 ? matches[0] : null
 }
 
 async function markReviewDeadLetter(number) {
@@ -91,15 +111,19 @@ async function markReviewDeadLetter(number) {
     '--add-label', 'automation/review-failed'], { env: environment })
 }
 
-async function wakeExactReview(number) {
+async function wakeExactReview(subject) {
   await run(githubExecutable, [
     'label', 'create', 'automation/review-ready', '--repo', repository,
     '--description', 'A current pull request needs a Codex review', '--color', '1D76DB',
   ], { env: environment }).catch(() => undefined)
-  await run(githubExecutable, ['pr', 'edit', String(number), '--repo', repository,
-    '--remove-label', 'automation/review-ready'], { env: environment }).catch(() => undefined)
-  await run(githubExecutable, ['pr', 'edit', String(number), '--repo', repository,
+  await run(githubExecutable, ['pr', 'edit', String(subject.number), '--repo', repository,
     '--add-label', 'automation/review-ready'], { env: environment })
+  await run(githubExecutable, ['api', '--method', 'POST', `repos/${repository}/dispatches`,
+    '-f', 'event_type=codex-review',
+    '-F', `client_payload[pull_request_number]=${subject.number}`,
+    '-f', `client_payload[base_sha]=${subject.base}`,
+    '-f', `client_payload[head_sha]=${subject.head}`,
+    '-f', `client_payload[request_id]=recovery-${sourceRunId}`], { env: environment })
 }
 
 const workflowRun = await ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'recovery source workflow run')
@@ -111,7 +135,7 @@ if (!role) {
 }
 
 if (role === 'review') {
-  const subject = reviewSubject(workflowRun)
+  const subject = await reviewSubject(workflowRun)
   if (!subject) {
     process.stdout.write(`Recovery ignored review run ${sourceRunId} without one exact pull request pair.\n`)
     process.exit(0)
@@ -135,7 +159,7 @@ if (role === 'review') {
   if (decision.action === 'dead-letter') {
     await markReviewDeadLetter(subject.number)
   } else {
-    await wakeExactReview(subject.number)
+    await wakeExactReview(subject)
   }
   process.stdout.write(`Recovery processed review pair #${subject.number} at ${subject.base}..${subject.head}.\n`)
   process.exit(0)
@@ -176,6 +200,10 @@ for (const current of subjects) {
     }
     await run(githubExecutable, ['issue', 'edit', String(subject.number), '--repo', repository,
       '--add-label', 'agent/dsh'], { env: environment })
+    await run(githubExecutable, ['api', '--method', 'POST', `repos/${repository}/dispatches`,
+      '-f', 'event_type=dsh-issue',
+      '-F', `client_payload[issue_number]=${subject.number}`,
+      '-f', `client_payload[request_id]=recovery-${sourceRunId}-${decision.attempt}`], { env: environment })
   } else {
     const originalRequestId = repairRequestId(sourceComment.body, subject.head)
     const recoveryRequestId = originalRequestId.startsWith('ci-run-')

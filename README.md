@@ -54,10 +54,10 @@ No controller workflow needs agent-specific branches. For a command-line agent, 
 
 ## Current behavior
 
-1. Adding the exact `agent/dsh` label to a trusted Issue starts the configured change Worker. The backlog dispatcher selects one ready Issue after each default-branch merge and respects explicit dependencies.
+1. Adding the exact `agent/dsh` label to a trusted Issue starts the configured change Worker. The backlog dispatcher selects one ready Issue after each default-branch merge, respects explicit dependencies, and emits an explicit `repository_dispatch` because GitHub suppresses ordinary workflow recursion from its job token.
 2. Opening or updating a same-repository pull request starts the configured review Worker on the review runner. The current Codex Adapter creates a visible ChatGPT Desktop task using `gpt-5.6-sol` at medium reasoning and archives automated review tasks beyond the newest six.
 3. A blocking exact-pair review publishes one idempotent change WorkRequest. Failed CI and explicit trusted rework comments use the same change queue through their validated request forms.
-4. A default-branch advance first updates behind same-repository pull requests through GitHub's guarded update-branch API. The resulting head requests a fresh review. PASS then requests deterministic landing: the landing controller requires a successful GitHub Actions CheckRun whose run and `referenced_workflows` provenance bind the current exact base/head pair to the pinned controller revision, plus every protected check; it revalidates and squash-merges.
+4. A default-branch advance first updates behind same-repository pull requests through GitHub's guarded update-branch API. Current heads receive an explicit `repository_dispatch` review request; label changes remain audit state and are not treated as an event transport. PASS then requests deterministic landing: the landing controller requires a successful GitHub Actions CheckRun whose run and `referenced_workflows` provenance bind the current exact base/head pair to the pinned controller revision, plus every protected check; it revalidates and squash-merges.
 
 The runners are idle outbound GitHub listeners. They make no model calls while no matching job exists. Landing, reconciliation, dispatch, and health checks are deterministic.
 

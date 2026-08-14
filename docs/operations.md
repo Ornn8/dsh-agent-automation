@@ -47,6 +47,8 @@ Install normally uses GitHub's [status check protection endpoint](https://docs.g
 
 `bootstrap-repository.ps1` renders only the seven thin forwarding workflows under a local target checkout's `.github/workflows/` directory. It does not invoke GitHub CLI, read credentials, set repository variables, stage files, commit, or push. Supply the controller's owner/name, a published lowercase 40-character `ControllerSha` that remains permanently reachable from the controller default branch, and the CI workflow name that the target's `DSH_AUTOMATION_CI_WORKFLOW` variable must contain. If a controller PR is squash- or rebase-merged, verify that the published commit tree exactly matches the reviewed PR-head tree before pinning the published commit; never pin a PR head from a branch that may be deleted. The offline renderer does not verify GitHub reachability.
 
+GitHub does not start ordinary downstream workflows for labels written by a workflow's own `GITHUB_TOKEN`. Backlog, reconciliation, and bounded recovery therefore use the supported `repository_dispatch` exception for their Issue and exact-pair review handoffs. Target listeners live on the protected default branch, reusable jobs remain pinned to the published controller SHA, and each worker revalidates the live Issue or exact pull request base/head before any model call. Labels remain observable audit state, never execution authority.
+
 ```powershell
 pwsh -NoProfile -File F:\dsh-agent-automation\scripts\bootstrap-repository.ps1 `
   -TargetCheckout F:\target-repository `

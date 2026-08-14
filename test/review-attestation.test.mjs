@@ -73,6 +73,29 @@ test('a trusted failed review run is terminal evidence but never landing proof',
   }), false)
 })
 
+test('landing accepts a recursion-safe dispatch run only from the exact current base branch', () => {
+  const dispatched = proof({
+    run: {
+      ...proof().run,
+      event: 'repository_dispatch',
+      head_branch: 'main',
+      pull_requests: [],
+    },
+  })
+  const trustedReview = { controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml' }
+  assert.equal(hasTrustedExactReviewProof({ pullRequest: pullRequest(), reviewProof: dispatched, trustedReview }), true)
+  assert.equal(hasTrustedExactReviewProof({
+    pullRequest: pullRequest(),
+    reviewProof: { run: { ...dispatched.run, head_branch: 'other' }, checkRun: dispatched.checkRun },
+    trustedReview,
+  }), false)
+  assert.equal(hasTrustedExactReviewProof({
+    pullRequest: pullRequest(),
+    reviewProof: { run: { ...dispatched.run, head_sha: 'd'.repeat(40) }, checkRun: dispatched.checkRun },
+    trustedReview,
+  }), false)
+})
+
 test('landing rejects workflow evidence altered by the target pull request', () => {
   const expected = { controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml' }
   for (const reviewProof of [

@@ -27,18 +27,22 @@ const summaries = await ghJson([
   'api', `repos/${repository}/pulls?state=open&per_page=100`, '--paginate', '--slurp',
 ], 'open pull requests')
 
-async function requestReview(pullRequestNumber) {
+async function requestReview(pullRequest) {
   await run(githubExecutable, [
     'label', 'create', 'automation/review-ready', '--repo', repository,
     '--description', 'Request one exact-pair Codex review', '--color', '0E8A16',
   ], { env: githubEnvironment }).catch(() => undefined)
   await run(githubExecutable, [
-    'pr', 'edit', String(pullRequestNumber), '--repo', repository,
-    '--remove-label', 'automation/review-ready',
-  ], { env: githubEnvironment }).catch(() => undefined)
-  await run(githubExecutable, [
-    'pr', 'edit', String(pullRequestNumber), '--repo', repository,
+    'pr', 'edit', String(pullRequest.number), '--repo', repository,
     '--add-label', 'automation/review-ready',
+  ], { env: githubEnvironment })
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/dispatches`,
+    '-f', 'event_type=codex-review',
+    '-F', `client_payload[pull_request_number]=${pullRequest.number}`,
+    '-f', `client_payload[base_sha]=${pullRequest.base.sha}`,
+    '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
+    '-f', `client_payload[request_id]=reconcile-${pullRequest.base.sha}-${pullRequest.head.sha}`,
   ], { env: githubEnvironment })
 }
 
@@ -60,6 +64,7 @@ for (const summary of summaries.flat()) {
   }
   const landingPullRequest = {
     number: pullRequest.number, repository, state: pullRequest.state.toUpperCase(), isDraft: pullRequest.draft,
+    baseRefName: pullRequest.base.ref,
     baseRefOid: pullRequest.base.sha, headRefOid: pullRequest.head.sha, mergeStateStatus: 'CLEAN',
   }
   const checkRunPages = await ghJson([
@@ -85,7 +90,7 @@ for (const summary of summaries.flat()) {
   }
   if (!needsExactReview({ repository, defaultBranch, pullRequest, reviewProof })) continue
 
-  await requestReview(summary.number)
+  await requestReview(pullRequest)
   dispatched += 1
 }
 process.stdout.write(`Dispatched ${dispatched} exact-pair review reconciliation request(s).\n`)

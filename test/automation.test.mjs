@@ -321,12 +321,13 @@ test('a completed BLOCK publishes repair without being mistaken for reviewer inf
   assert.match(reviewWorkflow, /Preserve the blocking review conclusion/)
 })
 
-test('reviewer infrastructure recovery wakes the protected labeled review path rather than repository dispatch', async () => {
+test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispatch path', async () => {
   const source = await readFile(new URL('../src/recover-backlog.mjs', import.meta.url), 'utf8')
   assert.match(source, /async function wakeExactReview/)
-  assert.match(source, /--remove-label', 'automation\/review-ready/)
   assert.match(source, /--add-label', 'automation\/review-ready/)
-  assert.doesNotMatch(source, /event_type=dsh-review/)
+  assert.match(source, /event_type=codex-review/)
+  assert.match(source, /client_payload\[base_sha\]/)
+  assert.match(source, /client_payload\[head_sha\]/)
 })
 
 test('review checkout contains the exact base and head before Codex reads their diff', async () => {
@@ -343,10 +344,18 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.match(source, /pulls\/\$\{pullRequest\.number\}\/update-branch/)
   assert.match(source, /expected_head_sha=/)
   assert.match(source, /--add-label', 'automation\/review-ready'/)
-  assert.doesNotMatch(source, /event_type=dsh-review/)
+  assert.match(source, /event_type=codex-review/)
+  assert.match(source, /client_payload\[base_sha\]/)
+  assert.match(source, /client_payload\[head_sha\]/)
   assert.match(workflow, /DEFAULT_BRANCH: \$\{\{ github\.event\.repository\.default_branch \}\}/)
   assert.match(workflow, /pull-requests: write/)
   assert.match(workflow, /issues: write/)
+})
+
+test('backlog Issue dispatch is not lost to GitHub token recursion suppression', async () => {
+  const source = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
+  assert.match(source, /event_type=dsh-issue/)
+  assert.match(source, /client_payload\[issue_number\]/)
 })
 
 test('reviewer instructions come from the verified base rather than the pull request head', async () => {

@@ -40,6 +40,7 @@ async function trustedBlockedRepairNumbers(pullRequests) {
       repository,
       state: candidate.state?.toUpperCase(),
       isDraft: candidate.draft,
+      baseRefName: candidate.base?.ref,
       baseRefOid: candidate.base?.sha,
       headRefOid: candidate.head?.sha,
     }
@@ -95,5 +96,11 @@ if (work.type === 'repair') {
   await run(githubExecutable, [
     'issue', 'edit', String(work.number), '--repo', repository, '--add-label', 'agent/dsh',
   ], { env: githubEnvironment })
-  process.stdout.write(`Dispatched Issue #${work.number} with agent/dsh.\n`)
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/dispatches`,
+    '-f', 'event_type=dsh-issue',
+    '-F', `client_payload[issue_number]=${work.number}`,
+    '-f', `client_payload[request_id]=backlog-${work.number}`,
+  ], { env: githubEnvironment })
+  process.stdout.write(`Dispatched Issue #${work.number} through the trusted repository event.\n`)
 }
