@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { readFile, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { normalizeWorkerConfig } from './agent-worker.mjs'
+import { dshModelSelection } from './dsh-web-session.mjs'
 
 /** Run a process without a command shell and return its captured output. */
 export function run(command, args, options = {}) {
@@ -96,8 +97,21 @@ export async function loadConfig() {
     resolveRepositoryWorker(config, repository, 'change')
     resolveRepositoryWorker(config, repository, 'review')
   }
+  validateDshWorkerConfig(config)
   githubLogin(config)
   return config
+}
+
+/** Validate that every local DSH worker has an explicit complete model selection. */
+export function validateDshWorkerConfig(config) {
+  for (const [workerId, worker] of Object.entries(config?.workers || {})) {
+    if (worker?.adapter !== 'dsh-web') continue
+    try {
+      dshModelSelection(worker)
+    } catch (error) {
+      throw new Error(`workers.${workerId} ${error.message}`)
+    }
+  }
 }
 
 /** Resolve a worker from the one local mapping permitted for a repository role. */

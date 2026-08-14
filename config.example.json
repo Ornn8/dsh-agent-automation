@@ -10,7 +10,10 @@
   "workers": {
     "dsh": {
       "adapter": "dsh-web",
-      "baseUrl": "http://127.0.0.1:3080"
+      "baseUrl": "http://127.0.0.1:3080",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "reasoningEffort": "max"
     },
     "codex": {
       "adapter": "codex-app",

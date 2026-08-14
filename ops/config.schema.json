@@ -21,7 +21,25 @@
         "login": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$" }
       }
     },
-    "workers": { "type": "object", "minProperties": 1 },
+    "workers": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "allOf": [{
+          "if": { "properties": { "adapter": { "const": "dsh-web" } }, "required": ["adapter"] },
+          "then": {
+            "required": ["baseUrl", "provider", "model", "reasoningEffort"],
+            "properties": {
+              "baseUrl": { "type": "string", "minLength": 1 },
+              "provider": { "type": "string", "minLength": 1 },
+              "model": { "type": "string", "minLength": 1 },
+              "reasoningEffort": { "type": "string", "minLength": 1 }
+            }
+          }
+        }]
+      }
+    },
     "operations": {
       "type": "object",
       "required": ["schemaVersion", "installRoot", "stateRoot", "logsRoot", "controller", "runner", "repositoryMappings", "roles", "dshWebHost"],

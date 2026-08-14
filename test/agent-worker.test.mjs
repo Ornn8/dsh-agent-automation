@@ -108,7 +108,9 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
     },
   })
   const receipt = await runAgentWorker({
-    config: { workers: { implementer: { adapter: 'dsh-web', baseUrl: 'http://localhost:3080' } } },
+    config: { workers: { implementer: {
+      adapter: 'dsh-web', baseUrl: 'http://localhost:3080', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max',
+    } } },
     workerId: 'implementer',
     invocation: {
       taskId: 'issue-7', cwd: 'F:\\checkout', title: 'Issue 7',
@@ -119,6 +121,7 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
   })
 
   assert.equal(calls[0].baseUrl, 'http://localhost:3080')
+  assert.deepEqual(calls[0].modelSelection, { provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max' })
   assert.deepEqual(started, [{ sessionId: 'dsh-visible' }])
   assert.equal(receipt.workerId, 'implementer')
   assert.equal(receipt.outcome, 'completed')
