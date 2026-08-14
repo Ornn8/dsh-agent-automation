@@ -58,9 +58,9 @@ export function reviewInitializeParams() {
   }
 }
 
-/** Start the first turn before naming it so the App Server has materialized a durable task. */
+/** Start a fresh review task without mutating metadata while its first turn is active. */
 export async function materializeReviewTask(call, {
-  title, prompt, projectCwd, taskCwd, reviewCwd, environment, effectiveConfig, model, effort,
+  prompt, projectCwd, taskCwd, reviewCwd, environment, effectiveConfig, model, effort,
 }) {
   const started = await call('thread/start', {
     cwd: projectCwd,
@@ -83,7 +83,6 @@ export async function materializeReviewTask(call, {
   })
   const turnId = turn?.turn?.id
   if (typeof turnId !== 'string' || !turnId) throw new Error('Codex App Server did not start the review turn')
-  await call('thread/name/set', { threadId, name: title })
   return { threadId, turnId }
 }
 
@@ -262,13 +261,13 @@ export async function runReviewTask({
     await onCreated({ sessionId: threadId })
     process.stdout.write(`ChatGPT Desktop review task created: ${threadId}\n`)
 
+    await completion
+    await call('thread/name/set', { threadId, name: title })
+    await call('thread/settings/update', { threadId, cwd: projectCwd })
     const activeThreads = await listAllActiveThreads(call)
     for (const staleThreadId of reviewTaskIdsToArchive(activeThreads, threadId, keep)) {
       await call('thread/archive', { threadId: staleThreadId })
     }
-
-    await call('thread/settings/update', { threadId, cwd: projectCwd })
-    await completion
     if (!finalMessage.trim()) throw new Error('Codex review task completed without a final assistant message')
     return { threadId, finalMessage: finalMessage.trim() }
   } finally {
