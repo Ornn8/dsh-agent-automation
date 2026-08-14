@@ -82,6 +82,9 @@ try {
   foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: read', 'pull-requests: write')) {
     Assert-True ($landingWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent PR Landing omitted caller permission $permission."
   }
+  $reviewWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-pr-review.yml') -Raw
+  Assert-True ($reviewWorkflow -match '(?m)^  checks: write\r?$') 'Agent PR Review cannot create its exact-head CheckRun.'
+  Assert-True ($reviewWorkflow -notmatch 'repository_dispatch|statuses: write|dsh-review') 'Agent PR Review retained a mutable or obsolete review trigger.'
 
   & git -C $temp add .github/workflows
   & git -C $temp -c user.name=Bootstrap -c user.email=bootstrap@example.invalid commit -qm 'bootstrap fixtures'
