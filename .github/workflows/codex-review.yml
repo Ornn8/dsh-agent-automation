@@ -64,12 +64,14 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.head_sha }}
           path: review
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
-      - name: Fetch exact review base
+      - name: Fetch exact review history and base
         working-directory: review
-        run: git fetch --no-tags origin ${{ inputs.base_sha }}
+        run: |
+          git fetch --no-tags --unshallow origin ${{ inputs.head_sha }}
+          git fetch --no-tags origin ${{ inputs.base_sha }}
 
       - name: Review exact PR head with Codex
         id: review

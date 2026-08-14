@@ -140,6 +140,13 @@ test('a blocking review publishes an independent change work request', async () 
   assert.match(workflow, /controller_sha:/)
 })
 
+test('review checkout fetches only the exact pull request history', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/codex-review.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /fetch-depth: 1/)
+  assert.match(workflow, /git fetch --no-tags --unshallow origin \$\{\{ inputs\.head_sha \}\}/)
+  assert.doesNotMatch(workflow, /fetch-depth: 0/)
+})
+
 test('issueBranch accepts the documented branch field', () => {
   assert.equal(issueBranch('## Completion\nBranch: `gui/02-shell`\n'), 'gui/02-shell')
   assert.equal(issueBranch('- Branch name: `agent/fix_1`'), 'agent/fix_1')
