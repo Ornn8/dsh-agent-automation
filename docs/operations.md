@@ -45,7 +45,7 @@ Install normally uses GitHub's [status check protection endpoint](https://docs.g
 
 ## Offline target workflow bootstrap
 
-`bootstrap-repository.ps1` renders only the seven thin forwarding workflows under a local target checkout's `.github/workflows/` directory. It does not invoke GitHub CLI, read credentials, set repository variables, stage files, commit, or push. Supply the controller's owner/name, a reviewed lowercase 40-character commit SHA, and the CI workflow name that the target's `DSH_AUTOMATION_CI_WORKFLOW` variable must contain.
+`bootstrap-repository.ps1` renders only the seven thin forwarding workflows under a local target checkout's `.github/workflows/` directory. It does not invoke GitHub CLI, read credentials, set repository variables, stage files, commit, or push. Supply the controller's owner/name, a published lowercase 40-character `ControllerSha` that remains permanently reachable from the controller default branch, and the CI workflow name that the target's `DSH_AUTOMATION_CI_WORKFLOW` variable must contain. If a controller PR is squash- or rebase-merged, verify that the published commit tree exactly matches the reviewed PR-head tree before pinning the published commit; never pin a PR head from a branch that may be deleted. The offline renderer does not verify GitHub reachability.
 
 ```powershell
 pwsh -NoProfile -File F:\dsh-agent-automation\scripts\bootstrap-repository.ps1 `
