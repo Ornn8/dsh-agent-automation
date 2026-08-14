@@ -55,7 +55,7 @@ test('DSH Web sessions stay on the loopback Host', () => {
   assert.throws(() => localDshWebBaseUrl('https://example.com'), /loopback/)
 })
 
-test('DSH Web session is titled, privileged, prompted, and observed to completion', async () => {
+test('DSH Web session is titled, prompted once, and observed to completion', async () => {
   const fake = visibleSessionFetch()
   const result = await runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080',
@@ -67,11 +67,10 @@ test('DSH Web session is titled, privileged, prompted, and observed to completio
   })
   assert.deepEqual(result, { sessionId: 'session-visible', reason: 'completed' })
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.rename', 'session.prompt', 'session.prompt',
+    'session.create', 'session.rename', 'session.prompt',
     'session.list', 'session.list', 'session.history',
   ])
-  assert.equal(fake.calls[2].payload.content[0].text, '/permission danger-full-access')
-  assert.equal(fake.calls[3].payload.content[0].text, 'Do the work.')
+  assert.equal(fake.calls[2].payload.content[0].text, 'Do the work.')
 })
 
 test('DSH Web session interruption fails the controller', async () => {

@@ -55,14 +55,6 @@ export async function runDshWebSession({
 
   try {
     await dshRpc(endpoint, 'session.rename', { sessionId, title }, fetchImpl)
-    const permission = await dshRpc(endpoint, 'session.prompt', {
-      sessionId,
-      mode: 'queue',
-      content: [{ type: 'text', text: '/permission danger-full-access' }],
-    }, fetchImpl)
-    if (permission?.accepted !== true) {
-      throw new Error('DSH Web Host did not accept the danger-full-access permission command')
-    }
     await dshRpc(endpoint, 'session.prompt', {
       sessionId,
       mode: 'queue',
