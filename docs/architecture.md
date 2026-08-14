@@ -55,7 +55,7 @@ There is no direct Agent-to-Agent call. GitHub records the handoff before the pr
 - Workflows select only the immutable `change` or `review` role. The local controller resolves its worker from the one configured repository mapping and rejects any missing, duplicate, or unknown mapping before invoking an adapter.
 - Workflow and local process timeouts are finite. Cancellation does not become success.
 - A review BLOCK terminates the review job after publishing a WorkRequest. It does not wait for change work.
-- A default-branch advance updates each behind same-repository pull request with its expected head SHA. The synchronize event owns the next review; stacked and fork pull requests are not modified.
+- A default-branch advance updates each behind same-repository pull request with its expected head SHA, waits for GitHub to expose the new exact pair, and explicitly dispatches its review because job-token writes do not recurse into workflows. Stacked and fork pull requests are not modified.
 - A stopped role runner leaves its matching GitHub job queued. Other runner labels continue to accept work.
 - Landing terminates with merged, deferred for checks, stale revision, blocked, or failed. It requires strict protected checks, rereads the current branch protection, checks, and trusted review immediately before merging, and never reuses a verdict from another base/head pair.
 - DSH Web RPC retries only bounded transient transport failures with the same RPC id and the original visible session. A cancellation signal cancels that session. Exhausted failures retain their transient or terminal classification in the durable failed handoff; no controller waits indefinitely for a disconnected local host.
