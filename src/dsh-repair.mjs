@@ -239,7 +239,7 @@ try {
     config,
     workerId,
     invocation: {
-      taskId: `repair-${pullRequestNumber}-${expectedHead}`,
+      taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
       cwd: checkoutPath,
       title: `[Agent: ${workerId}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
       prompt,

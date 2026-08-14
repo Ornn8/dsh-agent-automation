@@ -22,6 +22,7 @@ import { DSH_ISSUE_SKILL, dshWorkPrompt } from './dsh-work.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
+const issueRequestId = requiredEnv('ISSUE_REQUEST_ID')
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
 const workerId = resolveRepositoryWorker(config, repository, requiredEnv('AGENT_ROLE'))
@@ -144,7 +145,7 @@ try {
     config,
     workerId,
     invocation: {
-      taskId: `issue-${issueNumber}`,
+      taskId: `issue-${repository}-${issueNumber}-${issueRequestId}`,
       cwd: checkoutPath,
       title: `[Agent: ${workerId}] 执行 Issue #${issueNumber}`,
       prompt,

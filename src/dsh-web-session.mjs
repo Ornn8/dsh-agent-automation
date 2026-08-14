@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 const TRANSIENT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_SOCKET'])
@@ -46,14 +46,25 @@ export function dshModelSelection(value) {
   return selection
 }
 
+/** Derive one stable visible session and prompt identity from a controller task. */
+export function dshSessionIdentity(taskId) {
+  if (typeof taskId !== 'string' || !taskId.trim()) throw new Error('taskId must be a non-empty string')
+  const digest = createHash('sha256').update(taskId).digest('hex')
+  return {
+    sessionId: `dsh-github-${digest.slice(0, 40)}`,
+    promptRpcId: `github-agent-prompt-${digest}`,
+  }
+}
+
 /** Call one DSH Web Host RPC method and unwrap its result. */
 export async function dshRpc(baseUrl, method, payload, fetchImpl = fetch, {
   maxAttempts = 3,
+  rpcId = `github-agent-${randomUUID()}`,
   sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
   signal,
 } = {}) {
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) throw new Error('maxAttempts must be a positive integer')
-  const rpcId = `github-agent-${randomUUID()}`
+  if (typeof rpcId !== 'string' || !rpcId) throw new Error('rpcId must be a non-empty string')
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const response = await fetchImpl(`${localDshWebBaseUrl(baseUrl)}/api/${method}`, {
@@ -84,6 +95,7 @@ export async function dshRpc(baseUrl, method, payload, fetchImpl = fetch, {
 /** Create one UI-owned DSH session and wait for its only turn to finish. */
 export async function runDshWebSession({
   baseUrl,
+  taskId,
   cwd,
   title,
   prompt,
@@ -103,9 +115,11 @@ export async function runDshWebSession({
     maxAttempts: rpcAttempts, sleep, signal,
   })
   const selectedModel = dshModelSelection(modelSelection)
-  const created = await rpc('session.create', { cwd })
+  const identity = dshSessionIdentity(taskId)
+  const created = await rpc('session.create', { cwd, sessionId: identity.sessionId })
   const sessionId = created?.sessionId
   if (typeof sessionId !== 'string' || !sessionId) throw new Error('DSH Web Host did not return a session id')
+  if (sessionId !== identity.sessionId) throw new Error('DSH Web Host returned a different preallocated session id')
   process.stdout.write(`Created visible DSH session ${sessionId}: ${title}\n`)
 
   try {
@@ -118,11 +132,27 @@ export async function runDshWebSession({
       }
     }
     await onCreated({ sessionId })
-    await rpc('session.prompt', {
-      sessionId,
-      mode: 'queue',
-      content: [{ type: 'text', text: prompt }],
-    }, fetchImpl)
+    const promptRecorded = async () => {
+      const history = await rpc('session.history', { sessionId, maxMessages: 50 })
+      return history?.events?.some(item => item.event?.type === 'user/message'
+        && item.event.data?.source?.rpcId === identity.promptRpcId)
+    }
+    if (!await promptRecorded()) {
+      try {
+        await dshRpc(endpoint, 'session.prompt', {
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text: prompt }],
+        }, fetchImpl, {
+          maxAttempts: 1,
+          rpcId: identity.promptRpcId,
+          sleep,
+          signal,
+        })
+      } catch (error) {
+        if (!(error instanceof DshWebRpcError) || error.kind !== 'transient' || !await promptRecorded()) throw error
+      }
+    }
 
     const deadline = now() + timeoutMs
     while (now() < deadline) {

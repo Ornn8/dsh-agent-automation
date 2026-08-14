@@ -36,6 +36,7 @@ jobs:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-issue.yml@{{CONTROLLER_SHA}}
     with:
       issue_number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.issue_number || github.event.issue.number }}
+      request_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.request_id || format('label-{0}-{1}', github.run_id, github.run_attempt) }}
 
   reconcile-reviews:
     if: >-

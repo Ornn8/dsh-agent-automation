@@ -21,6 +21,7 @@ export function createAgentAdapters({
       run: async ({ worker, invocation }) => {
         const result = await runDshSession({
           baseUrl: worker.baseUrl,
+          taskId: invocation.taskId,
           cwd: invocation.cwd,
           title: invocation.title,
           prompt: invocation.prompt,

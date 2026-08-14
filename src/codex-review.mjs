@@ -140,7 +140,7 @@ const workerReceipt = await runAgentWorker({
   invocation: {
     taskId: `review-${expectedBase}-${expectedHead}`,
     cwd: reviewCheckout,
-    title: `[GitHub 审查] ${repository} PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
+    title: `[DSH GitHub 审查] ${repository} PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
     prompt,
     timeoutMs: 60 * 60 * 1000,
   },

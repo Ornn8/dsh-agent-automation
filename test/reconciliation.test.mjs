@@ -1,6 +1,24 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { needsExactReview } from '../src/reconciliation-policy.mjs'
+import { needsDefaultBranchUpdate, needsExactReview } from '../src/reconciliation-policy.mjs'
+
+test('base reconciliation compares immutable commits instead of transient mergeability', () => {
+  const oldBase = 'a'.repeat(40)
+  const currentBase = 'b'.repeat(40)
+  const pullRequest = {
+    mergeable_state: 'unknown',
+    base: { ref: 'master', sha: oldBase },
+  }
+  assert.equal(needsDefaultBranchUpdate({
+    defaultBranch: 'master', defaultBranchHead: currentBase, pullRequest,
+  }), true)
+
+  pullRequest.base.sha = currentBase
+  pullRequest.mergeable_state = 'behind'
+  assert.equal(needsDefaultBranchUpdate({
+    defaultBranch: 'master', defaultBranchHead: currentBase, pullRequest,
+  }), false)
+})
 
 test('base reconciliation reviews only a default-branch pair without trusted exact-pair evidence', () => {
   const repository = 'Ornn8/deepseek-harness'
