@@ -11,9 +11,11 @@ import {
   trustedAssociation,
 } from '../src/common.mjs'
 import {
+  ciRepairRequest,
   explicitReworkCommand,
   issueDependencies,
   selectBacklogWork,
+  trustedCiFailure,
   trustedReviewFeedback,
 } from '../src/dispatch-policy.mjs'
 import {
@@ -245,6 +247,35 @@ test('trusted blocking GitHub reviews and inline comments wake DSH without a men
   assert.equal(trustedReviewFeedback({
     kind: 'review-comment', association: 'CONTRIBUTOR',
   }), false)
+})
+
+test('CI repair requests bind one failed CI run or one bootstrap head', () => {
+  assert.deepEqual(ciRepairRequest('ci-run-31767661165-2'), {
+    kind: 'run', runId: 31767661165, attempt: 2,
+  })
+  assert.deepEqual(ciRepairRequest(`ci-head-${'a'.repeat(40)}`), {
+    kind: 'head', head: 'a'.repeat(40),
+  })
+  assert.equal(ciRepairRequest('ci-run-not-a-number-1'), null)
+  assert.equal(ciRepairRequest('ci-head-main'), null)
+})
+
+test('only an exact failed CI pull request run may wake DSH', () => {
+  const run = {
+    id: 31767661165,
+    run_attempt: 2,
+    name: 'CI',
+    event: 'pull_request',
+    status: 'completed',
+    conclusion: 'failure',
+    head_sha: 'a'.repeat(40),
+    pull_requests: [{ number: 12 }],
+  }
+  assert.equal(trustedCiFailure({ run, pullRequestNumber: 12, expectedHead: 'a'.repeat(40) }), true)
+  assert.equal(trustedCiFailure({ run: { ...run, name: 'Agent PR Review' }, pullRequestNumber: 12, expectedHead: 'a'.repeat(40) }), false)
+  assert.equal(trustedCiFailure({ run: { ...run, conclusion: 'cancelled' }, pullRequestNumber: 12, expectedHead: 'a'.repeat(40) }), false)
+  assert.equal(trustedCiFailure({ run, pullRequestNumber: 13, expectedHead: 'a'.repeat(40) }), false)
+  assert.equal(trustedCiFailure({ run, pullRequestNumber: 12, expectedHead: 'b'.repeat(40) }), false)
 })
 
 test('trustedAssociation limits privileged dispatch', () => {

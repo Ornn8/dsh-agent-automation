@@ -25,6 +25,30 @@ export function trustedReviewFeedback({ kind, association, state }) {
   return kind === 'review' && state === 'CHANGES_REQUESTED'
 }
 
+/** Parse an idempotent CI repair request from a workflow run or bootstrap head. */
+export function ciRepairRequest(value) {
+  const run = /^ci-run-(\d+)-(\d+)$/.exec(String(value || ''))
+  if (run) {
+    const runId = Number.parseInt(run[1], 10)
+    const attempt = Number.parseInt(run[2], 10)
+    return Number.isSafeInteger(runId) && runId > 0 && Number.isSafeInteger(attempt) && attempt > 0
+      ? { kind: 'run', runId, attempt }
+      : null
+  }
+  const head = /^ci-head-([0-9a-f]{40})$/.exec(String(value || ''))
+  return head ? { kind: 'head', head: head[1] } : null
+}
+
+/** Return whether a completed workflow run is the exact failed CI evidence for a PR head. */
+export function trustedCiFailure({ run, pullRequestNumber, expectedHead }) {
+  return run?.name === 'CI'
+    && run.event === 'pull_request'
+    && run.status === 'completed'
+    && run.conclusion === 'failure'
+    && run.head_sha === expectedHead
+    && run.pull_requests?.some(pullRequest => pullRequest.number === pullRequestNumber)
+}
+
 function hasDeclaredBranch(body) {
   return /^\s*(?:[-*]\s*)?(?:branch|branch name)\s*:\s*`[^`]+`\s*$/im.test(String(body || ''))
 }
