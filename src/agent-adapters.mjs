@@ -1,4 +1,11 @@
-import { hostCredentialEnvironment, parseJson, run } from './common.mjs'
+import path from 'node:path'
+import { mkdtemp, rm } from 'node:fs/promises'
+import {
+  hostCredentialEnvironment,
+  parseJson,
+  reviewerCredentialEnvironment,
+  run,
+} from './common.mjs'
 import { runReviewTask } from './codex-session.mjs'
 import { dshRpc, runDshWebSession } from './dsh-web-session.mjs'
 
@@ -18,6 +25,7 @@ export function createAgentAdapters({
           title: invocation.title,
           prompt: invocation.prompt,
           timeoutMs: invocation.timeoutMs,
+          signal: invocation.signal,
           onCreated: invocation.onStarted,
         })
         return {
@@ -34,29 +42,49 @@ export function createAgentAdapters({
     },
     'codex-app': {
       run: async ({ worker, invocation }) => {
-        const result = await runCodexTask({
-          node: worker.node,
-          codexScript: worker.script,
-          prompt: invocation.prompt,
-          title: invocation.title,
-          projectCwd: worker.projectCwd || invocation.cwd,
-          environment: hostCredentialEnvironment({ CODEX_HOME: worker.home, NO_COLOR: '1' }),
-          model: worker.model,
-          effort: worker.effort,
-          keep: worker.keep,
-          timeoutMs: invocation.timeoutMs,
-          onCreated: invocation.onStarted,
-        })
-        return {
-          sessionId: result.threadId,
-          outcome: 'completed',
-          detail: '',
-          output: result.finalMessage,
+        const credentialIsolationDir = worker.credentialIsolationDir
+          || path.join(worker.home, '.dsh-agent-automation', 'reviewer-gh')
+        const taskCwd = await mkdtemp(path.join(path.dirname(invocation.cwd), 'codex-review-context-'))
+        try {
+          const result = await runCodexTask({
+            node: worker.node,
+            codexScript: worker.script,
+            prompt: invocation.prompt,
+            title: invocation.title,
+            projectCwd: worker.projectCwd || taskCwd,
+            taskCwd,
+            reviewCwd: invocation.cwd,
+            environment: reviewerCredentialEnvironment({
+              CODEX_HOME: worker.home,
+              GH_CONFIG_DIR: credentialIsolationDir,
+              NO_COLOR: '1',
+            }),
+            model: worker.model,
+            effort: worker.effort,
+            keep: worker.keep,
+            timeoutMs: invocation.timeoutMs,
+            signal: invocation.signal,
+            onCreated: invocation.onStarted,
+          })
+          return {
+            sessionId: result.threadId,
+            outcome: 'completed',
+            detail: '',
+            output: result.finalMessage,
+          }
+        } finally {
+          await rm(taskCwd, { recursive: true, force: true })
         }
       },
       health: async ({ worker }) => {
+        const credentialIsolationDir = worker.credentialIsolationDir
+          || path.join(worker.home, '.dsh-agent-automation', 'reviewer-gh')
         const result = await runCommand(worker.node, [worker.script, '--version'], {
-          env: hostCredentialEnvironment({ CODEX_HOME: worker.home, NO_COLOR: '1' }),
+          env: reviewerCredentialEnvironment({
+            CODEX_HOME: worker.home,
+            GH_CONFIG_DIR: credentialIsolationDir,
+            NO_COLOR: '1',
+          }),
         })
         return { detail: result.stdout.trim() }
       },

@@ -46,8 +46,8 @@ To add an agent:
 
 1. Add a named entry under `workers` in the machine-local configuration.
 2. Use an existing Adapter (`dsh-web`, `codex-app`, or `command-json`) or add one Adapter that implements run and health.
-3. Register an idle self-hosted runner with a role label such as `agent-change` or `agent-reviewer`.
-4. Map the target workflow role to the worker with `worker_id` and `runner_labels_json`.
+3. Configure the role-owned worker id (`dsh` for change or `codex` for review) to use that Adapter.
+4. Register an idle self-hosted runner with the controller-owned `agent-change` or `agent-reviewer` label.
 
 No controller workflow needs agent-specific branches. For a command-line agent, `command-json` sends the invocation as JSON on stdin and reads the terminal receipt as JSON from stdout.
 
@@ -55,8 +55,8 @@ No controller workflow needs agent-specific branches. For a command-line agent, 
 
 1. Adding the exact `agent/dsh` label to a trusted Issue starts the configured change Worker. The backlog dispatcher selects one ready Issue after each default-branch merge and respects explicit dependencies.
 2. Opening or updating a same-repository pull request starts the configured review Worker on the review runner. The current Codex Adapter creates a visible ChatGPT Desktop task using `gpt-5.6-sol` at medium reasoning and archives automated review tasks beyond the newest six.
-3. A blocking exact-pair review publishes one idempotent change WorkRequest. Failed CI and trusted review feedback use the same change queue through their validated request forms.
-4. PASS requests deterministic landing. The landing controller requires the current exact base/head PASS authored by the trusted `github-actions[bot]` review identity and all protected checks, revalidates the pair, and performs the squash merge.
+3. A blocking exact-pair review publishes one idempotent change WorkRequest. Failed CI and explicit trusted rework comments use the same change queue through their validated request forms.
+4. A default-branch advance first updates behind same-repository pull requests through GitHub's guarded update-branch API. The resulting head requests a fresh review. PASS then requests deterministic landing: the landing controller requires a successful GitHub Actions CheckRun whose run and `referenced_workflows` provenance bind the current exact base/head pair to the pinned controller revision, plus every protected check; it revalidates and squash-merges.
 
 The runners are idle outbound GitHub listeners. They make no model calls while no matching job exists. Landing, reconciliation, dispatch, and health checks are deterministic.
 
@@ -64,7 +64,31 @@ The runners are idle outbound GitHub listeners. They make no model calls while n
 
 Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). The file contains paths and repository allowlists, not provider keys. Each agent continues to use its own existing provider configuration.
 
-Legacy `dshWebBaseUrl` and `codex*` fields are migrated in memory to `workers.dsh` and `workers.codex`, so a controller upgrade does not interrupt existing jobs.
+Legacy `dshWebBaseUrl` and `codex*` fields are normalized in memory to `workers.dsh` and `workers.codex`. Existing installations must still add the required `github.login` and `operations` fields before using the open-source installer.
+
+## Quick start on Windows
+
+The complete deployment, upgrade, fault-injection, and removal procedure is in the [Windows operations guide](docs/operations.md). Start from an audited controller commit and a machine-local configuration outside the checkout:
+
+```powershell
+$controller = 'D:\src\dsh-agent-automation'
+$target = 'D:\src\target-repository'
+$config = 'F:\dsh-agent-automation-state\agent-config.json'
+
+Copy-Item "$controller\config.example.json" $config
+pwsh -NoProfile -File "$controller\scripts\bootstrap-repository.ps1" `
+  -TargetCheckout $target `
+  -ControllerRepository owner/dsh-agent-automation `
+  -ControllerSha 0123456789abcdef0123456789abcdef01234567 `
+  -CiWorkflowName 'CI' `
+  -DryRun
+pwsh -NoProfile -File "$controller\scripts\test-operations.ps1"
+pwsh -NoProfile -File "$controller\scripts\test-bootstrap-repository.ps1"
+pwsh -NoProfile -File "$controller\scripts\doctor.ps1" -Configuration $config -DryRun
+pwsh -NoProfile -File "$controller\scripts\install.ps1" -Configuration $config -DryRun
+```
+
+Review the rendered workflows and dry-run output before removing `-DryRun`. The actual installer validates the active GitHub identity, runner archive checksum, immutable operations snapshot, repository variable, and branch protection before it starts either worker. It stores no model or GitHub credential in this repository.
 
 ## Runner isolation
 
@@ -78,12 +102,14 @@ Stopping the review runner leaves change work operational. Stopping the change r
 ## Security and failure behavior
 
 - Fork pull requests never reach local workers.
-- Privileged Issue and feedback requests revalidate author association and live repository state.
+- Privileged Issue and explicit rework requests revalidate author association and live repository state.
 - Review workers receive no GitHub token and inspect pull request code without executing it.
+- Review turns start in a controller-created neutral directory. Repository guidance is read only from the verified base revision, so a pull request cannot install reviewer instructions through its head checkout.
 - Review comments and WorkRequests bind full base and head SHAs. Ref movement makes the result stale.
-- Landing authenticates the PASS comment by its `github-actions[bot]` publisher, not its body text, so a pull request author cannot forge an exact pair PASS.
+- Comments, labels, and compatibility commit statuses are diagnostic projections only. Landing trusts the exact GitHub Actions CheckRun, workflow run, and immutable reusable-workflow provenance, so forged text cannot become PASS.
 - Missing or malformed worker output never becomes PASS.
 - Each exact blocked pair has one idempotency key. A new head creates a new review; a same-head rebuttal creates at most one rereview.
 - Reusable workflows reject mutable controller revisions and pin third-party Actions by full commit SHA.
+- Landing requires protected checks to be app-bound and strict, so a base advance invalidates the reviewed pair before GitHub accepts the merge.
 
-Run controller tests with `npm test`.
+Run controller tests with `npm test`. On Windows, also run `scripts/test-operations.ps1` and `scripts/test-bootstrap-repository.ps1`. See [CONTRIBUTING.md](CONTRIBUTING.md) for change requirements and [SECURITY.md](SECURITY.md) for private vulnerability reporting.

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import { checkAgentWorker, normalizeWorkerConfig, runAgentWorker } from '../src/agent-worker.mjs'
 import { createAgentAdapters } from '../src/agent-adapters.mjs'
@@ -122,6 +125,11 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
 })
 
 test('the Codex adapter satisfies the worker interface without GitHub credentials', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-agent-worker-'))
+  const checkout = path.join(root, 'checkout')
+  const home = path.join(root, 'codex-home')
+  const project = path.join(root, 'project')
+  await mkdir(checkout)
   const calls = []
   const adapters = createAgentAdapters({
     runCodexTask: async input => {
@@ -130,25 +138,37 @@ test('the Codex adapter satisfies the worker interface without GitHub credential
       return { threadId: 'codex-thread', finalMessage: 'PASS' }
     },
   })
-  const receipt = await runAgentWorker({
-    config: { workers: { reviewer: {
-      adapter: 'codex-app', node: 'node.exe', script: 'codex.js',
-      home: 'F:\\CodexData', projectCwd: 'F:\\project',
-      model: 'gpt-5.6-sol', effort: 'medium', keep: 6,
-    } } },
-    workerId: 'reviewer',
-    invocation: {
-      taskId: 'review-pair', cwd: 'F:\\checkout', title: 'Review pair',
-      prompt: 'Review it.', timeoutMs: 60_000,
-    },
-    adapters,
-  })
+  try {
+    const receipt = await runAgentWorker({
+      config: { workers: { reviewer: {
+        adapter: 'codex-app', node: 'node.exe', script: 'codex.js',
+        home, projectCwd: project,
+        model: 'gpt-5.6-sol', effort: 'medium', keep: 6,
+      } } },
+      workerId: 'reviewer',
+      invocation: {
+        taskId: 'review-pair', cwd: checkout, title: 'Review pair',
+        prompt: 'Review it.', timeoutMs: 60_000,
+      },
+      adapters,
+    })
 
-  assert.equal(calls[0].model, 'gpt-5.6-sol')
-  assert.equal(calls[0].effort, 'medium')
-  assert.equal(calls[0].environment.GITHUB_TOKEN, undefined)
-  assert.equal(receipt.sessionId, 'codex-thread')
-  assert.equal(receipt.output, 'PASS')
+    assert.equal(calls[0].model, 'gpt-5.6-sol')
+    assert.equal(calls[0].effort, 'medium')
+    assert.equal(calls[0].projectCwd, project)
+    assert.equal(calls[0].reviewCwd, checkout)
+    assert.notEqual(calls[0].taskCwd, calls[0].reviewCwd)
+    assert.equal(calls[0].taskCwd.startsWith(path.join(root, 'codex-review-context-')), true)
+    assert.equal(calls[0].environment.GITHUB_TOKEN, undefined)
+    assert.equal(calls[0].environment.GH_TOKEN, undefined)
+    assert.equal(calls[0].environment.DEEPSEEK_API_KEY, undefined)
+    assert.equal(calls[0].environment.GH_CONFIG_DIR, path.join(home, '.dsh-agent-automation', 'reviewer-gh'))
+    assert.equal(calls[0].environment.GIT_CONFIG_GLOBAL, process.platform === 'win32' ? 'NUL' : '/dev/null')
+    assert.equal(receipt.sessionId, 'codex-thread')
+    assert.equal(receipt.output, 'PASS')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('worker receipts fail closed unless they end at a declared terminal outcome', async () => {
@@ -182,4 +202,18 @@ test('worker health is adapter-specific and makes no task invocation', async () 
   })
   assert.equal(calls[0].workerId, 'reviewer')
   assert.deepEqual(result, { workerId: 'reviewer', detail: 'ready' })
+})
+
+test('a worker passes controller cancellation through its adapter invocation', async () => {
+  const controller = new AbortController()
+  let received
+  await runAgentWorker({
+    config: { workers: { dsh: { adapter: 'fake' } } }, workerId: 'dsh',
+    invocation: { taskId: 'cancel', cwd: 'F:\\checkout', title: 'Cancel', prompt: 'Stop.', timeoutMs: 1, signal: controller.signal },
+    adapters: { fake: async ({ invocation }) => {
+      received = invocation.signal
+      return { sessionId: 'session', outcome: 'failed' }
+    } },
+  })
+  assert.equal(received, controller.signal)
 })

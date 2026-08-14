@@ -3,60 +3,41 @@ name: Wake DSH For Rework
 on:
   workflow_call:
     inputs:
-      repository:
-        required: true
-        type: string
       pull_request_number:
         required: true
         type: number
       comment_id:
         required: true
         type: number
-      controller_sha:
-        required: true
-        type: string
-      worker_id:
-        required: false
-        type: string
-        default: dsh
-      runner_labels_json:
-        required: false
-        type: string
-        default: '["self-hosted","Windows","X64","agent-change"]'
 
 concurrency:
-  group: dsh-repair-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+  group: dsh-repair-${{ github.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: false
 
 jobs:
   repair:
     name: dsh/comment-rework
-    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
+    runs-on: [self-hosted, agent-change]
     timeout-minutes: 210
     permissions:
       contents: read
     steps:
-      - name: Validate immutable controller revision
-        env:
-          CONTROLLER_SHA: ${{ inputs.controller_sha }}
-        run: |
-          if ($env:CONTROLLER_SHA -notmatch '^[0-9a-f]{40}$') {
-            throw 'controller_sha must be a full commit SHA'
-          }
-
       - name: Check out automation controller
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          repository: Ornn8/dsh-agent-automation
-          ref: ${{ inputs.controller_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: controller
           persist-credentials: false
 
       - name: Address explicit trusted rework comment
         env:
-          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
           COMMENT_ID: ${{ inputs.comment_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          AGENT_WORKER_ID: ${{ inputs.worker_id }}
+          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROLLER_SHA: ${{ job.workflow_sha }}
+          AGENT_ROLE: change
         run: node controller/src/wake-rework.mjs

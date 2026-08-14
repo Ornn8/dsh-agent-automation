@@ -1,5 +1,5 @@
-import { actionsCredentialEnvironment, loadConfig, parseJson, requiredEnv, run } from './common.mjs'
-import { hasExactReviewVerdict } from './review-protocol.mjs'
+import { actionsCredentialEnvironment, loadConfig, requiredEnv, run } from './common.mjs'
+import { completeReviewCheck, failReviewCheck } from './review-check.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -9,22 +9,19 @@ const githubEnvironment = actionsCredentialEnvironment()
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) throw new Error('Invalid PR_NUMBER')
 
-const commentsResult = await run(config.ghExecutable, [
-  'api', `repos/${repository}/issues/${pullRequestNumber}/comments`, '--paginate',
-], { env: githubEnvironment })
-const comments = parseJson(commentsResult.stdout, 'pull request comments')
-if (hasExactReviewVerdict(comments, head)) {
-  process.stdout.write(`The exact head ${head} already has a Codex verdict; it is not an automation failure.\n`)
-  process.exit(0)
+const runUrl = requiredEnv('RUN_URL')
+const checkId = Number.parseInt(process.env.REVIEW_CHECK_ID || '', 10)
+if (Number.isSafeInteger(checkId) && checkId > 0) {
+  await completeReviewCheck({
+    ghExecutable: config.ghExecutable, repository, checkId, runUrl, conclusion: 'failure',
+    summary: 'Codex review infrastructure did not return a verdict.', env: githubEnvironment,
+  })
+} else {
+  await failReviewCheck({
+    ghExecutable: config.ghExecutable, repository, head, runUrl,
+    summary: 'Codex review infrastructure did not return a verdict.', env: githubEnvironment,
+  })
 }
-
-await run(config.ghExecutable, [
-  'api', '--method', 'POST', `repos/${repository}/statuses/${head}`,
-  '-f', 'state=failure',
-  '-f', 'context=codex/review',
-  '-f', 'description=Codex review did not produce a passing verdict',
-  '-f', `target_url=${requiredEnv('RUN_URL')}`,
-], { env: githubEnvironment })
 
 await run(config.ghExecutable, [
   'pr', 'merge', String(pullRequestNumber), '--repo', repository, '--disable-auto',

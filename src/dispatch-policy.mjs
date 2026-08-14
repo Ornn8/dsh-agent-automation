@@ -1,4 +1,5 @@
-import { trustedAssociation } from './common.mjs'
+import { declaredIssueBranch, trustedAssociation } from './common.mjs'
+import { hasTrustedExactReviewRun } from './landing-policy.mjs'
 
 function labelNames(item) {
   return new Set((item.labels || []).map(label => typeof label === 'string' ? label : label.name))
@@ -18,16 +19,9 @@ export function explicitReworkCommand(body) {
     .test(String(body || ''))
 }
 
-/** Return whether trusted GitHub review feedback should wake a repair session. */
-export function trustedReviewFeedback({ kind, association, state }) {
-  if (!trustedAssociation(association)) return false
-  if (kind === 'review-comment') return true
-  return kind === 'review' && state === 'CHANGES_REQUESTED'
-}
-
-/** Parse an idempotent CI repair request from a workflow run or bootstrap head. */
+/** Parse an idempotent CI repair request from a completed workflow run. */
 export function ciRepairRequest(value) {
-  const run = /^ci-run-(\d+)-(\d+)$/.exec(String(value || ''))
+  const run = /^ci-run-(\d+)-(\d+)(?:\.recovery-\d+)?$/.exec(String(value || ''))
   if (run) {
     const runId = Number.parseInt(run[1], 10)
     const attempt = Number.parseInt(run[2], 10)
@@ -35,13 +29,14 @@ export function ciRepairRequest(value) {
       ? { kind: 'run', runId, attempt }
       : null
   }
-  const head = /^ci-head-([0-9a-f]{40})$/.exec(String(value || ''))
-  return head ? { kind: 'head', head: head[1] } : null
+  return null
 }
 
 /** Return whether a completed workflow run is the exact failed CI evidence for a PR head. */
-export function trustedCiFailure({ run, pullRequestNumber, expectedHead }) {
-  return run?.name === 'CI'
+export function trustedCiFailure({ run, pullRequestNumber, expectedHead, workflowName }) {
+  return typeof workflowName === 'string'
+    && workflowName.length > 0
+    && run?.name === workflowName
     && run.event === 'pull_request'
     && run.status === 'completed'
     && run.conclusion === 'failure'
@@ -49,8 +44,15 @@ export function trustedCiFailure({ run, pullRequestNumber, expectedHead }) {
     && run.pull_requests?.some(pullRequest => pullRequest.number === pullRequestNumber)
 }
 
+/** Return whether a failed review CheckRun authorizes a repair for its exact PR pair. */
+export function trustedBlockedReviewProof({ pullRequest, reviewProof, trustedReview }) {
+  return hasTrustedExactReviewRun({ pullRequest, reviewProof, trustedReview })
+    && ['FAILURE', 'failure'].includes(reviewProof.checkRun.conclusion)
+    && reviewProof.run.conclusion === 'failure'
+}
+
 function hasDeclaredBranch(body) {
-  return /^\s*(?:[-*]\s*)?(?:branch|branch name)\s*:\s*`[^`]+`\s*$/im.test(String(body || ''))
+  return Boolean(declaredIssueBranch(body))
 }
 
 function actionableIssue(issue) {
@@ -63,11 +65,12 @@ function closesIssue(pullRequest, issueNumber) {
 }
 
 /** Select one safe unit of backlog work, preferring blocked PR repairs. */
-export function selectBacklogWork({ repository, pullRequests, issues }) {
+export function selectBacklogWork({ repository, pullRequests, issues, trustedBlockedRepairNumbers = new Set() }) {
   const repair = [...pullRequests]
     .filter(pullRequest => !pullRequest.draft
       && pullRequest.head?.repo?.full_name === repository
       && labelNames(pullRequest).has('automation/review-blocked')
+      && trustedBlockedRepairNumbers.has(pullRequest.number)
       && !labelNames(pullRequest).has('automation/repairing')
       && !labelNames(pullRequest).has('agent/dsh-failed'))
     .sort((left, right) => left.number - right.number)[0]

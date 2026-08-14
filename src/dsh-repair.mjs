@@ -2,39 +2,61 @@ import { mkdtemp } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import {
   hostCredentialEnvironment,
+  githubLogin,
+  authenticatedMarker,
   loadConfig,
   parseJson,
+  processCancellationSignal,
   removeJobDirectory,
+  resolveRepositoryWorker,
   requiredEnv,
   run,
   trustedAssociation,
+  verifyGithubIdentity,
 } from './common.mjs'
 import {
   ciRepairRequest,
   explicitReworkCommand,
   trustedCiFailure,
-  trustedReviewFeedback,
 } from './dispatch-policy.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
-import { interruptedRepairMayRetry, recordedRepairState } from './repair-state.mjs'
+import {
+  automaticRepairAttemptCount,
+  automaticRepairLimitReached,
+  interruptedRepairMayRetry,
+  MAX_AUTOMATIC_REPAIR_ATTEMPTS,
+  recordedRepairState,
+} from './repair-state.mjs'
+import { isReviewRepairRequestId } from './work-request.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
 const expectedHead = requiredEnv('HEAD_SHA')
 const requestId = process.env.REPAIR_REQUEST_ID?.trim() || ''
+const ciWorkflowName = process.env.CI_WORKFLOW_NAME?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const workerId = process.env.AGENT_WORKER_ID?.trim() || 'dsh'
+const workerId = resolveRepositoryWorker(config, repository, requiredEnv('AGENT_ROLE'))
+const cancellation = processCancellationSignal()
+const defaultBranch = requiredEnv('DEFAULT_BRANCH')
+const markerAuthor = githubLogin(config)
+const controllerSha = requiredEnv('CONTROLLER_SHA').toLowerCase()
 if (requestId && !/^[A-Za-z0-9._-]{1,100}$/.test(requestId)) throw new Error('Invalid REPAIR_REQUEST_ID')
+if (!/^[0-9a-f]{40}$/.test(controllerSha)) throw new Error('CONTROLLER_SHA must be a full lowercase commit SHA')
 const marker = requestId
-  ? `<!-- dsh-review-repair:${expectedHead}:${requestId} -->`
-  : `<!-- dsh-review-repair:${expectedHead} -->`
+  ? `<!-- dsh-review-repair:${controllerSha}:${expectedHead}:${requestId} -->`
+  : `<!-- dsh-review-repair:${controllerSha}:${expectedHead} -->`
 const ciRequest = ciRepairRequest(requestId)
 const explicitRequest = Boolean(ciRequest)
-  || requestId.startsWith('comment-')
-  || requestId.startsWith('review-')
-  || requestId.startsWith('review-comment-')
+  || (!isReviewRepairRequestId(requestId, expectedHead)
+    && requestId.startsWith('comment-'))
+const repairClass = ciRequest
+  ? 'automatic-ci'
+  : explicitRequest
+    ? 'explicit-human'
+    : 'automatic-review'
+const automaticRepair = repairClass !== 'explicit-human'
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
@@ -46,12 +68,16 @@ async function ghJson(args, description) {
   return parseJson(result.stdout, description)
 }
 
+await verifyGithubIdentity({ config })
+
 async function upsertStatus(status, branch, detail) {
   const body = [
     marker,
     ciRequest ? '### DSH CI repair' : '### DSH review repair',
     '',
     `- Status: **${status}**`,
+    `- Controller SHA: \`${controllerSha}\``,
+    `- Repair class: \`${repairClass}\``,
     `- Reviewed head: \`${expectedHead}\``,
     `- Branch: \`${branch}\``,
     `- Run: ${requiredEnv('RUN_URL')}`,
@@ -62,7 +88,7 @@ async function upsertStatus(status, branch, detail) {
   const comments = await ghJson([
     'api', `repos/${repository}/issues/${pullRequestNumber}/comments`, '--paginate',
   ], 'pull request comments')
-  const prior = comments.find(comment => comment.body?.includes(marker))
+  const prior = comments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
   if (prior) {
     await run(config.ghExecutable, [
       'api', '--method', 'PATCH', `repos/${repository}/issues/comments/${prior.id}`, '-f', `body=${body}`,
@@ -107,54 +133,25 @@ if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull 
 if (pullRequest.head.sha !== expectedHead) throw new Error('The pull request head changed before DSH repair started')
 let ciRun
 if (ciRequest) {
-  if (ciRequest.kind === 'run') {
-    ciRun = await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run')
-    if (ciRun.run_attempt !== ciRequest.attempt) throw new Error('CI workflow run attempt changed')
-  } else {
-    if (ciRequest.head !== expectedHead) throw new Error('Bootstrap CI request does not match the expected head')
-    const runs = await ghJson([
-      'api', '--method', 'GET', `repos/${repository}/actions/workflows/ci.yml/runs`,
-      '-f', 'event=pull_request', '-f', 'status=completed', '-f', `head_sha=${expectedHead}`, '-F', 'per_page=20',
-    ], 'CI workflow runs')
-    ciRun = runs.workflow_runs?.find(run => trustedCiFailure({
-      run, pullRequestNumber, expectedHead,
-    }))
-    if (!ciRun) throw new Error('No exact failed CI workflow run exists for this pull request head')
-  }
-  if (!trustedCiFailure({ run: ciRun, pullRequestNumber, expectedHead })) {
+  if (!ciWorkflowName) throw new Error('CI_WORKFLOW_NAME is required for a CI repair request')
+  ciRun = await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run')
+  if (ciRun.run_attempt !== ciRequest.attempt) throw new Error('CI workflow run attempt changed')
+  if (!trustedCiFailure({
+    run: ciRun, pullRequestNumber, expectedHead, workflowName: ciWorkflowName,
+  })) {
     throw new Error('Workflow run is not trusted failed CI evidence for this pull request head')
   }
 } else if (explicitRequest) {
-  const reviewCommentRequest = requestId.startsWith('review-comment-')
-  const reviewRequest = !reviewCommentRequest && requestId.startsWith('review-')
-  const prefix = reviewCommentRequest ? 'review-comment-' : reviewRequest ? 'review-' : 'comment-'
-  const feedbackId = Number.parseInt(requestId.slice(prefix.length), 10)
+  const feedbackId = Number.parseInt(requestId.slice('comment-'.length), 10)
   if (!Number.isSafeInteger(feedbackId) || feedbackId < 1) throw new Error('Invalid explicit repair request id')
-  if (prefix === 'comment-') {
-    const comment = await ghJson(['api', `repos/${repository}/issues/comments/${feedbackId}`], 'rework comment')
-    if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
-      throw new Error('Rework comment does not belong to this pull request')
-    }
-    if (!trustedAssociation(comment.author_association)) {
-      throw new Error(`Untrusted rework comment association ${comment.author_association}`)
-    }
-    if (!explicitReworkCommand(comment.body)) throw new Error('Comment is not an explicit DSH rework command')
-  } else {
-    const feedback = reviewCommentRequest
-      ? await ghJson(['api', `repos/${repository}/pulls/comments/${feedbackId}`], 'review comment')
-      : await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}/reviews/${feedbackId}`], 'review')
-    if (reviewCommentRequest
-      && !feedback.pull_request_url?.endsWith(`/pulls/${pullRequestNumber}`)) {
-      throw new Error('Review comment does not belong to this pull request')
-    }
-    if (!trustedReviewFeedback({
-      kind: reviewCommentRequest ? 'review-comment' : 'review',
-      association: feedback.author_association,
-      state: feedback.state,
-    })) {
-      throw new Error('Feedback is not a trusted blocking review request')
-    }
+  const comment = await ghJson(['api', `repos/${repository}/issues/comments/${feedbackId}`], 'rework comment')
+  if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
+    throw new Error('Rework comment does not belong to this pull request')
   }
+  if (!trustedAssociation(comment.author_association)) {
+    throw new Error(`Untrusted rework comment association ${comment.author_association}`)
+  }
+  if (!explicitReworkCommand(comment.body)) throw new Error('Comment is not an explicit DSH rework command')
 }
 if (!explicitRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
   throw new Error('The pull request no longer has the automation/review-blocked label')
@@ -163,7 +160,7 @@ if (!explicitRequest && !pullRequest.labels.some(label => label.name === 'automa
 const priorComments = await ghJson([
   'api', `repos/${repository}/issues/${pullRequestNumber}/comments`, '--paginate',
 ], 'pull request comments')
-const priorRun = priorComments.find(comment => comment.body?.includes(marker))
+const priorRun = priorComments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
 if (priorRun) {
   const recorded = recordedRepairState(priorRun.body)
   const priorActionRun = recorded.runId
@@ -179,6 +176,24 @@ if (priorRun) {
 
 const branch = pullRequest.head.ref
 const baseBranch = pullRequest.base.ref
+if (baseBranch !== defaultBranch) throw new Error(`Pull request base ${baseBranch} is not the configured default branch ${defaultBranch}`)
+if (automaticRepair) {
+  const automaticAttempts = automaticRepairAttemptCount(priorComments, {
+    authorLogin: markerAuthor,
+    controllerSha,
+  })
+  if (automaticRepairLimitReached(automaticAttempts)) {
+    await upsertStatus('dead-letter', branch,
+      `Automatic repair limit reached: ${MAX_AUTOMATIC_REPAIR_ATTEMPTS} attempts under controller ${controllerSha}. A trusted explicit rework command may still request repair.`)
+    await setRepairLabels({
+      add: ['agent/dsh-failed'],
+      remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/repairing'],
+    })
+    cancellation.dispose()
+    process.stdout.write(`Automatic repair limit reached for pull request #${pullRequestNumber}; wrote dead-letter status without starting a model.\n`)
+    process.exit(0)
+  }
+}
 await upsertStatus('running', branch, explicitRequest
   ? ciRequest
     ? `Failed CI request ${requestId} started a fresh DSH repair session.`
@@ -244,6 +259,7 @@ Do not delegate implementation to Codex or wait for another local process. Finis
       title: `[Agent: ${workerId}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
       prompt: `${prompt}\n\nFinish this local agent session with a concise Chinese report. Keep all GitHub-visible content in English.`,
       timeoutMs: 3 * 60 * 60 * 1000,
+      signal: cancellation.signal,
       onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible ${workerId} session: ${sessionId}.`),
     },
     adapters: createAgentAdapters(),
@@ -270,5 +286,6 @@ Do not delegate implementation to Codex or wait for another local process. Finis
   })
   throw error
 } finally {
+  cancellation.dispose()
   await removeJobDirectory(runnerTemp, jobPath)
 }

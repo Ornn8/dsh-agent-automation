@@ -2,23 +2,24 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { evaluateLanding } from '../src/landing-policy.mjs'
 
-const trustedReviewer = { type: 'Bot', login: 'github-actions[bot]' }
 const pullRequest = (baseRefOid, headRefOid) => ({
-  state: 'OPEN',
+  number: 12, repository: 'owner/repository', state: 'OPEN',
   isDraft: false,
   baseRefName: 'master',
   baseRefOid,
   headRefOid,
   mergeStateStatus: 'CLEAN',
-  statusCheckRollup: [
-    { __typename: 'StatusContext', context: 'codex/review', state: 'SUCCESS' },
-    { __typename: 'CheckRun', name: 'all checks passed', status: 'COMPLETED', conclusion: 'SUCCESS' },
-  ],
 })
-const passComment = (base, head, user = trustedReviewer) => ({
-  user,
-  body: `<!-- codex-review:${head} -->\n## Codex review: PASS\n\n_Reviewed exact head \`${head}\` against base \`${base}\` with gpt-5.6-sol (medium)._`,
-})
+const proof = (base, head) => ({ checkRun: {
+  name: 'codex/review', status: 'completed', conclusion: 'success', app: { id: 15368 },
+  details_url: 'https://github.com/owner/repository/actions/runs/17',
+}, run: { id: 17, event: 'pull_request_target', status: 'completed', conclusion: 'success', head_sha: base,
+  repository: { full_name: 'owner/repository' }, head_repository: { full_name: 'owner/repository' },
+  pull_requests: [{ number: 12, base: { sha: base }, head: { sha: head } }],
+  referenced_workflows: [{ path: `Ornn8/dsh-agent-automation/.github/workflows/codex-review.yml@${'c'.repeat(40)}`, sha: 'c'.repeat(40) }],
+} })
+const trustedReview = { controllerRepository: 'Ornn8/dsh-agent-automation', controllerSha: 'c'.repeat(40), workflowPath: '.github/workflows/codex-review.yml' }
+const checks = [{ name: 'all checks passed', status: 'completed', conclusion: 'success' }]
 
 test('landing accepts only a current exact-pair PASS with every required check green', () => {
   const base = 'a'.repeat(40)
@@ -26,8 +27,7 @@ test('landing accepts only a current exact-pair PASS with every required check g
   const decision = evaluateLanding({
     pullRequest: pullRequest(base, head),
     expectedHead: head,
-    requiredChecks: ['all checks passed', 'codex/review'],
-    comments: [passComment(base, head)],
+    requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: proof(base, head), trustedReview,
   })
   assert.deepEqual(decision, { ready: true, reason: 'exact review and required checks passed' })
 })
@@ -39,20 +39,36 @@ test('landing rejects a head-only PASS after the base changes', () => {
   const decision = evaluateLanding({
     pullRequest: pullRequest(currentBase, head),
     expectedHead: head,
-    requiredChecks: ['all checks passed', 'codex/review'],
-    comments: [passComment(reviewedBase, head)],
+    requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: proof(reviewedBase, head), trustedReview,
   })
-  assert.deepEqual(decision, { ready: false, reason: 'no exact base and head Codex PASS exists' })
+  assert.deepEqual(decision, { ready: false, reason: 'no trusted exact-pair Codex PASS exists' })
 })
 
-test('landing rejects an exact-pair PASS comment forged by a pull request author', () => {
+test('landing rejects a missing trusted workflow proof even when checks are green', () => {
   const base = 'a'.repeat(40)
   const head = 'b'.repeat(40)
   const decision = evaluateLanding({
     pullRequest: pullRequest(base, head),
     expectedHead: head,
-    requiredChecks: ['all checks passed', 'codex/review'],
-    comments: [passComment(base, head, { type: 'User', login: 'pr-author' })],
+    requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: null, trustedReview,
   })
-  assert.deepEqual(decision, { ready: false, reason: 'no exact base and head Codex PASS exists' })
+  assert.deepEqual(decision, { ready: false, reason: 'no trusted exact-pair Codex PASS exists' })
+})
+
+test('landing uses the newest app-bound required check rather than an older success', () => {
+  const currentPullRequest = pullRequest('a'.repeat(40), 'b'.repeat(40))
+  const reviewProof = proof(currentPullRequest.baseRefOid, currentPullRequest.headRefOid)
+  const decision = evaluateLanding({
+    pullRequest: currentPullRequest,
+    expectedHead: currentPullRequest.headRefOid,
+    requiredChecks: [{ context: 'all checks passed', app_id: 15368 }],
+    checkRuns: [
+      { id: 10, name: 'all checks passed', status: 'completed', conclusion: 'success', app: { id: 15368 } },
+      { id: 11, name: 'all checks passed', status: 'completed', conclusion: 'failure', app: { id: 15368 } },
+      { id: 12, name: 'all checks passed', status: 'completed', conclusion: 'success', app: { id: 1 } },
+    ],
+    reviewProof,
+    trustedReview,
+  })
+  assert.deepEqual(decision, { ready: false, reason: 'required check all checks passed has not passed' })
 })

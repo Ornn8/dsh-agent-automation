@@ -1,7 +1,12 @@
 {
-  "repositories": ["owner/repository"],
+  "$schema": "https://raw.githubusercontent.com/Ornn8/dsh-agent-automation/master/ops/config.schema.json",
+  "schemaVersion": 1,
+  "repositories": ["Ornn8/deepseek-harness"],
   "ghExecutable": "gh.exe",
   "gitExecutable": "git.exe",
+  "github": {
+    "login": "Ornn8"
+  },
   "workers": {
     "dsh": {
       "adapter": "dsh-web",
@@ -22,6 +27,49 @@
       "executable": "X:\\agents\\another-agent.exe",
       "args": ["run-json"],
       "healthArgs": ["health"]
+    }
+  },
+  "operations": {
+    "schemaVersion": 1,
+    "installRoot": "F:\\dsh-agent-automation-runtime",
+    "stateRoot": "F:\\dsh-agent-automation-state",
+    "logsRoot": "F:\\dsh-agent-automation-state\\logs",
+    "controller": {
+      "repository": "Ornn8/dsh-agent-automation",
+      "registrationScope": "target-repositories"
+    },
+    "runner": {
+      "version": "REPLACE_WITH_A_PINNED_RUNNER_VERSION",
+      "downloadUri": "https://github.com/actions/runner/releases/download/vREPLACE_WITH_A_PINNED_RUNNER_VERSION/actions-runner-win-x64-REPLACE_WITH_A_PINNED_RUNNER_VERSION.zip",
+      "sha256": "REPLACE_WITH_THE_OFFICIAL_64_CHARACTER_SHA256"
+    },
+    "repositoryMappings": [
+      {
+        "repository": "Ornn8/deepseek-harness",
+        "changeWorker": "dsh",
+        "reviewWorker": "codex",
+        "ciWorkflowName": "CI",
+        "ciRequiredCheckName": "all checks passed"
+      }
+    ],
+    "roles": {
+      "change": {
+        "runnerNamePrefix": "dsh-agent-change",
+        "labels": ["self-hosted", "Windows", "X64", "agent-change"]
+      },
+      "review": {
+        "runnerNamePrefix": "dsh-agent-review",
+        "labels": ["self-hosted", "Windows", "X64", "agent-reviewer"]
+      }
+    },
+    "dshWebHost": {
+      "enabled": true,
+      "executable": "X:\\path\\to\\node.exe",
+      "arguments": ["X:\\path\\to\\dsh-web-host.mjs", "--host", "127.0.0.1", "--port", "3080"],
+      "workingDirectory": "X:\\path\\to\\dsh-web-host-project",
+      "baseUrl": "http://127.0.0.1:3080",
+      "healthPath": "/api/session.list",
+      "restartAfterFailures": 3
     }
   }
 }

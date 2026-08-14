@@ -3,6 +3,7 @@ import {
   hostCredentialEnvironment,
   loadConfig,
   requiredEnv,
+  resolveRepositoryWorker,
   run,
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
@@ -10,8 +11,8 @@ import { checkAgentWorker } from './agent-worker.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const controllerSha = requiredEnv('CONTROLLER_SHA')
-const workerId = requiredEnv('AGENT_WORKER_ID')
 const config = await loadConfig()
+const workerId = resolveRepositoryWorker(config, repository, requiredEnv('AGENT_ROLE'))
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!/^[0-9a-f]{40}$/i.test(controllerSha)) throw new Error('CONTROLLER_SHA must be a full commit SHA')
 

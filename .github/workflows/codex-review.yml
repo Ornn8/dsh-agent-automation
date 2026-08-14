@@ -3,9 +3,6 @@ name: Codex Review
 on:
   workflow_call:
     inputs:
-      repository:
-        required: true
-        type: string
       pull_request_number:
         required: true
         type: number
@@ -15,97 +12,80 @@ on:
       head_sha:
         required: true
         type: string
-      controller_sha:
-        required: true
-        type: string
-      worker_id:
-        required: false
-        type: string
-        default: codex
-      runner_labels_json:
-        required: false
-        type: string
-        default: '["self-hosted","Windows","X64","agent-reviewer"]'
-
 concurrency:
-  group: codex-review-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+  group: codex-review-${{ github.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: true
 
 jobs:
   review:
     name: codex/review
-    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
+    runs-on: [self-hosted, agent-reviewer]
     timeout-minutes: 255
     permissions:
       contents: write
+      checks: write
       issues: write
       pull-requests: write
-      statuses: write
     steps:
-      - name: Validate immutable controller revision
-        env:
-          CONTROLLER_SHA: ${{ inputs.controller_sha }}
-        run: |
-          if ($env:CONTROLLER_SHA -notmatch '^[0-9a-f]{40}$') {
-            throw 'controller_sha must be a full commit SHA'
-          }
-
       - name: Check out automation controller
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          repository: Ornn8/dsh-agent-automation
-          ref: ${{ inputs.controller_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: controller
           persist-credentials: false
 
       - name: Check out exact review head
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          repository: ${{ inputs.repository }}
+          repository: ${{ github.repository }}
           ref: ${{ inputs.head_sha }}
           path: review
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
-
-      - name: Fetch exact review history and base
-        working-directory: review
-        run: git fetch --no-tags --depth=64 origin ${{ inputs.head_sha }} ${{ inputs.base_sha }}
 
       - name: Review exact PR head with Codex
         id: review
         continue-on-error: true
         env:
-          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
-          REVIEW_CHECKOUT: ${{ github.workspace }}\review
+          REVIEW_CHECKOUT: ${{ github.workspace }}/review
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          AGENT_WORKER_ID: ${{ inputs.worker_id }}
+          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROLLER_SHA: ${{ job.workflow_sha }}
+          AGENT_ROLE: review
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/codex-review.mjs
 
       - name: Publish an independent change work request
         id: work_request
-        if: steps.review.outcome == 'failure'
-        continue-on-error: true
+        if: steps.review.outcome == 'success' && steps.review.outputs.verdict == 'block'
         env:
-          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/publish-work-request.mjs
 
-      - name: Fail the exact-head review status when automation fails
-        if: steps.review.outcome == 'failure' && steps.work_request.outcome == 'failure'
+      - name: Fail the exact-head review CheckRun when automation fails
+        if: steps.review.outcome == 'failure'
         env:
-          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_REPOSITORY: ${{ github.repository }}
           HEAD_SHA: ${{ inputs.head_sha }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REVIEW_CHECK_ID: ${{ steps.review.outputs.review_check_id }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/review-failure.mjs
 
       - name: Preserve the blocking review conclusion
+        if: steps.review.outputs.verdict == 'block'
+        run: throw 'Codex returned a BLOCK verdict'
+
+      - name: Preserve reviewer infrastructure failure
         if: steps.review.outcome == 'failure'
-        run: throw 'Codex did not return a passing verdict'
+        run: throw 'Codex review infrastructure did not return a verdict'

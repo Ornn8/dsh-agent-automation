@@ -3,9 +3,6 @@ name: Land Reviewed Pull Request
 on:
   workflow_call:
     inputs:
-      repository:
-        required: true
-        type: string
       pull_request_number:
         required: false
         type: number
@@ -13,41 +10,39 @@ on:
       head_sha:
         required: true
         type: string
-      controller_sha:
-        required: true
-        type: string
 
 concurrency:
-  group: dsh-land-${{ inputs.repository }}-${{ inputs.pull_request_number }}-${{ inputs.head_sha }}
+  group: dsh-land-${{ github.repository }}-${{ inputs.pull_request_number }}-${{ inputs.head_sha }}
   cancel-in-progress: false
 
 jobs:
   land:
     name: landing/exact-pair
-    runs-on: [self-hosted, Windows, X64, dsh-agent]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read
+      actions: read
+      checks: read
+      contents: write
+      issues: read
+      pull-requests: write
     steps:
-      - name: Validate immutable controller revision
-        env:
-          CONTROLLER_SHA: ${{ inputs.controller_sha }}
-        run: |
-          if ($env:CONTROLLER_SHA -notmatch '^[0-9a-f]{40}$') {
-            throw 'controller_sha must be a full commit SHA'
-          }
-
       - name: Check out automation controller
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          repository: Ornn8/dsh-agent-automation
-          ref: ${{ inputs.controller_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: controller
           persist-credentials: false
 
       - name: Land only after exact review and required checks pass
         env:
-          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
+          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/codex-review.yml
+          GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/land-pr.mjs
