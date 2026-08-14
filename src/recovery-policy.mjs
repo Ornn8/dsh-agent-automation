@@ -13,9 +13,11 @@ function recoveryRole(run, repository, trust) {
     && reference.sha === trust.controllerSha)) return null
   if (workflow === '.github/workflows/dsh-issue.yml') return 'issue'
   if (workflow === '.github/workflows/codex-review.yml') {
-    return run.event === 'pull_request_target' && run.head_repository?.full_name === repository
-      && run.pull_requests?.some(pullRequest => FULL_SHA.test(pullRequest.base?.sha || '')
-        && FULL_SHA.test(pullRequest.head?.sha || '') && run.head_sha === pullRequest.base.sha)
+    return run.head_repository?.full_name === repository
+      && ((run.event === 'pull_request_target'
+        && run.pull_requests?.some(pullRequest => FULL_SHA.test(pullRequest.base?.sha || '')
+          && FULL_SHA.test(pullRequest.head?.sha || '') && run.head_sha === pullRequest.base.sha))
+        || (run.event === 'repository_dispatch' && FULL_SHA.test(run.head_sha || '')))
       ? 'review' : null
   }
   return 'pull-request'

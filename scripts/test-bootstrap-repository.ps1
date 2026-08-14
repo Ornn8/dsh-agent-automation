@@ -90,7 +90,10 @@ try {
   }
   $reviewWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-pr-review.yml') -Raw
   Assert-True ($reviewWorkflow -match '(?m)^  checks: write\r?$') 'Agent PR Review cannot create its exact-head CheckRun.'
-  Assert-True ($reviewWorkflow -notmatch 'repository_dispatch|statuses: write|dsh-review') 'Agent PR Review retained a mutable or obsolete review trigger.'
+  Assert-True ($reviewWorkflow -match '(?m)^  repository_dispatch:\r?$') 'Agent PR Review lacks the GitHub-token recursion-safe review trigger.'
+  Assert-True ($reviewWorkflow -match '(?m)^    types: \[codex-review\]\r?$') 'Agent PR Review lacks the exact codex-review dispatch type.'
+  Assert-True ($reviewWorkflow -notmatch 'statuses: write|dsh-review') 'Agent PR Review retained an obsolete review trigger or permission.'
+  Assert-True ($issuesWorkflow -match '(?m)^    types: \[dsh-issue\]\r?$') 'Agent Issues lacks the GitHub-token recursion-safe Issue trigger.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
   Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR Review\]\r?$') 'Agent Recovery listens beyond the three trusted agent entry workflows.'
 

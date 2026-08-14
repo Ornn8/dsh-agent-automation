@@ -117,3 +117,20 @@ test('a trusted intentional review BLOCK never schedules a second review, while 
     jobs: [{ ...intentionalBlock[0], name: 'untrusted caller job' }],
   }), { action: 'retry', attempt: 1, requestId: 'recovery-81-1' })
 })
+
+test('review recovery accepts a pinned repository dispatch run from the default branch', () => {
+  const base = 'd'.repeat(40)
+  const reviewRun = run({
+    name: 'Agent PR Review',
+    event: 'repository_dispatch',
+    head_repository: { full_name: repository },
+    head_sha: base,
+    pull_requests: [],
+    referenced_workflows: [{ path: `${controller}/.github/workflows/codex-review.yml@${sha}`, sha }],
+  })
+  assert.equal(trustedFailedAgentRun({
+    run: reviewRun,
+    repository,
+    trust: { controllerRepository: controller, controllerSha: sha },
+  }), 'review')
+})

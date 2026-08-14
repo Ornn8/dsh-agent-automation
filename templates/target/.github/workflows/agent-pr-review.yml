@@ -1,6 +1,11 @@
 name: Agent PR Review
+run-name: >-
+  Agent PR Review #${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pull_request_number || github.event.pull_request.number }}
+  ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.base_sha || github.event.pull_request.base.sha }}..${{ github.event_name == 'repository_dispatch' && github.event.client_payload.head_sha || github.event.pull_request.head.sha }}
 
 on:
+  repository_dispatch:
+    types: [codex-review]
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, labeled, edited]
 
@@ -13,12 +18,13 @@ permissions:
 jobs:
   codex-review:
     if: >-
-      github.event.pull_request.draft == false
+      github.event_name == 'repository_dispatch'
+      || (github.event.pull_request.draft == false
         && github.event.pull_request.head.repo.full_name == github.repository
         && (github.event.action != 'labeled' || github.event.label.name == 'automation/review-ready')
-        && (github.event.action != 'edited' || github.event.changes.base.ref.from != null)
+        && (github.event.action != 'edited' || github.event.changes.base.ref.from != null))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/codex-review.yml@{{CONTROLLER_SHA}}
     with:
-      pull_request_number: ${{ github.event.pull_request.number }}
-      base_sha: ${{ github.event.pull_request.base.sha }}
-      head_sha: ${{ github.event.pull_request.head.sha }}
+      pull_request_number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pull_request_number || github.event.pull_request.number }}
+      base_sha: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.base_sha || github.event.pull_request.base.sha }}
+      head_sha: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.head_sha || github.event.pull_request.head.sha }}
