@@ -252,6 +252,7 @@ export async function runReviewTask({
       effort,
     })
     turnId = turn.turn.id
+    await call('thread/settings/update', { threadId, cwd: projectCwd })
     await completion
     if (!finalMessage.trim()) throw new Error('Codex review task completed without a final assistant message')
     return { threadId, finalMessage: finalMessage.trim() }
