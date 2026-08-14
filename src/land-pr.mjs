@@ -2,7 +2,7 @@ import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './com
 import {
   evaluateLanding,
   hasTrustedExactReviewRun,
-  reviewRunIdFromDetailsUrl,
+  reviewRunIdFromCheckRun,
 } from './landing-policy.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
@@ -63,7 +63,7 @@ async function readLatestReviewProof(pullRequest, checkRuns) {
     .filter(checkRun => checkRun.name === 'codex/review')
     .sort((left, right) => (right.id || 0) - (left.id || 0))
   for (const checkRun of candidates) {
-    const runId = reviewRunIdFromDetailsUrl(checkRun.details_url, repository)
+    const runId = reviewRunIdFromCheckRun(checkRun, repository)
     if (!runId) continue
     const workflowRun = await ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `review workflow run ${runId}`)
     const candidate = { checkRun, run: workflowRun }

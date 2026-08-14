@@ -32,6 +32,12 @@ export function reviewRunIdFromDetailsUrl(value, repository) {
   return Number.isSafeInteger(runId) && runId > 0 ? runId : null
 }
 
+/** Return the trusted workflow candidate encoded by a controller-created CheckRun. */
+export function reviewRunIdFromCheckRun(checkRun, repository) {
+  return reviewRunIdFromDetailsUrl(checkRun?.external_id, repository)
+    || reviewRunIdFromDetailsUrl(checkRun?.details_url, repository)
+}
+
 function hasExactPullRequest(run, pullRequest, repository) {
   if (run?.repository?.full_name !== repository
     || run.head_repository?.full_name !== repository
@@ -62,7 +68,7 @@ export function hasTrustedExactReviewRun({ pullRequest, reviewProof, trustedRevi
   return checkRun.name === 'codex/review'
     && ['COMPLETED', 'completed'].includes(checkRun.status)
     && checkRun.app?.id === GITHUB_ACTIONS_APP_ID
-    && reviewRunIdFromDetailsUrl(checkRun.details_url, pullRequest.repository) === run.id
+    && reviewRunIdFromCheckRun(checkRun, pullRequest.repository) === run.id
     && hasExactPullRequest(run, pullRequest, pullRequest.repository)
     && referencesTrustedController(run, trustedReview)
 }

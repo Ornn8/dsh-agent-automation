@@ -1,6 +1,6 @@
 import { actionsCredentialEnvironment, authenticatedMarker, parseJson, requiredEnv, run, trustedAssociation } from './common.mjs'
 import { recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
-import { reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
+import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('RECOVERY_SOURCE_RUN_ID')
@@ -95,7 +95,7 @@ async function reviewSubject(run) {
     ], `review checks for pull request #${pullRequest.number}`)
     if (checkPages.flatMap(page => page.check_runs || []).some(checkRun => checkRun.name === 'codex/review'
       && checkRun.app?.id === 15368
-      && reviewRunIdFromDetailsUrl(checkRun.details_url, repository) === Number.parseInt(sourceRunId, 10))) {
+      && reviewRunIdFromCheckRun(checkRun, repository) === Number.parseInt(sourceRunId, 10))) {
       matches.push({ type: 'pull-request', number: pullRequest.number, base: pullRequest.base.sha, head: pullRequest.head.sha })
     }
   }
