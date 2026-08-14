@@ -195,7 +195,7 @@ function Initialize-PrivateDirectory {
     $existing = Get-Item -LiteralPath $Path -Force
     if (-not $existing.PSIsContainer -or $existing.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Managed path is not a regular directory: $Path" }
   }
-  New-Item -ItemType Directory -Force -LiteralPath $Path | Out-Null
+  New-Item -ItemType Directory -Force -Path $Path | Out-Null
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
   & icacls.exe $Path /inheritance:r /grant:r ($identity + ':(OI)(CI)F') /grant:r 'SYSTEM:(OI)(CI)F' | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Could not secure directory: $Path" }
