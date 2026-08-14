@@ -41,7 +41,7 @@ test('a controller invokes any configured worker through one interface', async (
   })
 })
 
-test('worker configuration accepts arbitrary adapters and migrates current DSH and Codex settings', () => {
+test('worker configuration accepts explicit adapters and rejects removed legacy fields', () => {
   const explicit = normalizeWorkerConfig({
     workers: {
       luna: { adapter: 'command-json', executable: 'luna.exe' },
@@ -49,15 +49,13 @@ test('worker configuration accepts arbitrary adapters and migrates current DSH a
   })
   assert.equal(explicit.workers.luna.adapter, 'command-json')
 
-  const migrated = normalizeWorkerConfig({
+  assert.throws(() => normalizeWorkerConfig({
     dshWebBaseUrl: 'http://localhost:3080',
     codexNode: 'node.exe',
     codexScript: 'codex.js',
     codexHome: 'F:\\CodexData',
     codexProjectCwd: 'F:\\repo',
-  })
-  assert.equal(migrated.workers.dsh.adapter, 'dsh-web')
-  assert.equal(migrated.workers.codex.adapter, 'codex-app')
+  }), /must declare workers/)
 })
 
 test('a command-json adapter lets a new agent join without controller changes', async () => {

@@ -44,16 +44,30 @@ function Get-RepositoryKey {
   return "$slug-$hash"
 }
 
+function Assert-DshWorkerModelSelection {
+  param([Parameter(Mandatory)]$Workers)
+  foreach ($property in @($Workers.psobject.Properties)) {
+    $worker = $property.Value
+    if ($worker.adapter -ne 'dsh-web') { continue }
+    foreach ($field in 'provider', 'model', 'reasoningEffort') {
+      if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
+        throw "workers.$($property.Name).$field is required for a dsh-web worker"
+      }
+    }
+  }
+}
+
 function Read-OperationsConfig {
   param([Parameter(Mandatory)][string]$Configuration, [switch]$AllowExamplePlaceholders)
   $configurationPath = [IO.Path]::GetFullPath($Configuration)
   if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) { throw "Configuration file does not exist: $configurationPath" }
   try { $config = Get-Content -LiteralPath $configurationPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 32 } catch { throw "Configuration is not valid JSON: $($_.Exception.Message)" }
-  if ($config.schemaVersion -ne 1 -or $config.operations.schemaVersion -ne 1) { throw 'Configuration schemaVersion must be 1' }
+  if ($config.schemaVersion -ne 2 -or $config.operations.schemaVersion -ne 2) { throw 'Configuration schemaVersion must be 2' }
   if (-not @($config.repositories).Count) { throw 'repositories must not be empty' }
   if (@($config.repositories).Count -gt 32) { throw 'repositories is limited to 32 entries per host' }
   foreach ($repository in @($config.repositories)) { if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid repository mapping: $repository" } }
   if (-not $config.workers -or @($config.workers.psobject.Properties).Count -eq 0) { throw 'workers must not be empty' }
+  Assert-DshWorkerModelSelection -Workers $config.workers
   foreach ($field in 'ghExecutable', 'gitExecutable') { if ([string]::IsNullOrWhiteSpace($config.$field)) { throw "$field is required" } }
   if ($config.github.login -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$') { throw 'github.login must be a GitHub login name' }
   if ($config.github.login -like 'REPLACE-*' -and -not $AllowExamplePlaceholders) { throw 'github.login must name the expected host GitHub principal' }
@@ -937,6 +951,11 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'target repository endpoint'; Passed = ((Get-RegistrationEndpoint -Instance $repoInstance) -eq 'repos/owner/repo/actions/runners/registration-token') }
   $results += [pscustomobject]@{ Name = 'repository keys are stable'; Passed = ((Get-RepositoryKey 'owner/repo') -eq (Get-RepositoryKey 'owner/repo')) }
   $results += [pscustomobject]@{ Name = 'repository keys avoid normalized collision'; Passed = ((Get-RepositoryKey 'owner/a.b') -ne (Get-RepositoryKey 'owner/a-b')) }
+  $validDshWorker = [pscustomobject]@{ adapter = 'dsh-web'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max' }
+  $results += [pscustomobject]@{ Name = 'DSH worker requires an explicit complete model selection'; Passed = $false }
+  try { Assert-DshWorkerModelSelection -Workers ([pscustomobject]@{ dsh = $validDshWorker }); $results[-1].Passed = $true } catch {}
+  $results += [pscustomobject]@{ Name = 'DSH worker rejects incomplete model selection'; Passed = $false }
+  try { Assert-DshWorkerModelSelection -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; provider = 'opencode-go'; model = 'deepseek-v4-flash' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'reasoningEffort' }
   $fakeOps = [pscustomobject]@{
     installRoot = $selfTestInstallRoot
     stateRoot = $selfTestStateRoot

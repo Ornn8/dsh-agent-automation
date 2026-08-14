@@ -19,7 +19,7 @@ The optional `dsh-web` task is host-wide. Its hidden supervisor probes the loopb
 
 Use a dedicated Windows account. Install PowerShell 7 (`pwsh`), Git, GitHub CLI, Node, the DSH Web Host, and the configured review adapter. Model credentials remain in those products' existing local configuration.
 
-Copy [config.example.json](../config.example.json) to a machine-local file inside `stateRoot` on a data volume, for example `F:\dsh-agent-automation-state\agent-config.json`. Installed tasks continue to read that file, so it must not remain in a Git checkout. The example is ready for an `Ornn8` personal-account topology and demonstrates repository-level registration; replace executable paths, runner release/version/hash, and target mappings as needed.
+Copy [config.example.json](../config.example.json) to a machine-local file inside `stateRoot` on a data volume, for example `F:\dsh-agent-automation-state\agent-config.json`. Installed tasks continue to read that file, so it must not remain in a Git checkout. Configuration schema version 2 requires explicit `workers` and repository mappings; legacy top-level worker fields are rejected. The example is ready for an `Ornn8` personal-account topology and demonstrates repository-level registration; replace executable paths, runner release/version/hash, and target mappings as needed.
 
 Set `github.login` to the exact GitHub CLI login on the host. Install and online doctor call `gh api user` and compare only the login, preventing another cached identity from operating the runners. They do not display the login returned by GitHub or any token.
 

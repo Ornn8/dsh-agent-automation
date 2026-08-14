@@ -8,31 +8,7 @@ export function normalizeWorkerConfig(config) {
     if (Object.keys(config.workers).length === 0) throw new Error('workers must not be empty')
     return config
   }
-  const requiredLegacy = [
-    'dshWebBaseUrl', 'codexNode', 'codexScript', 'codexHome', 'codexProjectCwd',
-  ]
-  if (!requiredLegacy.every(name => typeof config?.[name] === 'string' && config[name].trim())) {
-    throw new Error('runner configuration must declare workers')
-  }
-  return {
-    ...config,
-    workers: {
-      dsh: {
-        adapter: 'dsh-web',
-        baseUrl: config.dshWebBaseUrl,
-      },
-      codex: {
-        adapter: 'codex-app',
-        node: config.codexNode,
-        script: config.codexScript,
-        home: config.codexHome,
-        projectCwd: config.codexProjectCwd,
-        model: 'gpt-5.6-sol',
-        effort: 'medium',
-        keep: 6,
-      },
-    },
-  }
+  throw new Error('runner configuration must declare workers')
 }
 
 function requiredText(value, name) {

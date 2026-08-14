@@ -15,6 +15,7 @@ import {
   removeJobDirectory,
   resolveRepositoryWorker,
   trustedAssociation,
+  validateConfigSchemaVersion,
   validateDshWorkerConfig,
   verifyGithubIdentity,
 } from '../src/common.mjs'
@@ -92,6 +93,11 @@ test('DSH model selection configuration is complete and fails closed', () => {
   assert.throws(() => validateDshWorkerConfig({ workers: {
     dsh: { adapter: 'dsh-web', baseUrl: 'http://127.0.0.1:3080', provider: 'opencode-go', model: 'deepseek-v4-flash' },
   } }), /workers\.dsh.*reasoningEffort/)
+})
+
+test('the controller rejects the removed configuration schema before starting a worker', () => {
+  assert.doesNotThrow(() => validateConfigSchemaVersion({ schemaVersion: 2, operations: { schemaVersion: 2 } }))
+  assert.throws(() => validateConfigSchemaVersion({ schemaVersion: 1, operations: { schemaVersion: 1 } }), /schemaVersion must be 2/)
 })
 
 test('DSH Web session is titled, prompted once, and observed to completion', async () => {

@@ -64,7 +64,7 @@ The runners are idle outbound GitHub listeners. They make no model calls while n
 
 Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). The file contains paths and repository allowlists, not provider keys. Every `dsh-web` worker must declare `provider`, `model`, and `reasoningEffort`; the controller calls `session.selectModel` with that complete selection after creating each session and before prompting it. The example pins DSH work to `opencode-go`, `deepseek-v4-flash`, and `max`. Each agent continues to use its own existing provider configuration.
 
-Legacy `dshWebBaseUrl` and `codex*` fields are normalized in memory to `workers.dsh` and `workers.codex`. Existing installations must still add the required `github.login` and `operations` fields before using the open-source installer.
+Configuration schema version 2 accepts only explicit `workers` and `repositoryMappings`; legacy `dshWebBaseUrl` and `codex*` fields are rejected. Existing installations must add the required `github.login`, `workers`, and `operations` fields before using the open-source installer.
 
 ## Quick start on Windows
 
