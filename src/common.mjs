@@ -152,6 +152,7 @@ export async function loadConfig() {
     resolveRepositoryWorker(config, repository, 'review')
   }
   validateDshWorkerConfig(config)
+  validateCodexWorkerConfig(config)
   validateOpenCodeWorkerConfig(config)
   validateClaudeCodeWorkerConfig(config)
   validateWorkerCapabilities(config)
@@ -188,8 +189,8 @@ export function validateRepositoryAutomationConfig(config) {
         throw new Error(`repositoryMappings.${field} must contain unique one-line names`)
       }
     }
-    if (mapping.requiredChecks.includes('codex/review')) {
-      throw new Error('repositoryMappings.requiredChecks must not contain codex/review')
+    if (mapping.requiredChecks.some(name => ['agent/review', 'codex/review'].includes(name))) {
+      throw new Error('repositoryMappings.requiredChecks must not contain a controller review authority')
     }
   }
 }
@@ -237,8 +238,8 @@ export function validateWorkerCapabilities(config) {
 
 /** Reject configuration formats that predate explicit worker declarations. */
 export function validateConfigSchemaVersion(config) {
-  if (config?.schemaVersion !== 3 || config?.operations?.schemaVersion !== 3) {
-    throw new Error('runner configuration schemaVersion must be 3')
+  if (config?.schemaVersion !== 4 || config?.operations?.schemaVersion !== 4) {
+    throw new Error('runner configuration schemaVersion must be 4')
   }
 }
 
@@ -251,6 +252,21 @@ export function validateDshWorkerConfig(config) {
       dshSessionPresets(worker)
     } catch (error) {
       throw new Error(`workers.${workerId} ${error.message}`)
+    }
+  }
+}
+
+/** Validate every Codex review Worker before a task can reach ChatGPT Desktop. */
+export function validateCodexWorkerConfig(config) {
+  for (const [workerId, worker] of Object.entries(config?.workers || {})) {
+    if (worker?.adapter !== 'codex-app') continue
+    for (const field of ['node', 'script', 'home', 'model', 'effort']) {
+      if (typeof worker[field] !== 'string' || !worker[field].trim() || /[\r\n`]/.test(worker[field])) {
+        throw new Error(`workers.${workerId} ${field} must be explicit one-line text`)
+      }
+    }
+    if (!Number.isSafeInteger(worker.keep) || worker.keep < 1 || worker.keep > 100) {
+      throw new Error(`workers.${workerId} keep must be an integer from 1 through 100`)
     }
   }
 }

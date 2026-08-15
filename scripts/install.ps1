@@ -6,6 +6,7 @@ param(
   [switch]$NoStart,
   [switch]$Migrate,
   [switch]$ConfirmMigration,
+  [string]$TargetPlatform,
   [switch]$DryRun
 )
 
@@ -13,17 +14,26 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $repoRoot 'ops\Automation.Operations.psm1') -Force
-$loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun
+$loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun -TargetPlatform $TargetPlatform
 $ops = $loaded.Operations
 $runtimeSourceRoot = Join-Path $repoRoot 'ops'
 $runtimeSnapshot = Get-OperationsRuntimeSnapshotDefinition -SourceRoot $runtimeSourceRoot -InstallRoot $ops.installRoot
-$instances = @(Get-RunnerInstances -Loaded $loaded -Roles $Roles -Repositories $Repositories)
-if (-not $instances.Count) { throw 'The requested role/repository selection produced no runner instances' }
 if ($ConfirmMigration -and -not $Migrate) { throw '-ConfirmMigration requires -Migrate' }
 if ($Migrate -and -not $DryRun -and -not $ConfirmMigration) { throw 'A state migration requires -ConfirmMigration. Run -Migrate -DryRun first.' }
 $migrationRepositories = @($Repositories | Where-Object { $_ })
 $migrationRoles = @($Roles | Select-Object -Unique)
 if ($Migrate -and ($migrationRepositories.Count -or $migrationRoles.Count -ne 2)) { throw '-Migrate must reconcile the full configured topology; do not combine it with -Repositories or a partial -Roles selection.' }
+$plan = New-InstallationPlan -Loaded $loaded -Platform $TargetPlatform -Roles $Roles -Repositories $Repositories -NoStart:$NoStart -RuntimeSnapshot $runtimeSnapshot
+$instances = @($plan.runnerInstances)
+if (-not $instances.Count) { throw 'The requested role/repository selection produced no runner instances' }
+$hostPlatform = Resolve-InstallationPlatform
+if (-not $DryRun -and $plan.platform.id -ne $hostPlatform.id) { throw "TargetPlatform $($plan.platform.id) does not match this host ($($hostPlatform.id))" }
+if (-not $DryRun -and $hostPlatform.id -ne 'windows-x64') { throw 'Installation execution is implemented only for windows-x64; use -DryRun to inspect the portable plan' }
+Write-Output "AUTOMATION_INSTALLATION_PLAN_JSON=$(ConvertTo-InstallationPlanJson -Plan $plan)"
+if ($DryRun -and $plan.platform.id -ne 'windows-x64') {
+  Write-OperationLog "DRY-RUN planning only for $($plan.platform.id); no host or GitHub state was inspected"
+  exit 0
+}
 
 function Invoke-InstallAction {
   param([string]$Description, [scriptblock]$Action)
@@ -33,21 +43,23 @@ function Invoke-InstallAction {
 
 function Get-RunnerArchive {
   $archivePath = Join-Path $ops.installRoot 'downloads\actions-runner.zip'
-  if ($DryRun) { Write-OperationLog "DRY-RUN download and SHA-256 verify $($ops.runner.downloadUri)"; return $archivePath }
+  if ($DryRun) { Write-OperationLog "DRY-RUN download and SHA-256 verify $($plan.runnerPackage.downloadUri)"; return $archivePath }
   Initialize-PrivateDirectory -Path (Split-Path -Parent $archivePath)
   if (-not (Test-Path -LiteralPath $archivePath)) {
     Write-OperationLog 'Downloading the pinned GitHub Actions runner archive'
-    Invoke-WebRequest -Uri $ops.runner.downloadUri -OutFile $archivePath -UseBasicParsing
+    Invoke-WebRequest -Uri $plan.runnerPackage.downloadUri -OutFile $archivePath -UseBasicParsing
   }
   $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-  if (-not $actual.Equals($ops.runner.sha256, [StringComparison]::OrdinalIgnoreCase)) { throw 'Runner archive SHA-256 mismatch; refusing to extract it' }
+  if (-not $actual.Equals($plan.runnerPackage.sha256, [StringComparison]::OrdinalIgnoreCase)) { throw 'Runner archive SHA-256 mismatch; refusing to extract it' }
   return $archivePath
 }
 
 function Register-InstanceTask {
   param([Parameter(Mandatory)]$Instance)
+  $processHost = Join-Path $runtimeSnapshot.root 'windows-role-process-host.ps1'
   $supervisor = Join-Path $runtimeSnapshot.root 'runner-supervisor.ps1'
-  $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$supervisor`" -Configuration `"$($loaded.Path)`" -InstanceId $($Instance.Id)"
+  $targetArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $supervisor, '-Configuration', $loaded.Path, '-InstanceId', $Instance.Id))))
+  $arguments = "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$processHost`" -TargetExecutable `"$pwshExecutable`" -TargetArgumentsBase64 $targetArguments -WorkingDirectory `"$($runtimeSnapshot.root)`""
   $action = New-ScheduledTaskAction -Execute $pwshExecutable -Argument $arguments
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
@@ -56,8 +68,10 @@ function Register-InstanceTask {
 }
 
 function Register-DshWebTask {
+  $processHost = Join-Path $runtimeSnapshot.root 'windows-role-process-host.ps1'
   $supervisor = Join-Path $runtimeSnapshot.root 'dsh-web-host-supervisor.ps1'
-  $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$supervisor`" -Configuration `"$($loaded.Path)`""
+  $targetArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $supervisor, '-Configuration', $loaded.Path))))
+  $arguments = "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$processHost`" -TargetExecutable `"$pwshExecutable`" -TargetArgumentsBase64 $targetArguments -WorkingDirectory `"$($runtimeSnapshot.root)`""
   $action = New-ScheduledTaskAction -Execute $pwshExecutable -Argument $arguments
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
@@ -179,22 +193,21 @@ if ($requiresMigration -and -not $Migrate) {
 }
 if (-not $manifest) { $manifest = New-InstallManifest -Loaded $loaded -RuntimeSnapshot $runtimeSnapshot }
 
-$selectedRepositories = if ($ops.controller.registrationScope -eq 'organization') {
-  @($loaded.Config.repositories)
-} else {
-  @($instances | ForEach-Object { $_.Repository } | Where-Object { $_ } | Select-Object -Unique)
-}
-foreach ($mapping in @($ops.repositoryMappings | Where-Object { $_.repository -in $selectedRepositories })) {
-  $ciWorkflowsJson = ConvertTo-Json -InputObject @($mapping.ciWorkflows) -Compress
-  $requiredChecksJson = ConvertTo-Json -InputObject @($mapping.requiredChecks) -Compress
-  Invoke-InstallAction "set CI workflow and required-check variables for $($mapping.repository)" {
-    & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_CI_WORKFLOWS --repo $mapping.repository --body $ciWorkflowsJson 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_CI_WORKFLOWS for $($mapping.repository)" }
-    & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_REQUIRED_CHECKS --repo $mapping.repository --body $requiredChecksJson 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_REQUIRED_CHECKS for $($mapping.repository)" }
+foreach ($repositoryPlan in @($plan.repositories)) {
+  $ciWorkflowsJson = $repositoryPlan.variables.DSH_AUTOMATION_CI_WORKFLOWS
+  $requiredChecksJson = $repositoryPlan.variables.DSH_AUTOMATION_REQUIRED_CHECKS
+  $protectionMapping = [pscustomobject]@{
+    repository = $repositoryPlan.repository
+    requiredChecks = @($repositoryPlan.branchProtection.requiredChecks | ForEach-Object { $_.name } | Where-Object { $_ -ne 'agent/review' })
   }
-  Invoke-InstallAction "ensure strict app-bound required checks, bootstrapping an unprotected default branch of $($mapping.repository)" {
-    Set-RepositoryRequiredStatusChecks -Mapping $mapping -GhExecutable $loaded.Config.ghExecutable
+  Invoke-InstallAction "set CI workflow and required-check variables for $($repositoryPlan.repository)" {
+    & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_CI_WORKFLOWS --repo $repositoryPlan.repository --body $ciWorkflowsJson 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_CI_WORKFLOWS for $($repositoryPlan.repository)" }
+    & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_REQUIRED_CHECKS --repo $repositoryPlan.repository --body $requiredChecksJson 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_REQUIRED_CHECKS for $($repositoryPlan.repository)" }
+  }
+  Invoke-InstallAction "ensure strict app-bound required checks, bootstrapping an unprotected default branch of $($repositoryPlan.repository)" {
+    Set-RepositoryRequiredStatusChecks -Mapping $protectionMapping -GhExecutable $loaded.Config.ghExecutable
   }
 }
 
@@ -304,10 +317,7 @@ if ($Migrate) {
 }
 
 Invoke-InstallAction 'create private runtime, state, logs, and fault directories' {
-  Initialize-PrivateDirectory -Path $ops.installRoot
-  Initialize-PrivateDirectory -Path $ops.stateRoot
-  Initialize-PrivateDirectory -Path $ops.logsRoot
-  Initialize-PrivateDirectory -Path (Join-Path $ops.stateRoot 'faults')
+  foreach ($path in @($plan.paths)) { Initialize-PrivateDirectory -Path $path.path }
 }
 Invoke-InstallAction "deploy immutable operations runtime snapshot $($runtimeSnapshot.id)" {
   Install-OperationsRuntimeSnapshot -Snapshot $runtimeSnapshot -SourceRoot $runtimeSourceRoot

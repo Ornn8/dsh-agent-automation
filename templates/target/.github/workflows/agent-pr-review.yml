@@ -5,7 +5,7 @@ run-name: >-
 
 on:
   repository_dispatch:
-    types: [codex-review]
+    types: [agent-review]
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, labeled, edited]
 
@@ -16,14 +16,14 @@ permissions:
   pull-requests: write
 
 jobs:
-  codex-review:
+  agent-review:
     if: >-
       github.event_name == 'repository_dispatch'
       || (github.event.pull_request.draft == false
         && github.event.pull_request.head.repo.full_name == github.repository
         && (github.event.action != 'labeled' || github.event.label.name == 'automation/review-ready')
         && (github.event.action != 'edited' || github.event.changes.base.ref.from != null))
-    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/codex-review.yml@{{CONTROLLER_SHA}}
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/agent-review.yml@{{CONTROLLER_SHA}}
     with:
       pull_request_number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pull_request_number || github.event.pull_request.number }}
       base_sha: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.base_sha || github.event.pull_request.base.sha }}

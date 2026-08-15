@@ -9,7 +9,7 @@ concurrency:
 
 jobs:
   reconcile:
-    name: codex/reconcile-base
+    name: agent/reconcile-base
     runs-on: [self-hosted, agent-change]
     timeout-minutes: 15
     permissions:
@@ -29,5 +29,5 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
-          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/codex-review.yml
+          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml
         run: node controller/src/reconcile-reviews.mjs

@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Ornn8/dsh-agent-automation/master/ops/config.schema.json",
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "repositories": ["Ornn8/deepseek-harness"],
   "ghExecutable": "gh.exe",
   "gitExecutable": "git.exe",
@@ -94,7 +94,7 @@
     }
   },
   "operations": {
-    "schemaVersion": 3,
+    "schemaVersion": 4,
     "installRoot": "F:\\dsh-agent-automation-runtime",
     "stateRoot": "F:\\dsh-agent-automation-state",
     "logsRoot": "F:\\dsh-agent-automation-state\\logs",
@@ -103,9 +103,13 @@
       "registrationScope": "target-repositories"
     },
     "runner": {
-      "version": "REPLACE_WITH_A_PINNED_RUNNER_VERSION",
-      "downloadUri": "https://github.com/actions/runner/releases/download/vREPLACE_WITH_A_PINNED_RUNNER_VERSION/actions-runner-win-x64-REPLACE_WITH_A_PINNED_RUNNER_VERSION.zip",
-      "sha256": "REPLACE_WITH_THE_OFFICIAL_64_CHARACTER_SHA256"
+      "version": "2.336.0",
+      "artifacts": {
+        "windows-x64": {
+          "downloadUri": "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-win-x64-2.336.0.zip",
+          "sha256": "REPLACE_WITH_THE_OFFICIAL_64_CHARACTER_SHA256"
+        }
+      }
     },
     "repositoryMappings": [
       {
@@ -120,12 +124,12 @@
       "change": {
         "runnerNamePrefix": "dsh-agent-change",
         "replicas": 4,
-        "labels": ["self-hosted", "Windows", "X64", "agent-change"]
+        "labels": ["agent-change"]
       },
       "review": {
         "runnerNamePrefix": "dsh-agent-review",
         "replicas": 1,
-        "labels": ["self-hosted", "Windows", "X64", "agent-reviewer"]
+        "labels": ["agent-reviewer"]
       }
     },
     "dshWebHost": {

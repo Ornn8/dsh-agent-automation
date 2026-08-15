@@ -4,6 +4,7 @@ import {
   hasTrustedExactReviewRun,
   reviewRunIdFromCheckRun,
 } from './landing-policy.mjs'
+import { REVIEW_CHECK_NAME } from './review-authority.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const expectedHead = requiredEnv('HEAD_SHA')
@@ -23,7 +24,7 @@ if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) throw new Error('TRUST
 if (!Number.isSafeInteger(requestedNumber) || requestedNumber < 0) throw new Error('Invalid PR_NUMBER')
 if (!Array.isArray(requiredCheckNames) || requiredCheckNames.length < 1 || requiredCheckNames.length > 32
   || new Set(requiredCheckNames).size !== requiredCheckNames.length
-  || requiredCheckNames.some(name => typeof name !== 'string' || !name.trim() || name.length > 100 || name === 'codex/review')) {
+  || requiredCheckNames.some(name => typeof name !== 'string' || !name.trim() || name.length > 100 || name === REVIEW_CHECK_NAME)) {
   throw new Error('REQUIRED_CHECKS_JSON must name unique independent CI checks')
 }
 
@@ -62,7 +63,7 @@ async function readCheckRuns() {
 
 async function readLatestReviewProof(pullRequest, checkRuns) {
   const candidates = [...checkRuns]
-    .filter(checkRun => checkRun.name === 'codex/review')
+    .filter(checkRun => checkRun.name === REVIEW_CHECK_NAME)
     .sort((left, right) => (right.id || 0) - (left.id || 0))
   for (const checkRun of candidates) {
     const runId = reviewRunIdFromCheckRun(checkRun, repository)

@@ -1,3 +1,5 @@
+import { REVIEW_WORKFLOW_PATH } from './review-authority.mjs'
+
 const FULL_SHA = /^[0-9a-f]{40}$/
 export const MAX_RECOVERY_ATTEMPTS = 3
 const RECOVERABLE_CONCLUSIONS = new Set([
@@ -18,13 +20,13 @@ function recoveryRole(run, repository, trust) {
   const workflow = [
     '.github/workflows/dsh-issue.yml',
     '.github/workflows/dsh-repair.yml',
-    '.github/workflows/codex-review.yml',
+    REVIEW_WORKFLOW_PATH,
   ].find(candidate => run.referenced_workflows?.some(reference => reference.path
     === `${trust.controllerRepository}/${candidate}@${trust.controllerSha}`
     && reference.sha === trust.controllerSha))
   if (!workflow) return null
   if (workflow === '.github/workflows/dsh-issue.yml') return 'issue'
-  if (workflow === '.github/workflows/codex-review.yml') {
+  if (workflow === REVIEW_WORKFLOW_PATH) {
     return run.head_repository?.full_name === repository
       && ((run.event === 'pull_request_target'
         && run.pull_requests?.some(pullRequest => FULL_SHA.test(pullRequest.base?.sha || '')
@@ -71,9 +73,9 @@ function validSubject(subject, current, repository) {
 /** Return whether trusted review-job steps prove an intentional BLOCK rather than infrastructure failure. */
 export function intentionalReviewBlock(run, jobs) {
   if (run?.conclusion !== 'failure') return false
-  return jobs?.some(job => job.name === 'codex-review / codex/review'
+  return jobs?.some(job => job.name === 'agent-review / agent/review'
     && job.conclusion === 'failure'
-    && job.steps?.some(step => step.name === 'Review exact PR head with Codex' && step.conclusion === 'success')
+    && job.steps?.some(step => step.name === 'Review exact PR head with Agent' && step.conclusion === 'success')
     && job.steps?.some(step => step.name === 'Publish an independent change work request' && step.conclusion === 'success')
     && job.steps?.some(step => step.name === 'Preserve the blocking review conclusion' && step.conclusion === 'failure'))
 }

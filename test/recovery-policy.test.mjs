@@ -104,20 +104,20 @@ test('a trusted intentional review BLOCK never schedules a second review, while 
     head_repository: { full_name: repository },
     head_sha: head,
     pull_requests: [{ number: 12, base: { sha: base }, head: { sha: head } }],
-    referenced_workflows: [{ path: `${controller}/.github/workflows/codex-review.yml@${sha}`, sha }],
+    referenced_workflows: [{ path: `${controller}/.github/workflows/agent-review.yml@${sha}`, sha }],
   })
   const current = { state: 'open', base: { sha: base }, head: { sha: head, repo: { full_name: repository } } }
   const subject = { type: 'pull-request', number: 12, base, head }
   const intentionalBlock = [{
-    name: 'codex-review / codex/review', conclusion: 'failure', steps: [
-      { name: 'Review exact PR head with Codex', conclusion: 'success' },
+    name: 'agent-review / agent/review', conclusion: 'failure', steps: [
+      { name: 'Review exact PR head with Agent', conclusion: 'success' },
       { name: 'Publish an independent change work request', conclusion: 'success' },
       { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
     ],
   }]
   const reviewerInfrastructureFailure = [{
-    name: 'codex-review / codex/review', conclusion: 'failure', steps: [
-      { name: 'Review exact PR head with Codex', conclusion: 'failure' },
+    name: 'agent-review / agent/review', conclusion: 'failure', steps: [
+      { name: 'Review exact PR head with Agent', conclusion: 'failure' },
     ],
   }]
   const arguments_ = {
@@ -163,7 +163,7 @@ test('review recovery accepts a pinned repository dispatch run from the default 
     head_repository: { full_name: repository },
     head_sha: base,
     pull_requests: [],
-    referenced_workflows: [{ path: `${controller}/.github/workflows/codex-review.yml@${sha}`, sha }],
+    referenced_workflows: [{ path: `${controller}/.github/workflows/agent-review.yml@${sha}`, sha }],
   })
   assert.equal(trustedFailedAgentRun({
     run: reviewRun,

@@ -54,7 +54,13 @@ try {
     '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
     '-UpstreamRepository', $upstreamRepository
   )
-  Invoke-Bootstrap -Arguments ($arguments + '-DryRun')
+  $dryRunOutput = @(Invoke-Bootstrap -Arguments ($arguments + '-DryRun'))
+  $planLine = @($dryRunOutput | Where-Object { $_ -is [string] -and $_.StartsWith('AUTOMATION_BOOTSTRAP_PLAN_JSON=') })
+  Assert-True ($planLine.Count -eq 1) 'Dry run did not emit exactly one versioned bootstrap plan.'
+  $plan = $planLine[0].Substring('AUTOMATION_BOOTSTRAP_PLAN_JSON='.Length) | ConvertFrom-Json -Depth 16
+  Assert-True ($plan.schemaVersion -eq 1 -and $plan.kind -ceq 'agent-automation-bootstrap') 'Bootstrap plan identity is invalid.'
+  Assert-True (@($plan.workflows).Count -eq $names.Count) 'Bootstrap plan does not cover every target workflow.'
+  Assert-True (@($plan.workflows | Where-Object action -eq 'would-write').Count -eq $names.Count) 'Bootstrap plan actions do not match an empty target checkout.'
   Assert-True (-not (Test-Path -LiteralPath (Join-Path $temp '.github\workflows\agent-health.yml'))) 'Dry run wrote a target workflow.'
   Invoke-Bootstrap -Arguments $arguments
 
@@ -109,7 +115,7 @@ try {
   $reviewWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-pr-review.yml') -Raw
   Assert-True ($reviewWorkflow -match '(?m)^  checks: write\r?$') 'Agent PR Review cannot create its exact-head CheckRun.'
   Assert-True ($reviewWorkflow -match '(?m)^  repository_dispatch:\r?$') 'Agent PR Review lacks the GitHub-token recursion-safe review trigger.'
-  Assert-True ($reviewWorkflow -match '(?m)^    types: \[codex-review\]\r?$') 'Agent PR Review lacks the exact codex-review dispatch type.'
+  Assert-True ($reviewWorkflow -match '(?m)^    types: \[agent-review\]\r?$') 'Agent PR Review lacks the exact agent-review dispatch type.'
   Assert-True ($reviewWorkflow -notmatch 'statuses: write|dsh-review') 'Agent PR Review retained an obsolete review trigger or permission.'
   Assert-True ($issuesWorkflow -match '(?m)^    types: \[dsh-issue\]\r?$') 'Agent Issues lacks the GitHub-token recursion-safe Issue trigger.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw

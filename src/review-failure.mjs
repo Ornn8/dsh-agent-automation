@@ -14,12 +14,12 @@ const checkId = Number.parseInt(process.env.REVIEW_CHECK_ID || '', 10)
 if (Number.isSafeInteger(checkId) && checkId > 0) {
   await completeReviewCheck({
     ghExecutable: config.ghExecutable, repository, checkId, runUrl, conclusion: 'failure',
-    summary: 'Codex review infrastructure did not return a verdict.', env: githubEnvironment,
+    summary: 'Agent review infrastructure did not return a verdict.', env: githubEnvironment,
   })
 } else {
   await failReviewCheck({
     ghExecutable: config.ghExecutable, repository, head, runUrl,
-    summary: 'Codex review infrastructure did not return a verdict.', env: githubEnvironment,
+    summary: 'Agent review infrastructure did not return a verdict.', env: githubEnvironment,
   })
 }
 
@@ -28,7 +28,7 @@ await run(config.ghExecutable, [
 ], { env: githubEnvironment }).catch(() => undefined)
 await run(config.ghExecutable, [
   'label', 'create', 'automation/review-failed', '--repo', repository,
-  '--description', 'Codex review automation failed before a verdict', '--color', 'D93F0B',
+  '--description', 'Agent review automation failed before a verdict', '--color', 'D93F0B',
 ], { env: githubEnvironment }).catch(() => undefined)
 await run(config.ghExecutable, [
   'pr', 'edit', String(pullRequestNumber), '--repo', repository,

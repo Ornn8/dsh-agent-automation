@@ -26,9 +26,28 @@ function resolveWorker({ config, workerId, adapters }) {
   return { id, worker, adapterName, adapter }
 }
 
+function workerAttribution(id, worker, adapterName) {
+  const values = adapterName === 'dsh-web'
+    ? [worker.provider, worker.model, worker.reasoningEffort]
+    : adapterName === 'opencode-cli'
+      ? [worker.model, worker.variant]
+      : ['codex-app', 'claude-code-cli'].includes(adapterName)
+        ? [worker.model, worker.effort]
+        : []
+  if (values.some(value => typeof value !== 'string' || !value.trim() || /[\r\n`]/.test(value))) {
+    throw new Error(`Worker ${id} has invalid public attribution metadata`)
+  }
+  const model = adapterName === 'dsh-web' ? `${values[0]}/${values[1]}` : values[0]
+  const reasoning = adapterName === 'dsh-web' ? values[2] : values[1]
+  const displayName = model ? `${adapterName} ${model}${reasoning ? ` (${reasoning})` : ''}` : adapterName
+  if (displayName.length > 200) throw new Error(`Worker ${id} public attribution is too long`)
+  return { id, adapter: adapterName, ...(model ? { model } : {}), ...(reasoning ? { reasoning } : {}), displayName }
+}
+
 /** Invoke one configured agent worker and validate its terminal receipt. */
 export async function runAgentWorker({ config, workerId, invocation, adapters }) {
   const { id, worker, adapterName, adapter } = resolveWorker({ config, workerId, adapters })
+  const attribution = workerAttribution(id, worker, adapterName)
   const invoke = typeof adapter === 'function' ? adapter : adapter.run
   if (typeof invoke !== 'function') throw new Error(`Adapter ${adapterName} cannot run work`)
 
@@ -58,6 +77,7 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
   if (!TERMINAL_OUTCOMES.has(outcome)) throw new Error(`Unknown worker receipt outcome ${outcome}`)
   return {
     workerId: id,
+    worker: attribution,
     sessionId,
     outcome,
     detail: typeof value.detail === 'string' ? value.detail : '',

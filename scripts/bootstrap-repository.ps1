@@ -137,6 +137,41 @@ foreach ($name in $workflowNames) {
   }
 }
 
+if ($DryRun) {
+  $hostOs = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    'windows'
+  } elseif ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) {
+    'linux'
+  } elseif ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
+    'macos'
+  } else {
+    'unknown'
+  }
+  $hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+  $workflowPlan = @($plan | ForEach-Object {
+    $hashBytes = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($_.Content))
+    [pscustomobject][ordered]@{
+      path = $_.RelativePath
+      destination = $_.Destination
+      action = ([string]$_.Action).Replace(' ', '-').ToLowerInvariant()
+      sha256 = [Convert]::ToHexString($hashBytes).ToLowerInvariant()
+    }
+  })
+  $document = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    kind = 'agent-automation-bootstrap'
+    hostPlatform = "$hostOs-$hostArchitecture"
+    targetCheckout = $resolvedRoot
+    controllerRepository = $ControllerRepository
+    controllerSha = $ControllerSha
+    ciWorkflowNames = @($CiWorkflowNames)
+    upstreamRepository = $UpstreamRepository
+    update = [bool]$Update
+    workflows = $workflowPlan
+  }
+  Write-Output "AUTOMATION_BOOTSTRAP_PLAN_JSON=$(ConvertTo-Json -InputObject $document -Depth 16 -Compress)"
+}
+
 if (-not $DryRun -and @($plan | Where-Object { $_.Action -eq 'write' }).Count) {
   [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
 }

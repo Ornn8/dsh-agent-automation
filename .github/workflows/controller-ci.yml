@@ -26,12 +26,23 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
+      - name: Install controller development dependencies
+        run: npm ci --ignore-scripts
+      - name: Type-check GitHub policy data
+        run: npm run typecheck
       - name: Run controller tests
         run: npm test
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+      - name: Run portable installation-plan tests
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-installation-plan.ps1
       - name: Run Windows operations tests
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pwsh -NoProfile -File scripts/test-operations.ps1
+        run: |
+          pwsh -NoProfile -File scripts/test-operations.ps1
       - name: Run target bootstrap tests
         if: runner.os == 'Windows'
         shell: pwsh

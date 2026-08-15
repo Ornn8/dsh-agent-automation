@@ -30,6 +30,6 @@ jobs:
           TARGET_REPOSITORY: ${{ github.repository }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
-          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/codex-review.yml
+          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/dispatch-backlog.mjs

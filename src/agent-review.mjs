@@ -18,6 +18,7 @@ import {
 } from './review-protocol.mjs'
 import { validateReviewFindings } from './review-evidence.mjs'
 import { completeReviewCheck, startReviewCheck } from './review-check.mjs'
+import { reviewMarker } from './review-authority.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -27,7 +28,7 @@ const reviewCheckout = resolve(requiredEnv('REVIEW_CHECKOUT'))
 const config = await loadConfig()
 const workerId = resolveRepositoryWorker(config, repository, requiredEnv('AGENT_ROLE'))
 const workerProjectCwd = config.workers[workerId]?.projectCwd || reviewCheckout
-const marker = `<!-- codex-review:${expectedHead} -->`
+const marker = reviewMarker(expectedHead)
 const githubEnvironment = actionsCredentialEnvironment()
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
@@ -166,18 +167,19 @@ if (current.state !== 'OPEN'
   || current.baseRefName !== expectedBaseRef
   || current.baseRefOid !== expectedBase
   || current.headRefOid !== expectedHead) {
-  throw new Error('Pull request changed while Codex was reviewing it; discard the stale verdict')
+  throw new Error('Pull request changed while the review Worker was running; discard the stale verdict')
 }
 
 await upsertReviewComment(githubReviewBody(review, {
   marker,
   base: expectedBase,
   head: expectedHead,
+  reviewer: workerReceipt.worker,
 }))
 if (review.verdict === 'block') {
   await run(config.ghExecutable, [
     'label', 'create', 'automation/review-blocked', '--repo', repository,
-    '--description', 'Codex found a blocking defect at the current PR head', '--color', 'B60205',
+    '--description', 'Agent review found a blocking defect at the current PR head', '--color', 'B60205',
   ], { env: githubEnvironment }).catch(() => undefined)
   await run(config.ghExecutable, [
     'pr', 'edit', String(pullRequestNumber), '--repo', repository,
@@ -185,10 +187,10 @@ if (review.verdict === 'block') {
   ], { env: githubEnvironment }).catch(() => undefined)
   await completeReviewCheck({
     ghExecutable: config.ghExecutable, repository, checkId: reviewCheckId, runUrl: requiredEnv('RUN_URL'),
-    conclusion: 'failure', summary: `Codex found ${review.findings.length} blocking defect(s).`, env: githubEnvironment,
+    conclusion: 'failure', summary: `Agent review found ${review.findings.length} blocking defect(s).`, env: githubEnvironment,
   })
   await writeOutput('verdict', 'block')
-  process.stdout.write(`Codex blocked pull request #${pullRequestNumber} with ${review.findings.length} finding(s).\n`)
+  process.stdout.write(`Agent review blocked pull request #${pullRequestNumber} with ${review.findings.length} finding(s).\n`)
 } else {
   for (const label of ['automation/review-blocked', 'automation/review-ready', 'automation/review-failed']) {
     await run(config.ghExecutable, [
@@ -198,7 +200,7 @@ if (review.verdict === 'block') {
   }
   await completeReviewCheck({
     ghExecutable: config.ghExecutable, repository, checkId: reviewCheckId, runUrl: requiredEnv('RUN_URL'),
-    conclusion: 'success', summary: 'Codex found no blocking defects at this head.', env: githubEnvironment,
+    conclusion: 'success', summary: 'Agent review found no blocking defects at this head.', env: githubEnvironment,
   })
   await run(config.ghExecutable, [
     'api', '--method', 'POST', `repos/${repository}/dispatches`,
@@ -207,5 +209,5 @@ if (review.verdict === 'block') {
     '-f', `client_payload[head_sha]=${expectedHead}`,
   ], { env: githubEnvironment })
   await writeOutput('verdict', 'pass')
-  process.stdout.write(`Codex passed pull request #${pullRequestNumber}; landing was requested for ${expectedHead}.\n`)
+  process.stdout.write(`Agent review passed pull request #${pullRequestNumber}; landing was requested for ${expectedHead}.\n`)
 }
