@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { readFile, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { normalizeWorkerConfig } from './agent-worker.mjs'
-import { dshModelSelection } from './dsh-web-session.mjs'
+import { dshModelSelection, dshSessionPresets } from './dsh-web-session.mjs'
 
 /** Run a process without a command shell and return its captured output. */
 export function run(command, args, options = {}) {
@@ -134,6 +134,7 @@ export function validateDshWorkerConfig(config) {
     if (worker?.adapter !== 'dsh-web') continue
     try {
       dshModelSelection(worker)
+      dshSessionPresets(worker)
     } catch (error) {
       throw new Error(`workers.${workerId} ${error.message}`)
     }

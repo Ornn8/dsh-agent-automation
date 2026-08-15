@@ -29,9 +29,11 @@
         "allOf": [{
           "if": { "properties": { "adapter": { "const": "dsh-web" } }, "required": ["adapter"] },
           "then": {
-            "required": ["baseUrl", "provider", "model", "reasoningEffort"],
+            "required": ["baseUrl", "agentPreset", "permissionPreset", "provider", "model", "reasoningEffort"],
             "properties": {
               "baseUrl": { "type": "string", "minLength": 1 },
+              "agentPreset": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$" },
+              "permissionPreset": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$" },
               "provider": { "type": "string", "minLength": 1 },
               "model": { "type": "string", "minLength": 1 },
               "reasoningEffort": { "type": "string", "minLength": 1 }

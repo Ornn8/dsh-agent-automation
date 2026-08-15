@@ -423,7 +423,8 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
   })
   const receipt = await runAgentWorker({
     config: { workers: { implementer: {
-      adapter: 'dsh-web', baseUrl: 'http://localhost:3080', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max',
+      adapter: 'dsh-web', baseUrl: 'http://localhost:3080', agentPreset: 'standard', permissionPreset: 'danger-full-access',
+      provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max',
     } } },
     workerId: 'implementer',
     invocation: {
@@ -438,6 +439,8 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
   assert.equal(calls[0].baseUrl, 'http://localhost:3080')
   assert.equal(calls[0].taskId, 'issue-7')
   assert.deepEqual(calls[0].modelSelection, { provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max' })
+  assert.equal(calls[0].agentPreset, 'standard')
+  assert.equal(calls[0].permissionPreset, 'danger-full-access')
   assert.equal(calls[0].requiredSkill, 'github-issue-work')
   assert.deepEqual(started, [{ sessionId: 'dsh-visible' }])
   assert.equal(receipt.workerId, 'implementer')
@@ -456,7 +459,7 @@ test('the DSH Web adapter can perform review without a change-work receipt', asy
   })
   const receipt = await runAgentWorker({
     config: { workers: { reviewer: {
-      adapter: 'dsh-web', baseUrl: 'http://localhost:3080', provider: 'opencode-go',
+      adapter: 'dsh-web', baseUrl: 'http://localhost:3080', agentPreset: 'standard', permissionPreset: 'read-only', provider: 'opencode-go',
       model: 'deepseek-v4-flash', reasoningEffort: 'max',
     } } },
     workerId: 'reviewer',

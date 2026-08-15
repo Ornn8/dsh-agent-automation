@@ -11,6 +11,8 @@
     "dsh": {
       "adapter": "dsh-web",
       "baseUrl": "http://127.0.0.1:3080",
+      "agentPreset": "standard",
+      "permissionPreset": "danger-full-access",
       "provider": "opencode-go",
       "model": "deepseek-v4-flash",
       "reasoningEffort": "max"

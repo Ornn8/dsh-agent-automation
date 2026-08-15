@@ -49,7 +49,7 @@ function Assert-AgentWorkerConfiguration {
   foreach ($property in @($Workers.psobject.Properties)) {
     $worker = $property.Value
     if ($worker.adapter -eq 'dsh-web') {
-      foreach ($field in 'provider', 'model', 'reasoningEffort') {
+      foreach ($field in 'agentPreset', 'permissionPreset', 'provider', 'model', 'reasoningEffort') {
         if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
           throw "workers.$($property.Name).$field is required for a dsh-web worker"
         }
@@ -986,11 +986,13 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'target repository endpoint'; Passed = ((Get-RegistrationEndpoint -Instance $repoInstance) -eq 'repos/owner/repo/actions/runners/registration-token') }
   $results += [pscustomobject]@{ Name = 'repository keys are stable'; Passed = ((Get-RepositoryKey 'owner/repo') -eq (Get-RepositoryKey 'owner/repo')) }
   $results += [pscustomobject]@{ Name = 'repository keys avoid normalized collision'; Passed = ((Get-RepositoryKey 'owner/a.b') -ne (Get-RepositoryKey 'owner/a-b')) }
-  $validDshWorker = [pscustomobject]@{ adapter = 'dsh-web'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max' }
-  $results += [pscustomobject]@{ Name = 'DSH worker requires an explicit complete model selection'; Passed = $false }
+  $validDshWorker = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; permissionPreset = 'danger-full-access'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max' }
+  $results += [pscustomobject]@{ Name = 'DSH worker requires explicit session presets and model selection'; Passed = $false }
   try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = $validDshWorker }); $results[-1].Passed = $true } catch {}
   $results += [pscustomobject]@{ Name = 'DSH worker rejects incomplete model selection'; Passed = $false }
-  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; provider = 'opencode-go'; model = 'deepseek-v4-flash' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'reasoningEffort' }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; permissionPreset = 'danger-full-access'; provider = 'opencode-go'; model = 'deepseek-v4-flash' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'reasoningEffort' }
+  $results += [pscustomobject]@{ Name = 'DSH worker rejects a missing permission preset'; Passed = $false }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'permissionPreset' }
   $validOpenCodeReview = [pscustomobject]@{ adapter = 'opencode-cli'; executable = 'opencode.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'openai/gpt-5'; variant = 'medium' }
   $results += [pscustomobject]@{ Name = 'OpenCode review worker requires a complete CLI selection'; Passed = $false }
   try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = $validOpenCodeReview }); $results[-1].Passed = $true } catch {}
