@@ -49,7 +49,7 @@ if (pullRequestNumber === 0) {
 async function readPullRequest() {
   return ghJson([
     'pr', 'view', String(pullRequestNumber), '--repo', repository,
-    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefOid,mergeStateStatus,url',
+    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefOid,mergeStateStatus,url,body',
   ], 'pull request for landing')
 }
 
@@ -113,5 +113,6 @@ if (current.baseRefOid !== pullRequest.baseRefOid || !currentDecision.ready) {
 await run(githubExecutable, [
   'pr', 'merge', String(pullRequestNumber), '--repo', repository,
   '--squash', '--delete-branch', '--match-head-commit', expectedHead,
+  '--body', current.body || '',
 ], { env: githubEnvironment, tee: true })
 process.stdout.write(`Landed pull request #${pullRequestNumber} at exact head ${expectedHead}.\n`)
