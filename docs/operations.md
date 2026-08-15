@@ -73,6 +73,8 @@ Automatic exact-review and failed-CI repair consumes at most six distinct contro
 
 A same-head technical rebuttal requests review by adding `automation/review-ready`. The review listener may consume that label before the repair process resumes; repair therefore records the exact-head review CheckRuns that existed before the Agent started and also accepts a new GitHub Actions-owned `codex/review` CheckRun as proof that the handoff occurred.
 
+A CI repair may rerun failed jobs on the same workflow run. Same-head completion requires that exact run id to finish on a later attempt with `success`, the configured workflow name, and the original pull request head; another run or an Agent-reported success is insufficient.
+
 ## Validate and install
 
 These checks have no destructive or remote effect:

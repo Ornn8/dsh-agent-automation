@@ -47,6 +47,25 @@ export function trustedCiFailure({ run, pullRequestNumber, expectedHead, workflo
       || run.pull_requests.some(pullRequest => pullRequest.number === pullRequestNumber))
 }
 
+/** Return whether the same exact-head CI run succeeded on a later attempt. */
+export function trustedCiRerunSuccess({ priorRun, currentRun, pullRequestNumber, expectedHead, workflowName }) {
+  return Number.isSafeInteger(priorRun?.id)
+    && priorRun.id > 0
+    && currentRun?.id === priorRun.id
+    && Number.isSafeInteger(priorRun.run_attempt)
+    && Number.isSafeInteger(currentRun.run_attempt)
+    && currentRun.run_attempt > priorRun.run_attempt
+    && typeof workflowName === 'string'
+    && workflowName.length > 0
+    && currentRun.name === workflowName
+    && currentRun.status === 'completed'
+    && currentRun.conclusion === 'success'
+    && currentRun.head_sha === expectedHead
+    && (!Array.isArray(currentRun.pull_requests)
+      || currentRun.pull_requests.length === 0
+      || currentRun.pull_requests.some(pullRequest => pullRequest.number === pullRequestNumber))
+}
+
 /** Return whether a failed review CheckRun authorizes a repair for its exact PR pair. */
 export function trustedBlockedReviewProof({ pullRequest, reviewProof, trustedReview }) {
   return hasTrustedExactReviewRun({ pullRequest, reviewProof, trustedReview })
