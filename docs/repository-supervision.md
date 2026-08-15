@@ -29,7 +29,7 @@ on:
 permissions:
   actions: read
   checks: read
-  contents: read
+  contents: write
   issues: write
   pull-requests: write
 
@@ -53,7 +53,7 @@ The cron minute is intentionally offset from the top of the hour. GitHub schedul
 - Repository content and GitHub discussion are treated as untrusted data.
 - The model cannot execute code or use GitHub CLI.
 - At most one Issue and five total GitHub mutations may be proposed per run.
-- Unsafe `agent/dsh` labels are removed deterministically even when the model omits the correction.
+- Assigning `agent/dsh` to an Issue dispatches the deterministic `dsh-issue` event, so the caller and this reusable workflow both grant `contents: write`; a reusable workflow can only downgrade caller token permissions, never elevate them.
 - Repeated fingerprints do not duplicate Issues or comments.
 - Every Issue or pull request target is reread immediately before its mutation; changed state stops the remaining plan.
 - Lists are read through at most three 100-item pages; a still-full final page stops the audit instead of accepting an incomplete snapshot.
