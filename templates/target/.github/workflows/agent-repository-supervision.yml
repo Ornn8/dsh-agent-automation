@@ -1,0 +1,27 @@
+name: Agent Repository Supervision
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      apply_changes:
+        description: Apply validated repository-management changes.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  supervise:
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/repository-supervisor.yml@{{CONTROLLER_SHA}}
+    with:
+      upstream_repository: {{UPSTREAM_REPOSITORY}}
+      apply_changes: ${{ github.event_name == 'schedule' || inputs.apply_changes }}
+      max_mutations: 5

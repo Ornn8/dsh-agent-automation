@@ -1,6 +1,6 @@
 # Windows operations
 
-This guide installs the local change and review workers. Controller jobs run on GitHub-hosted runners; there is no local controller runner, task, label, or work directory.
+This guide installs the local change and review workers. Pure GitHub coordination jobs run on GitHub-hosted runners; jobs that invoke or inspect a local Agent Worker, plus base reconciliation, run on the labeled self-hosted role runners. Repository supervision uses `agent-reviewer`; there is no separate local controller runner, task, label, or work directory.
 
 ## Runner topology
 
@@ -49,7 +49,7 @@ Install normally uses GitHub's [status check protection endpoint](https://docs.g
 
 ## Offline target workflow bootstrap
 
-`bootstrap-repository.ps1` renders only the seven thin forwarding workflows under a local target checkout's `.github/workflows/` directory. It does not invoke GitHub CLI, read credentials, set repository variables, stage files, commit, or push. Supply the controller's owner/name, a published lowercase 40-character `ControllerSha` that remains permanently reachable from the controller default branch, and the CI workflow name that the target's `DSH_AUTOMATION_CI_WORKFLOW` variable must contain. If a controller PR is squash- or rebase-merged, verify that the published commit tree exactly matches the reviewed PR-head tree before pinning the published commit; never pin a PR head from a branch that may be deleted. The offline renderer does not verify GitHub reachability.
+`bootstrap-repository.ps1` renders only the eight thin forwarding workflows under a local target checkout's `.github/workflows/` directory, including scheduled repository supervision. It does not invoke GitHub CLI, read credentials, set repository variables, stage files, commit, or push. Supply the controller's owner/name, a published lowercase 40-character `ControllerSha` that remains permanently reachable from the controller default branch, the CI workflow name that the target's `DSH_AUTOMATION_CI_WORKFLOW` variable must contain, and the exact upstream owner/repository audited by supervision. If a controller PR is squash- or rebase-merged, verify that the published commit tree exactly matches the reviewed PR-head tree before pinning the published commit; never pin a PR head from a branch that may be deleted. The offline renderer does not verify GitHub reachability.
 
 GitHub does not start ordinary downstream workflows for labels written by a workflow's own `GITHUB_TOKEN`. Issue opened, reopened, and edited events reevaluate `agent-work:v1`; backlog, reconciliation, and bounded recovery use the supported `repository_dispatch` exception for their Issue and exact-pair review handoffs. Target listeners live on the protected default branch, reusable jobs remain pinned to the published controller SHA, and each worker revalidates the live Issue or exact pull request base/head before any model call. Labels remain observable audit state, never independent execution authority.
 
@@ -59,10 +59,11 @@ pwsh -NoProfile -File F:\dsh-agent-automation\scripts\bootstrap-repository.ps1 `
   -ControllerRepository Ornn8/dsh-agent-automation `
   -ControllerSha 0123456789abcdef0123456789abcdef01234567 `
   -CiWorkflowName "Target CI" `
+  -UpstreamRepository deepseek-ai/deepseek-harness `
   -DryRun
 ```
 
-The checkout argument must name the local Git root exactly. The renderer validates every generated workflow and every staged, unstaged, or untracked overlap before writing any file; use `-Update` only after reviewing that exact replacement. A matching rerun writes nothing. The generated health workflow has separate review and change roles. CI repair and CI-triggered landing subscribe to the rendered literal CI workflow name, then compare `DSH_AUTOMATION_CI_WORKFLOW` again before invoking a controller. Rework forwards that variable to repair, and recovery forwards failed controller runs to the hosted recovery workflow. Set the target variable through the ordinary installer or repository settings before committing the generated files.
+The checkout argument must name the local Git root exactly. The renderer validates every generated workflow and every staged, unstaged, or untracked overlap before writing any file; use `-Update` only after reviewing that exact replacement. A matching rerun writes nothing. The generated health workflow has separate review and change roles. CI repair and CI-triggered landing subscribe to the rendered literal CI workflow name, then compare `DSH_AUTOMATION_CI_WORKFLOW` again before invoking a controller. Rework forwards that variable to repair, recovery forwards failed controller runs to the hosted recovery workflow, and repository supervision runs an offset six-hour schedule plus a manual dry-run entry point against the rendered upstream repository. Set the target variable through the ordinary installer or repository settings before committing the generated files.
 
 ## Autonomous repair budget
 

@@ -27,6 +27,7 @@ $TemplateRoot = Join-Path $PSScriptRoot '..\templates\target\.github\workflows'
 $TemplateRoot = (Resolve-Path -LiteralPath $TemplateRoot).Path
 $sha = '0123456789abcdef0123456789abcdef01234567'
 $repository = 'Ornn8/dsh-agent-automation'
+$upstreamRepository = 'deepseek-ai/deepseek-harness'
 $ciWorkflow = 'Target CI'
 $names = @(
   'agent-health.yml',
@@ -35,6 +36,7 @@ $names = @(
   'agent-pr-land.yml',
   'agent-pr-review.yml',
   'agent-pr-rework.yml',
+  'agent-repository-supervision.yml',
   'agent-recovery.yml'
 )
 $temp = Join-Path ([IO.Path]::GetTempPath()) "dsh-bootstrap-$([Guid]::NewGuid().ToString('N'))"
@@ -48,7 +50,8 @@ try {
     '-TargetCheckout', $temp,
     '-ControllerRepository', $repository,
     '-ControllerSha', $sha,
-    '-CiWorkflowName', $ciWorkflow
+    '-CiWorkflowName', $ciWorkflow,
+    '-UpstreamRepository', $upstreamRepository
   )
   Invoke-Bootstrap -Arguments ($arguments + '-DryRun')
   Assert-True (-not (Test-Path -LiteralPath (Join-Path $temp '.github\workflows\agent-health.yml'))) 'Dry run wrote a target workflow.'
@@ -61,6 +64,7 @@ try {
     $expected = $expected.Replace('{{CONTROLLER_SHA}}', $sha)
     $expected = $expected.Replace('{{CI_WORKFLOW_NAME}}', $ciWorkflow)
     $expected = $expected.Replace('{{CI_WORKFLOW_NAME_JSON}}', ($ciWorkflow | ConvertTo-Json -Compress))
+    $expected = $expected.Replace('{{UPSTREAM_REPOSITORY}}', $upstreamRepository)
     Assert-True ($actual -ceq $expected) "First render of $name did not exactly match its template."
   }
 
@@ -80,6 +84,11 @@ try {
     Assert-True ($workflow -match 'github\.event\.workflow_run\.name == vars\.DSH_AUTOMATION_CI_WORKFLOW') "$name does not retain its CI workflow variable comparison."
   }
   Assert-True ($rendered -match 'recover-backlog\.yml') 'Generated YAML omitted recovery.'
+  $supervisionWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-repository-supervision.yml') -Raw
+  Assert-True ($supervisionWorkflow -match '(?m)^    - cron: ''17 \*/6 \* \* \*''\r?$') 'Repository supervision omitted its offset six-hour schedule.'
+  Assert-True ($supervisionWorkflow -match [Regex]::Escape("upstream_repository: $upstreamRepository")) 'Repository supervision omitted the rendered upstream repository.'
+  Assert-True ($supervisionWorkflow -match [Regex]::Escape("uses: $repository/.github/workflows/repository-supervisor.yml@$sha")) 'Repository supervision omitted the immutable controller workflow.'
+  Assert-True ($supervisionWorkflow -match [Regex]::Escape("apply_changes: `${{ github.event_name == 'schedule' || inputs.apply_changes }}")) 'Repository supervision did not keep manual dry-run and scheduled apply behavior separate.'
   $issuesWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-issues.yml') -Raw
   foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: write', 'pull-requests: write')) {
     Assert-True ($issuesWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent Issues omitted caller permission $permission."
@@ -132,13 +141,22 @@ try {
     '-TargetCheckout', $temp,
     '-ControllerRepository', $repository,
     '-ControllerSha', 'main',
-    '-CiWorkflowName', $ciWorkflow
+    '-CiWorkflowName', $ciWorkflow,
+    '-UpstreamRepository', $upstreamRepository
   ) -ExpectedExitCode 1
   Invoke-Bootstrap -Arguments @(
     '-TargetCheckout', (Join-Path $temp '.github'),
     '-ControllerRepository', $repository,
     '-ControllerSha', $sha,
-    '-CiWorkflowName', $ciWorkflow
+    '-CiWorkflowName', $ciWorkflow,
+    '-UpstreamRepository', $upstreamRepository
+  ) -ExpectedExitCode 1
+  Invoke-Bootstrap -Arguments @(
+    '-TargetCheckout', $temp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', $sha,
+    '-CiWorkflowName', $ciWorkflow,
+    '-UpstreamRepository', 'not-a-repository'
   ) -ExpectedExitCode 1
 
   Write-Output 'bootstrap-repository tests passed.'
