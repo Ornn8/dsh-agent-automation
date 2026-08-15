@@ -29,7 +29,7 @@ on:
 permissions:
   actions: read
   checks: read
-  contents: read
+  contents: write
   issues: write
   pull-requests: write
 
