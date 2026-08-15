@@ -66,8 +66,9 @@ Describe 'Installer and uninstaller fail-closed guards' {
   }
 
   It 'rejects migration confirmation without migration mode' {
+    $missing = Join-Path $TestDrive 'missing.json'
     $output = & pwsh -NoProfile -File (Join-Path $script:RepositoryRoot 'scripts\install.ps1') `
-      -Configuration (Join-Path $script:RepositoryRoot 'config.example.json') -DryRun -ConfirmMigration 2>&1
+      -Configuration $missing -DryRun -ConfirmMigration 2>&1
     $LASTEXITCODE | Should -Not -Be 0
     ($output | Out-String) | Should -Match 'ConfirmMigration requires -Migrate'
   }

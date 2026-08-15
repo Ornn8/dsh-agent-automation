@@ -14,15 +14,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $repoRoot 'ops\Automation.Operations.psm1') -Force
-$loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun -TargetPlatform $TargetPlatform
-$ops = $loaded.Operations
-$runtimeSourceRoot = Join-Path $repoRoot 'ops'
-$runtimeSnapshot = Get-OperationsRuntimeSnapshotDefinition -SourceRoot $runtimeSourceRoot -InstallRoot $ops.installRoot
 if ($ConfirmMigration -and -not $Migrate) { throw '-ConfirmMigration requires -Migrate' }
 if ($Migrate -and -not $DryRun -and -not $ConfirmMigration) { throw 'A state migration requires -ConfirmMigration. Run -Migrate -DryRun first.' }
 $migrationRepositories = @($Repositories | Where-Object { $_ })
 $migrationRoles = @($Roles | Select-Object -Unique)
 if ($Migrate -and ($migrationRepositories.Count -or $migrationRoles.Count -ne 2)) { throw '-Migrate must reconcile the full configured topology; do not combine it with -Repositories or a partial -Roles selection.' }
+$loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun -TargetPlatform $TargetPlatform
+$ops = $loaded.Operations
+$runtimeSourceRoot = Join-Path $repoRoot 'ops'
+$runtimeSnapshot = Get-OperationsRuntimeSnapshotDefinition -SourceRoot $runtimeSourceRoot -InstallRoot $ops.installRoot
 $plan = New-InstallationPlan -Loaded $loaded -Platform $TargetPlatform -Roles $Roles -Repositories $Repositories -NoStart:$NoStart -RuntimeSnapshot $runtimeSnapshot
 $instances = @($plan.runnerInstances)
 if (-not $instances.Count) { throw 'The requested role/repository selection produced no runner instances' }
