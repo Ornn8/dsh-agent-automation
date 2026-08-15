@@ -11,6 +11,7 @@ import {
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
+import { AGENT_REVIEW_SKILL } from './agent-work-result.mjs'
 import {
   githubReviewBody,
   parseReviewMessage,
@@ -142,6 +143,7 @@ const workerReceipt = await runAgentWorker({
     cwd: reviewCheckout,
     title: `[DSH GitHub 审查] ${repository} PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
     prompt,
+    requiredSkill: AGENT_REVIEW_SKILL,
     timeoutMs: 60 * 60 * 1000,
   },
   adapters: createAgentAdapters(),

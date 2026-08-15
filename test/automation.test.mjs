@@ -14,9 +14,11 @@ import {
   authorizedIssueBranch,
   removeJobDirectory,
   resolveRepositoryWorker,
+  run,
   trustedAssociation,
   validateConfigSchemaVersion,
   validateDshWorkerConfig,
+  validateOpenCodeWorkerConfig,
   verifyGithubIdentity,
 } from '../src/common.mjs'
 import {
@@ -41,11 +43,12 @@ import {
   runDshWebSession,
 } from '../src/dsh-web-session.mjs'
 import {
-  DSH_ISSUE_SKILL,
-  DSH_REPAIR_SKILL,
-  dshWorkPrompt,
-  parseDshAutomationResult as parseDshWorkResult,
-} from '../src/dsh-work.mjs'
+  AGENT_REVIEW_SKILL,
+  AGENT_ISSUE_SKILL,
+  AGENT_REPAIR_SKILL,
+  agentWorkPrompt,
+  parseAgentAutomationResult as parseAgentWorkResult,
+} from '../src/agent-work-result.mjs'
 import {
   listAllActiveThreads,
   materializeReviewTask,
@@ -75,10 +78,10 @@ function rpcResponse(request, value, ok = true) {
 function dshFinalMessage(automationResult = {
   version: 1, outcome: 'completed', summary: '任务已完成',
 }) {
-  return `本地会话结束。\n<!-- dsh-automation-result\n${JSON.stringify(automationResult)}\n-->`
+  return `本地会话结束。\n<!-- agent-automation-result\n${JSON.stringify(automationResult)}\n-->`
 }
 
-function visibleSessionFetch(reason = 'completed', automationResult) {
+function visibleSessionFetch(reason = 'completed', automationResult, finalMessage) {
   const calls = []
   let lists = 0
   let sessionId
@@ -93,7 +96,7 @@ function visibleSessionFetch(reason = 'completed', automationResult) {
       case 'session.selectModel': return rpcResponse(request, { selected: request.payload })
       case 'session.rename': return rpcResponse(request, { title: request.payload.title, seq: 1 })
       case 'skill.list': return rpcResponse(request, { skills: [
-        { name: DSH_ISSUE_SKILL }, { name: DSH_REPAIR_SKILL },
+        { name: AGENT_ISSUE_SKILL }, { name: AGENT_REPAIR_SKILL }, { name: AGENT_REVIEW_SKILL },
       ] })
       case 'session.prompt': return rpcResponse(request, { accepted: true })
       case 'session.cancel': return rpcResponse(request, { accepted: true })
@@ -103,7 +106,7 @@ function visibleSessionFetch(reason = 'completed', automationResult) {
       }
       case 'session.history': return rpcResponse(request, {
         events: [
-          { event: { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: dshFinalMessage(automationResult) }] } } } },
+          { event: { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: finalMessage ?? dshFinalMessage(automationResult) }] } } } },
           { event: { type: 'turn/end', data: { turn: 1, reason: { kind: reason } } } },
         ],
       })
@@ -143,7 +146,7 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
     cwd: 'F:\\runner\\checkout',
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
-    requiredSkill: DSH_REPAIR_SKILL,
+    requiredSkill: AGENT_REPAIR_SKILL,
     modelSelection: dshModel,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
@@ -167,28 +170,28 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
   assert.equal(fake.calls[5].rpcId, identity.promptRpcId)
 })
 
-test('DSH work is a structured explicit skill invocation', () => {
-  assert.equal(dshWorkPrompt(DSH_ISSUE_SKILL, {
+test('agent work is a structured explicit skill invocation', () => {
+  assert.equal(agentWorkPrompt(AGENT_ISSUE_SKILL, {
     kind: 'issue', repository: 'owner/repository', issueNumber: 7,
   }), '/github-issue-work {"kind":"issue","repository":"owner/repository","issueNumber":7}')
-  assert.throws(() => dshWorkPrompt('unknown', {}), /Unknown DSH work skill/)
+  assert.throws(() => agentWorkPrompt('unknown', {}), /Unknown agent work skill/)
 })
 
 test('DSH terminal automation results are strict and fail closed', () => {
-  const completed = parseDshWorkResult(dshFinalMessage())
+  const completed = parseAgentWorkResult(dshFinalMessage())
   assert.deepEqual(completed, { version: 1, outcome: 'completed', summary: '任务已完成' })
-  const blocked = parseDshWorkResult(dshFinalMessage({
+  const blocked = parseAgentWorkResult(dshFinalMessage({
     version: 1, outcome: 'blocked', summary: '外部服务不可用', blockedReason: 'cannot-complete',
   }))
   assert.deepEqual(blocked, {
     version: 1, outcome: 'blocked', summary: '外部服务不可用', blockedReason: 'cannot-complete',
   })
-  assert.deepEqual(parseDshWorkResult(dshFinalMessage({
+  assert.deepEqual(parseAgentWorkResult(dshFinalMessage({
     version: 1, outcome: 'blocked', summary: '外部依赖不可用', blockedReason: 'external',
   })), {
     version: 1, outcome: 'blocked', summary: '外部依赖不可用', blockedReason: 'external',
   })
-  const baseline = parseDshWorkResult(dshFinalMessage({
+  const baseline = parseAgentWorkResult(dshFinalMessage({
     version: 1, outcome: 'blocked', summary: '基线 CI 失败', blockedReason: 'ci-baseline',
     issue: { number: 7, url: 'https://github.com/owner/repository/issues/7' },
   }))
@@ -196,19 +199,19 @@ test('DSH terminal automation results are strict and fail closed', () => {
     version: 1, outcome: 'blocked', summary: '基线 CI 失败', blockedReason: 'ci-baseline',
     issue: { number: 7, url: 'https://github.com/owner/repository/issues/7' },
   })
-  assert.throws(() => parseDshWorkResult('<!-- dsh-automation-result\n{"version":1,"outcome":"completed","summary":"ok"}\n-->\nextra'), /must end/)
-  assert.throws(() => parseDshWorkResult(`${dshFinalMessage()}\n${dshFinalMessage()}`), /must end/)
-  assert.throws(() => parseDshWorkResult(dshFinalMessage({
+  assert.throws(() => parseAgentWorkResult('<!-- agent-automation-result\n{"version":1,"outcome":"completed","summary":"ok"}\n-->\nextra'), /must end/)
+  assert.throws(() => parseAgentWorkResult(`${dshFinalMessage()}\n${dshFinalMessage()}`), /must end/)
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
     version: 1, outcome: 'blocked', summary: '缺失 Issue', blockedReason: 'ci-baseline',
   })), /unexpected fields/)
-  assert.throws(() => parseDshWorkResult(dshFinalMessage({
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
     version: 1, outcome: 'blocked', summary: '未知字段', blockedReason: 'cannot-complete', extra: true,
   })), /unexpected fields/)
-  assert.throws(() => parseDshWorkResult(dshFinalMessage({
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
     version: 1, outcome: 'blocked', summary: 'URL 不匹配', blockedReason: 'ci-baseline',
     issue: { number: 7, url: 'https://github.com/owner/repository/issues/8' },
   })), /canonical GitHub HTTPS/)
-  assert.throws(() => parseDshWorkResult(dshFinalMessage({
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
     version: 1, outcome: 'blocked', summary: '非规范 URL', blockedReason: 'ci-baseline',
     issue: { number: 7, url: 'HTTPS://github.com/owner/repository/issues/7' },
   })), /canonical GitHub HTTPS/)
@@ -242,7 +245,7 @@ test('DSH Web fails before prompting when its work plugin is absent', async () =
   }
   await assert.rejects(runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080', taskId: 'plugin-required', cwd: 'F:\\runner\\checkout', title: 'Plugin required',
-    prompt: '/github-issue-work {}', requiredSkill: DSH_ISSUE_SKILL,
+    prompt: '/github-issue-work {}', requiredSkill: AGENT_ISSUE_SKILL,
     modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
   }), /cannot invoke required skill github-issue-work/)
   assert.deepEqual(fake.calls.map(call => call.method), [
@@ -254,11 +257,15 @@ test('the DSH bundle registers only explicit GitHub work skills', async () => {
   const registrations = []
   const plugin = await import('../dsh-plugin/index.js')
   plugin.apply({ skills: { register: skill => registrations.push(skill) } })
-  assert.deepEqual(registrations.map(skill => skill.name), [DSH_ISSUE_SKILL, DSH_REPAIR_SKILL])
+  assert.deepEqual(registrations.map(skill => skill.name), [
+    AGENT_ISSUE_SKILL, AGENT_REPAIR_SKILL, AGENT_REVIEW_SKILL,
+  ])
   for (const skill of registrations) {
     assert.deepEqual(skill.invocation, { modelInvocable: false, userInvocable: true })
-    assert.match(skill.content, /JSON WorkRequest/)
     assert.match(skill.content, /GitHub-visible.*English/)
+  }
+  for (const skill of registrations.filter(skill => skill.name !== AGENT_REVIEW_SKILL)) {
+    assert.match(skill.content, /JSON WorkRequest/)
   }
 })
 
@@ -447,6 +454,56 @@ test('Codex review restores the visible project cwd after isolating the automate
   assert.match(source, /cwd: taskCwd/)
   assert.match(source, /settleReviewTaskMetadata\(call, \{ threadId, title, projectCwd, keep \}\)/)
   assert.match(source, /call\('thread\/settings\/update', \{ threadId, cwd: projectCwd \}\)/)
+})
+
+test('the shared process runner terminates a cancelled adapter process', async () => {
+  const controller = new AbortController()
+  const pending = run(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], {
+    signal: controller.signal,
+    timeoutMs: 5_000,
+  })
+  setTimeout(() => controller.abort(), 25)
+  await assert.rejects(pending, /cancelled/)
+})
+
+test('OpenCode workers declare one complete role-specific CLI selection', () => {
+  assert.doesNotThrow(() => validateOpenCodeWorkerConfig({ workers: {
+    change: {
+      adapter: 'opencode-cli', executable: 'opencode.exe', mode: 'change',
+      model: 'openai/gpt-5', variant: 'high',
+    },
+    review: {
+      adapter: 'opencode-cli', executable: 'opencode.exe', gitExecutable: 'git.exe',
+      mode: 'review', model: 'openai/gpt-5', variant: 'medium',
+    },
+  } }))
+  assert.throws(() => validateOpenCodeWorkerConfig({ workers: {
+    change: { adapter: 'opencode-cli', executable: 'opencode.exe', mode: 'change', variant: 'high' },
+  } }), /workers\.change model/)
+  assert.throws(() => validateOpenCodeWorkerConfig({ workers: {
+    review: {
+      adapter: 'opencode-cli', executable: 'opencode.exe', mode: 'review',
+      model: 'openai/gpt-5', variant: 'medium',
+    },
+  } }), /workers\.review gitExecutable/)
+})
+
+test('DSH Web review returns its final message without requiring a change receipt', async () => {
+  const fake = visibleSessionFetch('completed', undefined, 'VERDICT: PASS')
+  const result = await runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080',
+    taskId: `review-${'1'.repeat(40)}-${'2'.repeat(40)}`,
+    cwd: 'F:\\runner\\checkout',
+    title: '[DSH] Review PR #42',
+    prompt: 'Review it.',
+    requiredSkill: AGENT_REVIEW_SKILL,
+    requiresAutomationResult: false,
+    modelSelection: dshModel,
+    fetchImpl: fake.fetchImpl,
+    sleep: async () => undefined,
+  })
+  assert.equal(result.finalMessage, 'VERDICT: PASS')
+  assert.equal(result.automationResult, undefined)
 })
 
 test('Codex retention reads every active-task page and rejects repeated cursors', async () => {

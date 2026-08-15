@@ -10,10 +10,13 @@ export function run(command, args, options = {}) {
     cwd,
     env = process.env,
     input,
+    onStdout,
+    signal,
     tee = false,
     timeoutMs = 45 * 60 * 1000,
   } = options
 
+  if (signal?.aborted) return Promise.reject(new Error(`${command} was cancelled before start`))
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -28,7 +31,12 @@ export function run(command, args, options = {}) {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
       callback(value)
+    }
+    const abort = () => {
+      child.kill()
+      finish(reject, new Error(`${command} was cancelled`))
     }
     const timer = setTimeout(() => {
       child.kill()
@@ -38,6 +46,12 @@ export function run(command, args, options = {}) {
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString()
       stdout += text
+      try {
+        onStdout?.(text)
+      } catch (error) {
+        child.kill()
+        finish(reject, error)
+      }
       if (tee) process.stdout.write(text)
     })
     child.stderr.on('data', (chunk) => {
@@ -55,6 +69,8 @@ export function run(command, args, options = {}) {
         finish(resolvePromise, result)
       }
     })
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
 
     child.stdin.end(input)
   })
@@ -99,6 +115,7 @@ export async function loadConfig() {
     resolveRepositoryWorker(config, repository, 'review')
   }
   validateDshWorkerConfig(config)
+  validateOpenCodeWorkerConfig(config)
   githubLogin(config)
   return config
 }
@@ -199,6 +216,31 @@ export function actionsCredentialEnvironment(overrides = {}, source = process.en
 /** Return the backtick-delimited branch explicitly declared by an Issue. */
 export function declaredIssueBranch(body) {
   return String(body || '').match(/\b(?:branch|branch name)\s*:?\s*`([^`\r\n]+)`/i)?.[1]?.trim() || ''
+}
+
+/** Validate every OpenCode CLI worker before any task can reach the executable. */
+export function validateOpenCodeWorkerConfig(config) {
+  for (const [workerId, worker] of Object.entries(config?.workers || {})) {
+    if (worker?.adapter !== 'opencode-cli') continue
+    for (const field of ['executable', 'model', 'variant']) {
+      if (typeof worker[field] !== 'string' || !worker[field].trim()) {
+        throw new Error(`workers.${workerId} ${field} must be a non-empty string`)
+      }
+    }
+    if (!/^[^/\s]+\/[^/\s]+$/.test(worker.model)) {
+      throw new Error(`workers.${workerId} model must be provider/model`)
+    }
+    if (!['change', 'review'].includes(worker.mode)) {
+      throw new Error(`workers.${workerId} mode must be change or review`)
+    }
+    if (worker.agent !== undefined && (typeof worker.agent !== 'string' || !worker.agent.trim())) {
+      throw new Error(`workers.${workerId} agent must be a non-empty string`)
+    }
+    if (worker.mode === 'review'
+      && (typeof worker.gitExecutable !== 'string' || !worker.gitExecutable.trim())) {
+      throw new Error(`workers.${workerId} gitExecutable must be a non-empty string for review`)
+    }
+  }
 }
 
 /** Validate one repository branch declared by an automation Issue. */

@@ -8,6 +8,8 @@ import {
 } from './common.mjs'
 import { runReviewTask } from './codex-session.mjs'
 import { dshModelSelection, dshRpc, runDshWebSession } from './dsh-web-session.mjs'
+import { runOpenCodeCli } from './opencode-cli.mjs'
+import { AGENT_REVIEW_SKILL } from './agent-work-result.mjs'
 
 /** Build the machine-local adapter registry used by the Agent Worker module. */
 export function createAgentAdapters({
@@ -30,7 +32,16 @@ export function createAgentAdapters({
           timeoutMs: invocation.timeoutMs,
           signal: invocation.signal,
           onCreated: invocation.onStarted,
+          requiresAutomationResult: invocation.requiredSkill !== AGENT_REVIEW_SKILL,
         })
+        if (invocation.requiredSkill === AGENT_REVIEW_SKILL) {
+          return {
+            sessionId: result.sessionId,
+            outcome: 'completed',
+            detail: '',
+            output: result.finalMessage,
+          }
+        }
         return {
           sessionId: result.sessionId,
           outcome: result.automationResult.outcome,
@@ -90,6 +101,23 @@ export function createAgentAdapters({
             GH_CONFIG_DIR: credentialIsolationDir,
             NO_COLOR: '1',
           }),
+        })
+        return { detail: result.stdout.trim() }
+      },
+    },
+    'opencode-cli': {
+      run: input => runOpenCodeCli({
+        ...input,
+        runCommand,
+        environment: input.worker.mode === 'review'
+          ? reviewerCredentialEnvironment()
+          : hostCredentialEnvironment(),
+      }),
+      health: async ({ worker }) => {
+        const result = await runCommand(worker.executable, ['--version'], {
+          env: worker.mode === 'review'
+            ? reviewerCredentialEnvironment()
+            : hostCredentialEnvironment(),
         })
         return { detail: result.stdout.trim() }
       },

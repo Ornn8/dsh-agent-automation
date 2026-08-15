@@ -7,7 +7,7 @@ const issueSkill = await readFile(new URL('../dsh-plugin/skills/issue.md', impor
 const pluginReadme = await readFile(new URL('../dsh-plugin/README.md', import.meta.url), 'utf8')
 
 function examples(source) {
-  return [...source.matchAll(/<!-- dsh-automation-result\r?\n(\{[^\r\n]+\})\r?\n-->/g)].map(match => JSON.parse(match[1]))
+  return [...source.matchAll(/<!-- agent-automation-result\r?\n(\{[^\r\n]+\})\r?\n-->/g)].map(match => JSON.parse(match[1]))
 }
 
 test('repair Skill hands a proven CI baseline failure to a same-repository Issue', () => {
@@ -27,7 +27,7 @@ test('repair Skill hands a proven CI baseline failure to a same-repository Issue
 
 test('repair Skill defines one hidden, authorization-free completion receipt', () => {
   assert.match(repairSkill, /concise Chinese report followed by exactly one hidden local automation receipt/)
-  assert.match(repairSkill, /`<!-- dsh-automation-result`, then one strict JSON object on its own line, then `-->/)
+  assert.match(repairSkill, /`<!-- agent-automation-result`, then one strict JSON object on its own line, then `-->/)
   const [completed, baseline, external, cannotComplete] = examples(repairSkill)
   assert.deepEqual(completed, { version: 1, outcome: 'completed', summary: '已推进 PR 新提交或已请求同一提交复审。' })
   assert.equal(baseline.outcome, 'blocked')
@@ -49,7 +49,7 @@ test('Issue Skill owns its terminal receipt instead of relying on controller pro
 })
 
 test('plugin documentation keeps the receipt separate from authorization', () => {
-  assert.match(pluginReadme, /final hidden `dsh-automation-result` JSON receipt/)
+  assert.match(pluginReadme, /final hidden `agent-automation-result` JSON receipt/)
   assert.match(pluginReadme, /same-repository Issue/)
   assert.match(pluginReadme, /deterministic `dsh-ci-baseline:v1` body marker/)
   assert.match(pluginReadme, /not an authorization grant/)

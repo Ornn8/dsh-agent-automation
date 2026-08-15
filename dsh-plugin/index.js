@@ -6,6 +6,7 @@ export const inject = ['skills']
 const skills = [
   ['github-issue-work', 'Implement one trusted GitHub Issue and publish its pull request.', 'issue.md'],
   ['github-pr-repair', 'Repair or rebut one exact GitHub pull request head.', 'repair.md'],
+  ['github-pr-review', 'Review one exact pull request base and head without changing it.', 'review.md'],
 ]
 
 /** Register controller-owned GitHub work as explicit DSH skills. */

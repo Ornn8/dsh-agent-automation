@@ -8,14 +8,14 @@ Before pushing, re-read the live branch and Issue so stale work cannot overwrite
 
 End the final assistant message with a concise Chinese report followed by exactly one hidden local automation receipt and no text after it. Use `completed` only after the pull request exists at the pushed head. Use `external` only for an unavailable external dependency, denied access, or missing owner input; use `cannot-complete` for any other safe terminal block. Do not add other fields.
 
-<!-- dsh-automation-result
+<!-- agent-automation-result
 {"version":1,"outcome":"completed","summary":"已完成 Issue 并提交 PR。"}
 -->
 
-<!-- dsh-automation-result
+<!-- agent-automation-result
 {"version":1,"outcome":"blocked","blockedReason":"external","summary":"外部依赖不可用，无法在本会话中安全完成。"}
 -->
 
-<!-- dsh-automation-result
+<!-- agent-automation-result
 {"version":1,"outcome":"blocked","blockedReason":"cannot-complete","summary":"无法在本会话中安全完成该 Issue。"}
 -->

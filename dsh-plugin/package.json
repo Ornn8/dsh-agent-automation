@@ -1,7 +1,7 @@
 {
   "name": "dsh-github-work",
-  "version": "0.1.0",
-  "description": "Explicit GitHub Issue and pull request repair Skills for DeepSeek Harness.",
+  "version": "0.2.0",
+  "description": "Explicit GitHub Issue, pull request repair, and review Skills for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
   "main": "index.js",
