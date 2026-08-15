@@ -30,6 +30,7 @@ import {
   selectBacklogWork,
   trustedBlockedReviewProof,
   trustedCiFailure,
+  trustedCiRerunSuccess,
 } from '../src/dispatch-policy.mjs'
 import {
   automaticRepairRequestId,
@@ -1137,6 +1138,30 @@ test('only exact failed configured CI evidence for the current head may wake DSH
   assert.equal(trustedCiFailure({ run, ...expected, pullRequestNumber: 13 }), false)
   assert.equal(trustedCiFailure({ run, ...expected, expectedHead: 'b'.repeat(40) }), false)
   assert.equal(trustedCiFailure({ run, ...expected, workflowName: '' }), false)
+})
+
+test('CI repair accepts only a successful later attempt of the same exact-head run', () => {
+  const priorRun = {
+    id: 31767661165,
+    run_attempt: 1,
+    name: 'CI',
+    status: 'completed',
+    conclusion: 'failure',
+    head_sha: 'a'.repeat(40),
+    pull_requests: [{ number: 12 }],
+  }
+  const currentRun = {
+    ...priorRun,
+    run_attempt: 2,
+    conclusion: 'success',
+  }
+  const expected = { pullRequestNumber: 12, expectedHead: 'a'.repeat(40), workflowName: 'CI' }
+  assert.equal(trustedCiRerunSuccess({ priorRun, currentRun, ...expected }), true)
+  assert.equal(trustedCiRerunSuccess({ priorRun, currentRun: { ...currentRun, id: 99 }, ...expected }), false)
+  assert.equal(trustedCiRerunSuccess({ priorRun, currentRun: { ...currentRun, run_attempt: 1 }, ...expected }), false)
+  assert.equal(trustedCiRerunSuccess({ priorRun, currentRun: { ...currentRun, conclusion: 'failure' }, ...expected }), false)
+  assert.equal(trustedCiRerunSuccess({ priorRun, currentRun: { ...currentRun, head_sha: 'b'.repeat(40) }, ...expected }), false)
+  assert.equal(trustedCiRerunSuccess({ priorRun, currentRun: { ...currentRun, pull_requests: [{ number: 13 }] }, ...expected }), false)
 })
 
 test('trustedAssociation limits privileged dispatch', () => {

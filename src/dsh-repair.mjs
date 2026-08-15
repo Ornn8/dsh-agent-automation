@@ -19,6 +19,7 @@ import {
   ciRepairRequest,
   explicitReworkCommand,
   trustedCiFailure,
+  trustedCiRerunSuccess,
 } from './dispatch-policy.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
@@ -337,16 +338,29 @@ try {
       process.stdout.write(`DSH ended repair for pull request #${pullRequestNumber} with ${blocked.reason}; no retry was scheduled.\n`)
     } else {
       const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
+      const currentCiRun = ciRequest
+        ? await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run after repair')
+        : null
       if (current.head.sha !== expectedHead) {
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; GitHub will review the newer head.`)
         process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
+      } else if (ciRequest && trustedCiRerunSuccess({
+        priorRun: ciRun,
+        currentRun: currentCiRun,
+        pullRequestNumber,
+        expectedHead,
+        workflowName: ciWorkflowName,
+      })) {
+        await setRepairLabels({ remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
+        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
+        process.stdout.write(`${workerId} repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
       } else if (!ciRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
         process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
       } else {
-        throw new Error('DSH exited successfully without advancing the head or requesting the documented same-head rereview')
+        throw new Error('DSH exited successfully without advancing the head or proving the documented same-head completion')
       }
     }
   }
