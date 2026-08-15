@@ -7,7 +7,7 @@ import {
   run,
 } from './common.mjs'
 import { runReviewTask } from './codex-session.mjs'
-import { dshModelSelection, dshRpc, runDshWebSession } from './dsh-web-session.mjs'
+import { dshModelSelection, dshRpc, dshSessionPresets, runDshWebSession } from './dsh-web-session.mjs'
 import { runOpenCodeCli } from './opencode-cli.mjs'
 import { runClaudeCodeCli } from './claude-code-cli.mjs'
 import { AGENT_REVIEW_SKILL } from './agent-work-result.mjs'
@@ -22,6 +22,7 @@ export function createAgentAdapters({
   return {
     'dsh-web': {
       run: async ({ worker, invocation }) => {
+        const presets = dshSessionPresets(worker)
         const result = await runDshSession({
           baseUrl: worker.baseUrl,
           taskId: invocation.taskId,
@@ -30,6 +31,8 @@ export function createAgentAdapters({
           prompt: invocation.prompt,
           requiredSkill: invocation.requiredSkill,
           modelSelection: dshModelSelection(worker),
+          agentPreset: presets.agentPreset,
+          permissionPreset: presets.permissionPreset,
           timeoutMs: invocation.timeoutMs,
           signal: invocation.signal,
           onCreated: invocation.onStarted,

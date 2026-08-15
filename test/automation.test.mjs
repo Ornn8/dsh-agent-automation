@@ -40,6 +40,7 @@ import {
   dshModelSelection,
   dshRpc,
   dshSessionIdentity,
+  dshSessionPresets,
   localDshWebBaseUrl,
   runDshWebSession,
 } from '../src/dsh-web-session.mjs'
@@ -118,18 +119,23 @@ function visibleSessionFetch(reason = 'completed', automationResult, finalMessag
 }
 
 const dshModel = { provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max' }
+const dshPresets = { agentPreset: 'standard', permissionPreset: 'danger-full-access' }
 
 test('DSH Web sessions stay on the loopback Host', () => {
   assert.equal(localDshWebBaseUrl('http://localhost:3080'), 'http://localhost:3080')
   assert.throws(() => localDshWebBaseUrl('https://example.com'), /loopback/)
 })
 
-test('DSH model selection configuration is complete and fails closed', () => {
+test('DSH model and session preset configuration is complete and fails closed', () => {
   assert.deepEqual(dshModelSelection({ provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'max' }), dshModel)
+  assert.deepEqual(dshSessionPresets(dshPresets), dshPresets)
   assert.throws(() => dshModelSelection({ provider: 'opencode-go', model: 'deepseek-v4-flash' }), /reasoningEffort/)
   assert.throws(() => validateDshWorkerConfig({ workers: {
     dsh: { adapter: 'dsh-web', baseUrl: 'http://127.0.0.1:3080', provider: 'opencode-go', model: 'deepseek-v4-flash' },
   } }), /workers\.dsh.*reasoningEffort/)
+  assert.throws(() => validateDshWorkerConfig({ workers: {
+    dsh: { adapter: 'dsh-web', baseUrl: 'http://127.0.0.1:3080', ...dshModel, agentPreset: 'standard' },
+  } }), /workers\.dsh.*permissionPreset/)
 })
 
 test('the controller rejects the removed configuration schema before starting a worker', () => {
@@ -149,6 +155,7 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
     prompt: 'Do the work.',
     requiredSkill: AGENT_REPAIR_SKILL,
     modelSelection: dshModel,
+    ...dshPresets,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
     onCreated: async value => { created = value },
@@ -161,14 +168,16 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
   })
   assert.deepEqual(created, { sessionId: identity.sessionId })
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.selectModel', 'session.rename', 'skill.list', 'session.history', 'session.prompt',
+    'session.create', 'session.selectModel', 'session.rename', 'session.prompt', 'skill.list', 'session.history', 'session.prompt',
     'session.list', 'session.list', 'session.history',
   ])
-  assert.deepEqual(fake.calls[0].payload, { cwd: 'F:\\runner\\checkout', sessionId: identity.sessionId })
+  assert.deepEqual(fake.calls[0].payload, { cwd: 'F:\\runner\\checkout', sessionId: identity.sessionId, agentPreset: 'standard' })
   assert.deepEqual(fake.calls[1].payload, { sessionId: identity.sessionId, ...dshModel })
-  assert.deepEqual(fake.calls[3].payload, { sessionId: identity.sessionId })
-  assert.equal(fake.calls[5].payload.content[0].text, 'Do the work.')
-  assert.equal(fake.calls[5].rpcId, identity.promptRpcId)
+  assert.equal(fake.calls[3].payload.content[0].text, '/permission danger-full-access')
+  assert.equal(fake.calls[3].rpcId, identity.permissionRpcId)
+  assert.deepEqual(fake.calls[4].payload, { sessionId: identity.sessionId })
+  assert.equal(fake.calls[6].payload.content[0].text, 'Do the work.')
+  assert.equal(fake.calls[6].rpcId, identity.promptRpcId)
 })
 
 test('agent work is a structured explicit skill invocation', () => {
@@ -231,6 +240,7 @@ test('DSH Web refuses a receipt from an earlier turn', async () => {
   await assert.rejects(runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080', taskId: 'old-receipt', cwd: 'F:\\runner\\checkout',
     title: 'Old receipt', prompt: 'Work.', modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
+    ...dshPresets,
   }), /without a final assistant message/)
 })
 
@@ -247,10 +257,10 @@ test('DSH Web fails before prompting when its work plugin is absent', async () =
   await assert.rejects(runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080', taskId: 'plugin-required', cwd: 'F:\\runner\\checkout', title: 'Plugin required',
     prompt: '/github-issue-work {}', requiredSkill: AGENT_ISSUE_SKILL,
-    modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
+    modelSelection: dshModel, ...dshPresets, fetchImpl, sleep: async () => undefined,
   }), /cannot invoke required skill github-issue-work/)
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.selectModel', 'session.rename', 'skill.list', 'session.cancel',
+    'session.create', 'session.selectModel', 'session.rename', 'session.prompt', 'skill.list', 'session.cancel',
   ])
 })
 
@@ -296,6 +306,7 @@ test('DSH Web session interruption fails the controller', async () => {
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
     modelSelection: dshModel,
+    ...dshPresets,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
   }), /ended with interrupted/)
@@ -313,9 +324,30 @@ test('DSH model selection failure reaches the durable worker failure without pro
   }
   await assert.rejects(runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080', taskId: 'select-model', cwd: 'F:\\runner\\checkout', title: 'Select model', prompt: 'Work.',
-    modelSelection: dshModel, fetchImpl, sleep: async () => undefined,
+    modelSelection: dshModel, ...dshPresets, fetchImpl, sleep: async () => undefined,
   }), /session\.selectModel failed: model-unavailable/)
   assert.deepEqual(fake.calls.map(call => call.method), ['session.create', 'session.selectModel', 'session.cancel'])
+})
+
+test('DSH permission preset failure stops before skill invocation or work prompting', async () => {
+  const fake = visibleSessionFetch()
+  const fetchImpl = async (url, options) => {
+    const request = JSON.parse(options.body)
+    if (request.method === 'session.prompt'
+      && request.payload.content[0]?.text === '/permission danger-full-access') {
+      fake.calls.push(request)
+      return rpcResponse(request, { code: 'command-error', message: 'unknown permission preset' }, false)
+    }
+    return fake.fetchImpl(url, options)
+  }
+  await assert.rejects(runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080', taskId: 'select-permission', cwd: 'F:\\runner\\checkout',
+    title: 'Select permission', prompt: 'Work.', modelSelection: dshModel, ...dshPresets,
+    requiredSkill: AGENT_ISSUE_SKILL, fetchImpl, sleep: async () => undefined,
+  }), /session\.prompt failed: command-error/)
+  assert.deepEqual(fake.calls.map(call => call.method), [
+    'session.create', 'session.selectModel', 'session.rename', 'session.prompt', 'session.cancel',
+  ])
 })
 
 test('a transient DSH RPC reset retries with one id and resumes the original session', async () => {
@@ -367,6 +399,9 @@ test('a lost prompt response resumes the one durable DSH prompt instead of dupli
     if (request.method === 'session.selectModel') return rpcResponse(request, { selected: true })
     if (request.method === 'session.rename') return rpcResponse(request, { title: request.payload.title, seq: 1 })
     if (request.method === 'session.prompt') {
+      if (request.payload.content[0]?.text === '/permission danger-full-access') {
+        return rpcResponse(request, { accepted: true, command: { kind: 'success' } })
+      }
       promptRpcId = request.rpcId
       recorded = true
       const error = new Error('socket reset after admission')
@@ -388,10 +423,11 @@ test('a lost prompt response resumes the one durable DSH prompt instead of dupli
   const result = await runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080', taskId: 'lost-response', cwd: 'F:\\runner\\checkout',
     title: 'Resume prompt', prompt: 'Work.', modelSelection: dshModel,
+    ...dshPresets,
     fetchImpl, sleep: async () => undefined,
   })
   assert.equal(result.reason, 'completed')
-  assert.equal(methods.filter(method => method === 'session.prompt').length, 1)
+  assert.equal(methods.filter(method => method === 'session.prompt').length, 2)
 })
 
 test('a bounded transient DSH failure remains classified for the durable dead-letter', async () => {
@@ -408,6 +444,7 @@ test('a cancellation signal cancels the original visible DSH session', async () 
   const result = runDshWebSession({
     baseUrl: 'http://127.0.0.1:3080', taskId: 'cancel', cwd: 'F:\\runner\\checkout', title: 'Cancel me', prompt: 'Work.',
     modelSelection: dshModel,
+    ...dshPresets,
     fetchImpl: fake.fetchImpl, sleep: async () => { controller.abort() }, signal: controller.signal,
   })
   await assert.rejects(result, /cancelled by controller signal/)
@@ -424,6 +461,7 @@ test('DSH Web session timeout cancels the controller-owned turn', async () => {
     title: '[DSH] 修复 PR #12',
     prompt: 'Do the work.',
     modelSelection: dshModel,
+    ...dshPresets,
     timeoutMs: 1,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
@@ -528,6 +566,7 @@ test('DSH Web review returns its final message without requiring a change receip
     requiredSkill: AGENT_REVIEW_SKILL,
     requiresAutomationResult: false,
     modelSelection: dshModel,
+    ...dshPresets,
     fetchImpl: fake.fetchImpl,
     sleep: async () => undefined,
   })

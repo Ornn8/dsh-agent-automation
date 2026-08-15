@@ -3,6 +3,7 @@ param(
   [Parameter(Mandatory)][string]$Configuration,
   [Parameter(Mandatory)][ValidateSet('change', 'review', 'dsh-web')][string]$Component,
   [string]$Repository,
+  [ValidateRange(1, 8)][int]$Replica = 1,
   [Parameter(Mandatory)][ValidateSet('status', 'start', 'stop', 'restart', 'fault')][string]$Action
 )
 
@@ -15,6 +16,7 @@ $ops = $loaded.Operations
 
 if ($Component -eq 'dsh-web') {
   if ($Repository) { throw '-Repository is not valid for the host-wide dsh-web component' }
+  if ($PSBoundParameters.ContainsKey('Replica')) { throw '-Replica is not valid for the host-wide dsh-web component' }
   if (-not $ops.dshWebHost.enabled) { throw 'dsh-web is disabled in configuration' }
   $target = [pscustomobject]@{
     Id = 'dsh-web'
@@ -25,7 +27,7 @@ if ($Component -eq 'dsh-web') {
   if ($ops.controller.registrationScope -eq 'target-repositories' -and [string]::IsNullOrWhiteSpace($Repository)) { throw '-Repository is required in target-repositories mode so exactly one runner is selected' }
   if ($ops.controller.registrationScope -eq 'organization' -and $Repository) { throw '-Repository is not valid in organization mode because each role is shared' }
   $repositories = if ($Repository) { @($Repository) } else { @() }
-  $matches = @(Get-RunnerInstances -Loaded $loaded -Roles @($Component) -Repositories $repositories)
+  $matches = @(Get-RunnerInstances -Loaded $loaded -Roles @($Component) -Repositories $repositories | Where-Object { $_.Replica -eq $Replica })
   if ($matches.Count -ne 1) { throw "Component selection must resolve exactly one instance; got $($matches.Count)" }
   $target = $matches[0]
 }

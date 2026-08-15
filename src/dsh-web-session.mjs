@@ -53,12 +53,27 @@ export function dshModelSelection(value) {
   return selection
 }
 
+/** Validate the DSH-owned agent and permission presets selected for a session. */
+export function dshSessionPresets(value) {
+  if (!value || typeof value !== 'object') throw new Error('DSH worker must declare session presets')
+  const presets = {}
+  for (const field of ['agentPreset', 'permissionPreset']) {
+    if (typeof value[field] !== 'string' || !value[field].trim()) {
+      throw new Error(`DSH worker ${field} must be a non-empty string`)
+    }
+    if (/[\r\n]/.test(value[field])) throw new Error(`DSH worker ${field} must be one line`)
+    presets[field] = value[field].trim()
+  }
+  return presets
+}
+
 /** Derive one stable visible session and prompt identity from a controller task. */
 export function dshSessionIdentity(taskId) {
   if (typeof taskId !== 'string' || !taskId.trim()) throw new Error('taskId must be a non-empty string')
   const digest = createHash('sha256').update(taskId).digest('hex')
   return {
     sessionId: `dsh-github-${digest.slice(0, 40)}`,
+    permissionRpcId: `github-agent-permission-${digest}`,
     promptRpcId: `github-agent-prompt-${digest}`,
   }
 }
@@ -115,6 +130,8 @@ export async function runDshWebSession({
   rpcAttempts = 3,
   signal,
   modelSelection,
+  agentPreset,
+  permissionPreset,
   requiredSkill,
   requiresAutomationResult = true,
 }) {
@@ -123,8 +140,13 @@ export async function runDshWebSession({
     maxAttempts: rpcAttempts, sleep, signal,
   })
   const selectedModel = dshModelSelection(modelSelection)
+  const selectedPresets = dshSessionPresets({ agentPreset, permissionPreset })
   const identity = dshSessionIdentity(taskId)
-  const created = await rpc('session.create', { cwd, sessionId: identity.sessionId })
+  const created = await rpc('session.create', {
+    cwd,
+    sessionId: identity.sessionId,
+    agentPreset: selectedPresets.agentPreset,
+  })
   const sessionId = created?.sessionId
   if (typeof sessionId !== 'string' || !sessionId) throw new Error('DSH Web Host did not return a session id')
   if (sessionId !== identity.sessionId) throw new Error('DSH Web Host returned a different preallocated session id')
@@ -133,6 +155,16 @@ export async function runDshWebSession({
   try {
     await rpc('session.selectModel', { sessionId, ...selectedModel })
     await rpc('session.rename', { sessionId, title })
+    await dshRpc(endpoint, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: `/permission ${selectedPresets.permissionPreset}` }],
+    }, fetchImpl, {
+      maxAttempts: rpcAttempts,
+      rpcId: identity.permissionRpcId,
+      sleep,
+      signal,
+    })
     if (requiredSkill) {
       const catalog = await rpc('skill.list', { sessionId })
       if (!catalog?.skills?.some(skill => skill?.name === requiredSkill)) {
