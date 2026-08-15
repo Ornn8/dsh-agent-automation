@@ -110,6 +110,7 @@ pwsh -NoProfile -File "$controller\scripts\bootstrap-repository.ps1" `
   -ControllerRepository owner/dsh-agent-automation `
   -ControllerSha 0123456789abcdef0123456789abcdef01234567 `
   -CiWorkflowName 'CI' `
+  -UpstreamRepository upstream-owner/upstream-repository `
   -DryRun
 pwsh -NoProfile -File "$controller\scripts\test-operations.ps1"
 pwsh -NoProfile -File "$controller\scripts\test-bootstrap-repository.ps1"

@@ -12,6 +12,9 @@ param(
   [Parameter(Mandatory)]
   [string]$CiWorkflowName,
 
+  [Parameter(Mandatory)]
+  [string]$UpstreamRepository,
+
   [switch]$Update,
   [switch]$DryRun
 )
@@ -26,6 +29,7 @@ $workflowNames = @(
   'agent-pr-land.yml',
   'agent-pr-review.yml',
   'agent-pr-rework.yml',
+  'agent-repository-supervision.yml',
   'agent-recovery.yml'
 )
 
@@ -37,8 +41,12 @@ function Require-Value {
 Require-Value -Name 'ControllerRepository' -Value $ControllerRepository
 Require-Value -Name 'ControllerSha' -Value $ControllerSha
 Require-Value -Name 'CiWorkflowName' -Value $CiWorkflowName
+Require-Value -Name 'UpstreamRepository' -Value $UpstreamRepository
 if ($ControllerRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'ControllerRepository must be an owner/repository name.'
+}
+if ($UpstreamRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+  throw 'UpstreamRepository must be an owner/repository name.'
 }
 if ($ControllerSha -notmatch '^[0-9a-f]{40}$') {
   throw 'ControllerSha must be a lowercase full 40-character commit SHA.'
@@ -73,6 +81,7 @@ $replacements = @{
   '{{CONTROLLER_SHA}}' = $ControllerSha
   '{{CI_WORKFLOW_NAME}}' = $CiWorkflowName
   '{{CI_WORKFLOW_NAME_JSON}}' = ($CiWorkflowName | ConvertTo-Json -Compress)
+  '{{UPSTREAM_REPOSITORY}}' = $UpstreamRepository
 }
 $utf8 = [Text.UTF8Encoding]::new($false)
 $plan = @()
