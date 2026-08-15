@@ -201,6 +201,18 @@ export function declaredIssueBranch(body) {
   return String(body || '').match(/\b(?:branch|branch name)\s*:?\s*`([^`\r\n]+)`/i)?.[1]?.trim() || ''
 }
 
+/** Validate one repository branch declared by an automation Issue. */
+export function validateIssueBranch(branch) {
+  if (typeof branch !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(branch)
+    || branch.includes('..')
+    || branch.includes('@{')
+    || branch.endsWith('.')
+    || branch.endsWith('/')) {
+    throw new Error(`The Issue declares an unsafe branch name: ${String(branch)}`)
+  }
+  return branch
+}
+
 /** Parse and validate the branch declared by an automation Issue. */
 export function issueBranch(body, fallback) {
   const branch = declaredIssueBranch(body)
@@ -208,14 +220,7 @@ export function issueBranch(body, fallback) {
     return `agent/issue-${fallback.number}`
   }
   if (!branch) throw new Error('The Issue must declare a backtick-delimited branch name')
-  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(branch)
-    || branch.includes('..')
-    || branch.includes('@{')
-    || branch.endsWith('.')
-    || branch.endsWith('/')) {
-    throw new Error(`The Issue declares an unsafe branch name: ${branch}`)
-  }
-  return branch
+  return validateIssueBranch(branch)
 }
 
 /** Return whether an Issue author may dispatch the privileged local agent. */
