@@ -39,15 +39,10 @@ BeforeAll {
   function New-HostConfigPath {
     param([Parameter(Mandatory)][string]$Destination)
     $config = Get-Content (Join-Path $script:RepositoryRoot 'config.example.json') -Raw | ConvertFrom-Json -Depth 32
-    if ($IsWindows) {
-      $config.operations.installRoot = 'F:\agent-automation-test\runtime'
-      $config.operations.stateRoot = 'F:\agent-automation-test\state'
-      $config.operations.logsRoot = 'F:\agent-automation-test\state\logs'
-    } else {
-      $config.operations.installRoot = '/tmp/agent-automation-test/runtime'
-      $config.operations.stateRoot = '/tmp/agent-automation-test/state'
-      $config.operations.logsRoot = '/tmp/agent-automation-test/state/logs'
-    }
+    $fixtureRoot = Join-Path $script:RepositoryRoot '.agent-automation-test'
+    $config.operations.installRoot = Join-Path $fixtureRoot 'runtime'
+    $config.operations.stateRoot = Join-Path $fixtureRoot 'state'
+    $config.operations.logsRoot = Join-Path $fixtureRoot 'state/logs'
     $config.repositories = @('example/plan-fixture')
     $config.operations.repositoryMappings[0].repository = 'example/plan-fixture'
     $config.operations.runner.artifacts | Add-Member -NotePropertyName 'linux-x64' -NotePropertyValue ([pscustomobject]@{
@@ -69,6 +64,8 @@ Describe 'Portable installation plan' {
     $instances = @(Get-RunnerInstances -Loaded $loaded)
 
     $plan.platform.id | Should -Match '^(windows|linux|macos)-(x64|arm64)$'
+    [IO.Path]::GetPathRoot($loaded.Operations.installRoot) |
+      Should -BeExactly ([IO.Path]::GetPathRoot($script:RepositoryRoot))
     $plan.paths[0].path | Should -BeExactly $loaded.Operations.installRoot
     $instances | Should -HaveCount 5
     foreach ($instance in $instances) {
