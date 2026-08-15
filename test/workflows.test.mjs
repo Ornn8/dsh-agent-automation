@@ -30,4 +30,5 @@ test('Codex publication is job-scoped and landing is a separate workflow', async
   assert.match(landing, /REQUIRED_CHECKS_JSON: \$\{\{ inputs\.required_checks_json \}\}/)
   assert.doesNotMatch(landingController, /branches\/.*\/protection/)
   assert.match(landingController, /requiredCheckNames\.map\(context => \(\{ context, app_id: 15368 \}\)\)/)
+  assert.match(landingController, /--body', current\.body \|\| ''/)
 })
