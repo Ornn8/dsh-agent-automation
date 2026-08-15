@@ -108,6 +108,8 @@ Migration always reconciles the full configured topology and rejects `-Repositor
 
 Normal doctor reconciles the desired instances with the manifest and discovered tasks/directories, verifies every runtime file hash and every task's exact snapshot script path, then checks every expected ACL, task/PID pair, fresh heartbeat, executable, obsolete-controller state, and DSH Web Host task/PID pair. A deliberately offline manifest entry does not require a heartbeat. A different checkout hash is reported as a required explicit migration; it does not alter the running snapshot. `-Online` additionally verifies the GitHub principal, both mapped JSON routing variables, every app-bound required check, and the loopback DSH RPC health endpoint. It diagnoses only; it does not repair or restart anything.
 
+Heartbeat timestamps are parsed as UTC independently of the host time zone. A fresh supervisor heartbeat therefore has the same readiness meaning on UTC and non-UTC Windows hosts.
+
 ## Exact service control and fault injection
 
 In target-repository mode, a worker command requires its repository. `-Replica` defaults to 1 and selects one exact runner:
