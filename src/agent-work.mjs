@@ -83,3 +83,16 @@ export function resolveAgentWorkDispatch(body, issueNumber, requestId) {
   }
   return work ? { work, branch: agentWorkBranch(work, issueNumber) } : null
 }
+
+/** Return dependencies that are still open after rereading their live Issue state. */
+export async function openAgentWorkDependencies(work, readIssue) {
+  const issues = await Promise.all(work.dependsOn.map(number => readIssue(number)))
+  return issues.map((issue, index) => {
+    const expectedNumber = work.dependsOn[index]
+    if (issue?.number !== expectedNumber || issue.pull_request
+      || !['open', 'closed'].includes(issue.state)) {
+      throw new Error(`agent-work:v1 dependency #${expectedNumber} must reference an Issue`)
+    }
+    return issue
+  }).filter(issue => issue.state === 'open').map(issue => issue.number)
+}

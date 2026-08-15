@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   agentWorkBranch,
   agentWorkRequestId,
+  openAgentWorkDependencies,
   parseAgentWork,
   resolveAgentWorkDispatch,
 } from '../src/agent-work.mjs'
@@ -80,8 +81,8 @@ test('agent-work:v1 request identity follows canonical work fields, not formatti
 
 test('Agent Issues reevaluates work declarations when trusted Issues change', async () => {
   const workflow = await readFile(new URL('../templates/target/.github/workflows/agent-issues.yml', import.meta.url), 'utf8')
-  assert.match(workflow, /types: \[opened, reopened, edited, labeled\]/)
-  assert.match(workflow, /contains\(fromJSON\('\["opened","reopened","edited"\]'\), github\.event\.action\)/)
+  assert.match(workflow, /types: \[opened, reopened, edited, closed, labeled\]/)
+  assert.match(workflow, /contains\(fromJSON\('\["opened","reopened","edited","closed"\]'\), github\.event\.action\)/)
 })
 
 test('agent-work:v1 chooses its explicit branch or a deterministic Issue branch', () => {
@@ -109,6 +110,18 @@ test('the Issue worker rejects a stale agent-work dispatch before starting an ag
     /changed after dispatch/,
   )
   assert.throws(() => resolveAgentWorkDispatch('The declaration was removed.', 40, requestId), /changed after dispatch/)
+})
+
+test('the Issue worker rechecks live dependencies before starting an agent', async () => {
+  const work = {
+    version: 1, dispatch: 'ready', role: 'change', kind: 'implementation', dependsOn: [12, 14],
+  }
+  const states = new Map([[12, 'closed'], [14, 'open']])
+  assert.deepEqual(await openAgentWorkDependencies(work, async number => ({ number, state: states.get(number) })), [14])
+  await assert.rejects(
+    openAgentWorkDependencies(work, async number => ({ number, state: 'closed', pull_request: {} })),
+    /must reference an Issue/,
+  )
 })
 
 test('public documentation gives repositories one agent-neutral Issue template', async () => {

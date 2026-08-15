@@ -72,7 +72,7 @@ A trusted repository owner, member, or collaborator can queue change work by pla
 
 `version`, `dispatch`, `role`, `kind`, and `dependsOn` are required. `dispatch` is either `ready` or `hold`; `dispatch: "hold"` does not start a Worker. The current role is `change`. Supported kinds are `implementation`, `bug-fix`, `integration`, and `documentation`. `dependsOn` contains unique Issue numbers and work waits while any listed Issue remains open. `branch` is optional and defaults to `agent/issue-<number>`.
 
-Opening, reopening, or editing the Issue reevaluates the declaration. The parser accepts one strict JSON object; unknown fields fail closed, as do duplicate declarations, invalid values, and unsafe branches. Formatting-only edits keep the same idempotency key, while a routing-field change receives a new key. Do not put shell commands, credentials, agent names, implementation instructions, or acceptance criteria in the routing object.
+Opening, reopening, or editing the Issue reevaluates the declaration, and closing a dependency reevaluates the backlog. The worker rereads every dependency immediately before a model starts. The parser accepts one strict JSON object; unknown fields fail closed, as do duplicate declarations, invalid values, and unsafe branches. Formatting-only edits keep the same idempotency key, while a routing-field change receives a new key. Do not put shell commands, credentials, agent names, implementation instructions, or acceptance criteria in the routing object.
 
 ## Current behavior
 

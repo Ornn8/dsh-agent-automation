@@ -20,7 +20,7 @@ import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import { baselineIssueWorkItem } from './baseline-issue.mjs'
 import { DSH_ISSUE_SKILL, dshWorkPrompt } from './dsh-work.mjs'
-import { resolveAgentWorkDispatch } from './agent-work.mjs'
+import { openAgentWorkDependencies, resolveAgentWorkDispatch } from './agent-work.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
@@ -111,6 +111,17 @@ if (validExisting) {
 }
 if (existing.length > 0) {
   throw new Error(`Issue #${issueNumber} branch ${branch} is already used by another open pull request`)
+}
+
+if (agentWork) {
+  const openDependencies = await openAgentWorkDependencies(agentWork, number => ghJson([
+    'api', `repos/${repository}/issues/${number}`,
+  ], `Issue dependency #${number}`))
+  if (openDependencies.length > 0) {
+    await upsertStatus(statusBody('waiting', branch, `Open dependencies: ${openDependencies.map(number => `#${number}`).join(', ')}`))
+    process.stdout.write(`Issue #${issueNumber} is waiting for ${openDependencies.map(number => `#${number}`).join(', ')}.\n`)
+    process.exit(0)
+  }
 }
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-issue-${issueNumber}-`))
