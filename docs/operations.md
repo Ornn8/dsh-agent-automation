@@ -71,6 +71,8 @@ The checkout argument must name the local Git root exactly. The renderer validat
 
 Automatic exact-review and failed-CI repair consumes at most six distinct controller-authored status markers for one pull request and one controller SHA. Each marker records the controller SHA and whether it represents automatic review, automatic CI, or explicit human repair. At the limit, the controller writes an English dead-letter status, adds `agent/dsh-failed`, clears automatic repair labels, and exits successfully without invoking a model, so recovery cannot recurse. A trusted explicit rework comment remains independently eligible and does not consume the automatic budget.
 
+A same-head technical rebuttal requests review by adding `automation/review-ready`. The review listener may consume that label before the repair process resumes; repair therefore records the exact-head review CheckRuns that existed before the Agent started and also accepts a new GitHub Actions-owned `codex/review` CheckRun as proof that the handoff occurred.
+
 ## Validate and install
 
 These checks have no destructive or remote effect:

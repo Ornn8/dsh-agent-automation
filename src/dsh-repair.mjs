@@ -1,5 +1,6 @@
 import { mkdtemp } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import {
   hostCredentialEnvironment,
   githubLogin,
@@ -36,6 +37,10 @@ import {
 import { isReviewRepairRequestId } from './work-request.mjs'
 import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
+import { hasNewReviewCheck, trustedReviewCheckIds } from './review-check.mjs'
+
+const REREVIEW_OBSERVATION_ATTEMPTS = 5
+const REREVIEW_OBSERVATION_DELAY_MS = 2_000
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 let pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -151,6 +156,24 @@ async function setRepairLabels({ add = [], remove = [] }) {
   }
 }
 
+async function reviewCheckIds() {
+  const response = await ghJson([
+    'api', `repos/${repository}/commits/${expectedHead}/check-runs?per_page=100`,
+  ], 'review CheckRuns')
+  return trustedReviewCheckIds(response, { repository, head: expectedHead })
+}
+
+async function sameHeadRereviewRequested(current, priorCheckIds) {
+  if (current.labels.some(label => label.name === 'automation/review-ready')) return true
+  for (let attempt = 0; attempt < REREVIEW_OBSERVATION_ATTEMPTS; attempt += 1) {
+    if (hasNewReviewCheck(priorCheckIds, await reviewCheckIds())) return true
+    if (attempt + 1 < REREVIEW_OBSERVATION_ATTEMPTS) {
+      await delay(REREVIEW_OBSERVATION_DELAY_MS)
+    }
+  }
+  return false
+}
+
 const pullRequest = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request')
 if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNumber} is not open`)
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
@@ -230,6 +253,7 @@ await setRepairLabels({
     ? ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed']
     : ['automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed'],
 })
+const priorReviewCheckIds = ciRequest ? null : await reviewCheckIds()
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-repair-${pullRequestNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
@@ -317,7 +341,7 @@ try {
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; GitHub will review the newer head.`)
         process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
-      } else if (!ciRequest && current.labels.some(label => label.name === 'automation/review-ready')) {
+      } else if (!ciRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
         process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)

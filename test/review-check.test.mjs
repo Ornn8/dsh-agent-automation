@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { completeReviewCheck, failReviewCheck, REVIEW_CHECK_NAME, startReviewCheck } from '../src/review-check.mjs'
+import {
+  completeReviewCheck,
+  failReviewCheck,
+  hasNewReviewCheck,
+  REVIEW_CHECK_NAME,
+  startReviewCheck,
+  trustedReviewCheckIds,
+} from '../src/review-check.mjs'
 
 const repository = 'owner/repository'
 const head = 'a'.repeat(40)
@@ -43,4 +50,36 @@ test('an infrastructure failure creates a terminal exact-head review CheckRun', 
     'api', '--method', 'POST', `repos/${repository}/check-runs`,
     '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=completed', '-f', 'conclusion=failure', '-f', `details_url=${runUrl}`, '-f', `external_id=${runUrl}`,
   ])
+})
+
+test('same-head repair recognizes a newly started trusted review after its label is consumed', () => {
+  const check = (id, overrides = {}) => ({
+    id,
+    name: REVIEW_CHECK_NAME,
+    head_sha: head,
+    details_url: `https://github.com/${repository}/runs/${id}`,
+    app: { id: 15368 },
+    ...overrides,
+  })
+  const before = trustedReviewCheckIds({ total_count: 1, check_runs: [check(17)] }, { repository, head })
+  const after = trustedReviewCheckIds({ total_count: 2, check_runs: [check(17), check(18, {
+    details_url: `https://github.com/${repository}/actions/runs/22/job/18`,
+  })] }, { repository, head })
+  assert.equal(hasNewReviewCheck(before, after), true)
+  assert.equal(hasNewReviewCheck(after, after), false)
+})
+
+test('same-head repair rejects untrusted or incomplete review snapshots', () => {
+  const response = overrides => ({ total_count: 1, check_runs: [{
+    id: 17,
+    name: REVIEW_CHECK_NAME,
+    head_sha: head,
+    details_url: `https://github.com/${repository}/runs/17`,
+    app: { id: 15368 },
+    ...overrides,
+  }] })
+  assert.equal(trustedReviewCheckIds(response({ app: { id: 1 } }), { repository, head }).size, 0)
+  assert.equal(trustedReviewCheckIds(response({ details_url: 'https://example.com/owner/repository/runs/17' }), { repository, head }).size, 0)
+  assert.equal(trustedReviewCheckIds(response({ head_sha: 'b'.repeat(40) }), { repository, head }).size, 0)
+  assert.throws(() => trustedReviewCheckIds({ total_count: 2, check_runs: [] }, { repository, head }), /incomplete/)
 })

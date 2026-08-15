@@ -143,7 +143,7 @@ Stopping the review runner leaves change work operational. Stopping the change r
 - Review comments and WorkRequests bind full base and head SHAs. Ref movement makes the result stale.
 - Comments, labels, and compatibility commit statuses are diagnostic projections only. Landing trusts the exact GitHub Actions CheckRun, workflow run, and immutable reusable-workflow provenance, so forged text cannot become PASS.
 - Missing or malformed worker output never becomes PASS.
-- Each exact blocked pair has one idempotency key. A new head creates a new review; a same-head rebuttal creates at most one rereview.
+- Each exact blocked pair has one idempotency key. A new head creates a new review; a same-head rebuttal creates at most one rereview. Repair completion accepts either the pending rereview label or a newly created GitHub Actions-owned `codex/review` CheckRun for the exact head, so immediate label consumption cannot turn a successful handoff into a false failure.
 - Reusable workflows reject mutable controller revisions and pin third-party Actions by full commit SHA.
 - Landing requires protected checks to be app-bound and strict, so a base advance invalidates the reviewed pair before GitHub accepts the merge.
 
