@@ -79,13 +79,14 @@ test('a command-json adapter lets a new agent join without controller changes', 
           adapter: 'command-json',
           executable: 'F:\\agents\\luna.exe',
           args: ['run-json'],
+          mode: 'change',
         },
       },
     },
     workerId: 'luna',
     invocation: {
       taskId: 'issue-42', cwd: 'F:\\checkout', title: 'Issue 42',
-      prompt: 'Implement the issue.', timeoutMs: 90_000,
+      prompt: 'Implement the issue.', timeoutMs: 90_000, signal: new AbortController().signal,
     },
     adapters,
   })
@@ -93,6 +94,7 @@ test('a command-json adapter lets a new agent join without controller changes', 
   assert.equal(calls[0].command, 'F:\\agents\\luna.exe')
   assert.deepEqual(calls[0].args, ['run-json'])
   assert.equal(JSON.parse(calls[0].options.input).taskId, 'issue-42')
+  assert.equal(calls[0].options.signal.aborted, false)
   assert.equal(receipt.sessionId, 'luna-42')
   assert.equal(receipt.output, 'result')
 })

@@ -21,6 +21,7 @@ import { runAgentWorker } from './agent-worker.mjs'
 import { baselineIssueWorkItem } from './baseline-issue.mjs'
 import { AGENT_ISSUE_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { openAgentWorkDependencies, resolveAgentWorkDispatch } from './agent-work.mjs'
+import { classifyAgentFailure } from './failure-classification.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
@@ -61,7 +62,7 @@ async function upsertStatus(body) {
   }
 }
 
-function statusBody(status, branch, detail) {
+function statusBody(status, branch, detail, failureClass) {
   return [
     marker,
     '### DSH agent run',
@@ -69,6 +70,7 @@ function statusBody(status, branch, detail) {
     `- Status: **${status}**`,
     `- Branch: \`${branch}\``,
     `- Run: ${requiredEnv('RUN_URL')}`,
+    ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
     `- Detail: ${detail}`,
     '',
     '_DSH owns implementation, validation, commits, pushes, and the pull request._',
@@ -220,7 +222,8 @@ try {
     process.stdout.write(`${workerId} produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
   }
 } catch (error) {
-  await upsertStatus(statusBody('failed', branch, `The run failed: ${String(error.message).slice(0, 1000)}`))
+  const failureClass = classifyAgentFailure(error)
+  await upsertStatus(statusBody('failed', branch, `The run failed: ${String(error.message).slice(0, 1000)}`, failureClass))
     .catch(() => undefined)
   await run(config.ghExecutable, [
     'issue', 'edit', String(issueNumber), '--repo', repository,

@@ -6,6 +6,10 @@ on:
       role:
         required: true
         type: string
+      readiness_canary:
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: agent-health-${{ github.repository }}-${{ inputs.role }}
@@ -33,6 +37,7 @@ jobs:
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           CONTROLLER_SHA: ${{ job.workflow_sha }}
           AGENT_ROLE: review
+          READINESS_CANARY: ${{ inputs.readiness_canary }}
         run: node controller/src/pipeline-health.mjs
 
   change:
@@ -56,6 +61,7 @@ jobs:
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           CONTROLLER_SHA: ${{ job.workflow_sha }}
           AGENT_ROLE: change
+          READINESS_CANARY: ${{ inputs.readiness_canary }}
         run: node controller/src/pipeline-health.mjs
 
   reject-unknown-role:

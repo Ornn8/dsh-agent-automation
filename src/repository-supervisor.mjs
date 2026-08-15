@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
@@ -12,7 +11,7 @@ import { runAgentWorker } from './agent-worker.mjs'
 import { AGENT_SUPERVISION_SKILL } from './agent-work-result.mjs'
 import { applySupervisionPlan, writeSupervisionSummary } from './supervision-executor.mjs'
 import {
-  agentDshTriggerSafety,
+  mandatoryBlockedCorrections,
   parseSupervisionMessage,
   planSupervisionActions,
   validateSupervisionProposal,
@@ -47,32 +46,6 @@ function boundedIntegerEnv(name, minimum, maximum) {
     throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`)
   }
   return value
-}
-
-function clipLine(value, limit = 500) {
-  return String(value || '').replace(/[\r\n]/g, ' ').slice(0, limit)
-}
-
-function mandatoryBlockedCorrections(snapshot) {
-  const actions = []
-  for (const issue of snapshot.issues) {
-    if (!issue.labels.includes('agent/dsh')) continue
-    const safety = agentDshTriggerSafety(issue, snapshot, repository)
-    if (safety.safe) continue
-    const reasonHash = createHash('sha256').update(safety.reasons.join('\n')).digest('hex').slice(0, 12)
-    actions.push({
-      type: 'remove_label',
-      number: issue.number,
-      label: 'agent/dsh',
-      fingerprint: `blocked-agent-dsh-${issue.number}-${reasonHash}`,
-      evidence: [{
-        source: 'issue_state',
-        reference: `#${issue.number}`,
-        detail: clipLine(safety.reasons.join('; ')),
-      }],
-    })
-  }
-  return actions
 }
 
 function assertAuditedHeadsStillCurrent(auditedSnapshot, liveSnapshot) {
@@ -145,7 +118,7 @@ Audit requirements:
 - Never create tracker, research, informational, duplicate, subjective-style, or low-value-refactor Issues.
 - Never add agent/dsh to blocked or dependency-incomplete work. Add it only when every dependency is closed, no active branch or pull request owns the work, and execution is immediate.
 - Treat only exact \`Depends on #<number>.\` or \`Blocked by #<number>.\` declarations as ordering constraints; do not infer project-specific sequences.
-- Propose at most five actions and at most one create_issue. Use stable lowercase kebab-case fingerprints.
+- Propose at most five actions and at most one create_issue. The controller derives every idempotency fingerprint from the validated action and evidence.
 
 Evidence reference formats:
 - master: repository/path:line plus an exact excerpt from that line
@@ -156,14 +129,14 @@ Evidence reference formats:
 - issue_state: #<issue-number>
 
 Allowed action JSON shapes:
-- {"type":"create_issue","fingerprint":"...","title":"...","body":"...","labels":["..."],"evidence":[...]}
-- {"type":"comment_issue","number":1,"fingerprint":"...","body":"...","evidence":[...]}
-- {"type":"comment_pr","number":1,"fingerprint":"...","body":"...","evidence":[...]}
-- {"type":"close_issue","number":1,"fingerprint":"...","reason":"completed","evidence":[...]}
-- {"type":"close_issue","number":1,"fingerprint":"...","reason":"duplicate","duplicateOf":2,"evidence":[...]}
-- {"type":"reopen_issue","number":1,"fingerprint":"...","evidence":[...]}
-- {"type":"add_label","number":1,"fingerprint":"...","label":"agent/dsh","evidence":[...]}
-- {"type":"remove_label","number":1,"fingerprint":"...","label":"agent/dsh","evidence":[...]}
+- {"type":"create_issue","title":"...","body":"...","labels":["..."],"evidence":[...]}
+- {"type":"comment_issue","number":1,"body":"...","evidence":[...]}
+- {"type":"comment_pr","number":1,"body":"...","evidence":[...]}
+- {"type":"close_issue","number":1,"reason":"completed","evidence":[...]}
+- {"type":"close_issue","number":1,"reason":"duplicate","duplicateOf":2,"evidence":[...]}
+- {"type":"reopen_issue","number":1,"evidence":[...]}
+- {"type":"add_label","number":1,"label":"agent/dsh","evidence":[...]}
+- {"type":"remove_label","number":1,"label":"agent/dsh","evidence":[...]}
 
 Each master, upstream, or pull_request evidence item is {"source":"...","reference":"...","excerpt":"exact source text","detail":"English evidence and impact"}. Other evidence items omit excerpt. An excerpt must be a single exact 8-to-500-character substring of the referenced line. Upstream and pull-request evidence must identify a line added or modified by the referenced change.
 
@@ -217,6 +190,9 @@ try {
     },
     adapters: createAgentAdapters(),
   })
+  if (workerReceipt.outcome !== 'completed') {
+    throw new Error(`Repository supervision worker ended with ${workerReceipt.outcome}: ${workerReceipt.detail}`)
+  }
   const modelProposal = parseSupervisionMessage(workerReceipt.output)
   const liveSnapshot = await readSnapshot()
   assertAuditedHeadsStillCurrent(auditedSnapshot, liveSnapshot)

@@ -185,9 +185,13 @@ $selectedRepositories = if ($ops.controller.registrationScope -eq 'organization'
   @($instances | ForEach-Object { $_.Repository } | Where-Object { $_ } | Select-Object -Unique)
 }
 foreach ($mapping in @($ops.repositoryMappings | Where-Object { $_.repository -in $selectedRepositories })) {
-  Invoke-InstallAction "set DSH_AUTOMATION_CI_WORKFLOW for $($mapping.repository)" {
-    & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_CI_WORKFLOW --repo $mapping.repository --body $mapping.ciWorkflowName 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_CI_WORKFLOW for $($mapping.repository)" }
+  $ciWorkflowsJson = ConvertTo-Json -InputObject @($mapping.ciWorkflows) -Compress
+  $requiredChecksJson = ConvertTo-Json -InputObject @($mapping.requiredChecks) -Compress
+  Invoke-InstallAction "set CI workflow and required-check variables for $($mapping.repository)" {
+    & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_CI_WORKFLOWS --repo $mapping.repository --body $ciWorkflowsJson 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_CI_WORKFLOWS for $($mapping.repository)" }
+    & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_REQUIRED_CHECKS --repo $mapping.repository --body $requiredChecksJson 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_REQUIRED_CHECKS for $($mapping.repository)" }
   }
   Invoke-InstallAction "ensure strict app-bound required checks, bootstrapping an unprotected default branch of $($mapping.repository)" {
     Set-RepositoryRequiredStatusChecks -Mapping $mapping -GhExecutable $loaded.Config.ghExecutable

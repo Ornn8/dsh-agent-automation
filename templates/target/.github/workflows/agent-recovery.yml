@@ -14,7 +14,7 @@ permissions:
 jobs:
   recover:
     if: >-
-      contains(fromJSON('["failure", "cancelled"]'), github.event.workflow_run.conclusion)
+      contains(fromJSON('["failure", "cancelled", "timed_out", "startup_failure", "stale"]'), github.event.workflow_run.conclusion)
       && github.event.workflow_run.name != github.workflow
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/recover-backlog.yml@{{CONTROLLER_SHA}}
     with:

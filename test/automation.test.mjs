@@ -20,6 +20,7 @@ import {
   validateClaudeCodeWorkerConfig,
   validateDshWorkerConfig,
   validateOpenCodeWorkerConfig,
+  validateWorkerCapabilities,
   verifyGithubIdentity,
 } from '../src/common.mjs'
 import {
@@ -36,6 +37,8 @@ import {
   hasExactReviewVerdict,
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
+import { validateReviewFindings } from '../src/review-evidence.mjs'
+import { classifyAgentFailure, recordedFailureClass } from '../src/failure-classification.mjs'
 import {
   dshModelSelection,
   dshRpc,
@@ -139,8 +142,8 @@ test('DSH model and session preset configuration is complete and fails closed', 
 })
 
 test('the controller rejects the removed configuration schema before starting a worker', () => {
-  assert.doesNotThrow(() => validateConfigSchemaVersion({ schemaVersion: 2, operations: { schemaVersion: 2 } }))
-  assert.throws(() => validateConfigSchemaVersion({ schemaVersion: 1, operations: { schemaVersion: 1 } }), /schemaVersion must be 2/)
+  assert.doesNotThrow(() => validateConfigSchemaVersion({ schemaVersion: 3, operations: { schemaVersion: 3 } }))
+  assert.throws(() => validateConfigSchemaVersion({ schemaVersion: 2, operations: { schemaVersion: 2 } }), /schemaVersion must be 3/)
 })
 
 test('DSH Web session is titled, prompted once, and observed to completion', async () => {
@@ -269,13 +272,13 @@ test('the DSH bundle registers only explicit GitHub work skills', async () => {
   const plugin = await import('../dsh-plugin/index.js')
   plugin.apply({ skills: { register: skill => registrations.push(skill) } })
   assert.deepEqual(registrations.map(skill => skill.name), [
-    AGENT_ISSUE_SKILL, AGENT_REPAIR_SKILL, AGENT_REVIEW_SKILL,
+    AGENT_ISSUE_SKILL, AGENT_REPAIR_SKILL, AGENT_REVIEW_SKILL, 'agent-readiness-canary',
   ])
   for (const skill of registrations) {
     assert.deepEqual(skill.invocation, { modelInvocable: false, userInvocable: true })
     assert.match(skill.content, /GitHub-visible.*English/)
   }
-  for (const skill of registrations.filter(skill => skill.name !== AGENT_REVIEW_SKILL)) {
+  for (const skill of registrations.filter(skill => [AGENT_ISSUE_SKILL, AGENT_REPAIR_SKILL].includes(skill.name))) {
     assert.match(skill.content, /JSON WorkRequest/)
   }
 })
@@ -680,6 +683,58 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.doesNotMatch(workflow, /issues: write/)
 })
 
+test('the shared process runner terminates output floods at a bounded byte limit', async () => {
+  await assert.rejects(run(process.execPath, ['-e', "process.stdout.write('x'.repeat(4096)); setInterval(() => {}, 1000)"], {
+    timeoutMs: 5_000,
+    maxOutputBytes: 1024,
+  }), /exceeded the 1024 byte output limit/)
+})
+
+test('agent failure classes separate backoff, infrastructure, protocol, and task failures', () => {
+  const reset = new Error('socket reset')
+  reset.code = 'ECONNRESET'
+  assert.equal(classifyAgentFailure(reset), 'transport')
+  assert.equal(classifyAgentFailure(new Error('Provider quota exceeded')), 'auth-quota')
+  assert.equal(classifyAgentFailure(new Error('invalid RPC receipt')), 'protocol')
+  assert.equal(classifyAgentFailure(new Error('Tests still fail')), 'task')
+  assert.equal(recordedFailureClass('- Failure class: `transport`'), 'transport')
+})
+
+test('unattended health combines a hosted queue watchdog, replica heartbeats, and real daily canaries', async () => {
+  const target = await readFile(new URL('../templates/target/.github/workflows/agent-health.yml', import.meta.url), 'utf8')
+  const pipeline = await readFile(new URL('../src/pipeline-health.mjs', import.meta.url), 'utf8')
+  const watchdog = await readFile(new URL('../src/runner-watchdog.mjs', import.meta.url), 'utf8')
+  const runnerSupervisor = await readFile(new URL('../ops/runner-supervisor.ps1', import.meta.url), 'utf8')
+  const webSupervisor = await readFile(new URL('../ops/dsh-web-host-supervisor.ps1', import.meta.url), 'utf8')
+  const operations = await readFile(new URL('../ops/Automation.Operations.psm1', import.meta.url), 'utf8')
+  assert.match(target, /runner-watchdog\.yml/)
+  assert.match(target, /29 3 \* \* \*/)
+  assert.match(pipeline, /runAgentWorker/)
+  assert.match(pipeline, /AGENT_READINESS_SKILL/)
+  assert.match(watchdog, /20 \* 60 \* 1000/)
+  assert.match(runnerSupervisor, /Write-OperationHeartbeat/)
+  assert.match(runnerSupervisor, /\[Math\]::Pow\(2/)
+  assert.match(webSupervisor, /Write-OperationHeartbeat/)
+  assert.match(webSupervisor, /\[Math\]::Pow\(2/)
+  assert.match(operations, /10MB/)
+  assert.match(operations, /\.5/)
+})
+
+test('landing reconciliation is hosted, bounded, and independent of workflow_run pull request arrays', async () => {
+  const source = await readFile(new URL('../src/reconcile-landing.mjs', import.meta.url), 'utf8')
+  const reusable = await readFile(new URL('../.github/workflows/reconcile-landing.yml', import.meta.url), 'utf8')
+  const landingCaller = await readFile(new URL('../templates/target/.github/workflows/agent-pr-land.yml', import.meta.url), 'utf8')
+  const repairCaller = await readFile(new URL('../templates/target/.github/workflows/agent-pr-ci-repair.yml', import.meta.url), 'utf8')
+  assert.match(source, /--limit', '101'/)
+  assert.match(source, /pullRequests\.length > 100/)
+  assert.match(reusable, /runs-on: ubuntu-latest/)
+  assert.doesNotMatch(reusable, /self-hosted/)
+  assert.doesNotMatch(landingCaller, /pull_requests\[0\]\.number != null/)
+  assert.doesNotMatch(repairCaller, /pull_requests\[0\]\.number != null/)
+  assert.match(landingCaller, /pull_requests\[0\]\.number \|\| 0/)
+  assert.match(repairCaller, /pull_requests\[0\]\.number \|\| 0/)
+})
+
 test('Codex starts the first turn without racing durable task metadata', async () => {
   const calls = []
   const result = await materializeReviewTask(async (method, params) => {
@@ -947,7 +1002,7 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
   ]
   assert.deepEqual(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
-  }), { type: 'issue', number: 2 })
+  }), { type: 'issue', number: 11 })
 
   issues[1].labels = [{ name: 'agent/dsh-blocked' }]
   assert.deepEqual(selectBacklogWork({
@@ -1041,9 +1096,7 @@ test('backlog dispatch consumes the CI baseline Issue emitted by the repair Skil
     author_association: 'OWNER',
     labels: [{ name: 'agent/dsh' }],
   }
-  assert.deepEqual(selectBacklogWork({ repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [baseline] }), {
-    type: 'issue', number: 27,
-  })
+  assert.equal(selectBacklogWork({ repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [baseline] }), null)
 })
 
 test('explicit rework commands are deliberate and case insensitive', () => {
@@ -1065,7 +1118,7 @@ test('CI repair requests bind one failed workflow run across bounded recovery at
   assert.equal(ciRepairRequest('ci-head-main'), null)
 })
 
-test('only an exact failed CI pull request run may wake DSH', () => {
+test('only exact failed configured CI evidence for the current head may wake DSH', () => {
   const run = {
     id: 31767661165,
     run_attempt: 2,
@@ -1078,6 +1131,7 @@ test('only an exact failed CI pull request run may wake DSH', () => {
   }
   const expected = { pullRequestNumber: 12, expectedHead: 'a'.repeat(40), workflowName: 'CI' }
   assert.equal(trustedCiFailure({ run, ...expected }), true)
+  assert.equal(trustedCiFailure({ run: { ...run, event: 'push', pull_requests: [] }, ...expected }), true)
   assert.equal(trustedCiFailure({ run: { ...run, name: 'Agent PR Review' }, ...expected }), false)
   assert.equal(trustedCiFailure({ run: { ...run, conclusion: 'cancelled' }, ...expected }), false)
   assert.equal(trustedCiFailure({ run, ...expected, pullRequestNumber: 13 }), false)
@@ -1197,9 +1251,73 @@ test('GitHub review fields reject non-English prose and Markdown path injection'
   assert.throws(() => parseReviewMessage(message({
     verdict: 'block', summary: 'Unsafe path.', findings: [{
       priority: 'P1', title: 'Path injection', body: 'The path can escape the list item.',
-      path: 'src/file.js`\n- injected', line: 1,
+      path: 'src/file.js`\n- injected', line: 1, excerpt: 'unsafe()',
     }],
   })), /invalid blocking finding/)
+})
+
+test('repository mappings fail closed on missing skills or soft review isolation', () => {
+  const changeCapabilities = { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false }
+  const reviewCapabilities = { skills: ['github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'], hardReadOnlyReview: true }
+  const config = {
+    repositories: ['owner/repository'],
+    workers: {
+      change: { adapter: 'dsh-web', capabilities: changeCapabilities },
+      review: { adapter: 'codex-app', capabilities: reviewCapabilities },
+    },
+    operations: { repositoryMappings: [{
+      repository: 'owner/repository', changeWorker: 'change', reviewWorker: 'review',
+    }] },
+  }
+  assert.doesNotThrow(() => validateWorkerCapabilities(config))
+  assert.throws(() => validateWorkerCapabilities({
+    ...config,
+    workers: { ...config.workers, review: { adapter: 'codex-app', capabilities: { ...reviewCapabilities, skills: ['github-pr-review'] } } },
+  }), /lacks github-repository-supervision/)
+  assert.throws(() => validateWorkerCapabilities({
+    ...config,
+    workers: { ...config.workers, review: { adapter: 'dsh-web', capabilities: { skills: ['github-pr-review'], hardReadOnlyReview: true } } },
+  }), /does not match Adapter isolation/)
+  assert.throws(() => validateWorkerCapabilities({
+    ...config,
+    workers: { ...config.workers, review: { adapter: 'command-json', mode: 'review', capabilities: reviewCapabilities } },
+  }), /does not implement declared skill/)
+})
+
+test('blocking review findings bind an excerpt to an added exact-head line', async () => {
+  const base = 'a'.repeat(40)
+  const head = 'b'.repeat(40)
+  const review = {
+    verdict: 'block',
+    summary: 'A blocking defect is present.',
+    findings: [{
+      priority: 'P1', title: 'Unsafe default', body: 'The new default bypasses validation.',
+      path: 'src/config.mjs', line: 2, excerpt: 'unsafe = true',
+    }],
+  }
+  const calls = []
+  const runCommand = async (_command, args) => {
+    calls.push(args)
+    if (args.includes('show')) return { stdout: 'const safe = true\nconst unsafe = true\n' }
+    return { stdout: '@@ -2 +2 @@\n-const unsafe = false\n+const unsafe = true\n' }
+  }
+  await validateReviewFindings(review, {
+    gitExecutable: 'git', reviewCheckout: '.', base, head, runCommand,
+  })
+  assert.equal(calls.length, 2)
+  await assert.rejects(validateReviewFindings({
+    ...review,
+    findings: [{ ...review.findings[0], line: 1, excerpt: 'safe = true' }],
+  }, {
+    gitExecutable: 'git', reviewCheckout: '.', base, head, runCommand,
+  }), /changed line/)
+})
+
+test('review and supervision reject non-completed worker receipts before parsing output', async () => {
+  const reviewSource = await readFile(new URL('../src/codex-review.mjs', import.meta.url), 'utf8')
+  const supervisionSource = await readFile(new URL('../src/repository-supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(reviewSource, /workerReceipt\.outcome !== 'completed'/)
+  assert.match(supervisionSource, /workerReceipt\.outcome !== 'completed'/)
 })
 
 test('githubReviewBody stays English and binds the reviewed commits', () => {

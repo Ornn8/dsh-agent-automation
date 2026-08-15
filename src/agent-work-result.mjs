@@ -2,6 +2,7 @@ export const AGENT_ISSUE_SKILL = 'github-issue-work'
 export const AGENT_REPAIR_SKILL = 'github-pr-repair'
 export const AGENT_REVIEW_SKILL = 'github-pr-review'
 export const AGENT_SUPERVISION_SKILL = 'github-repository-supervision'
+export const AGENT_READINESS_SKILL = 'agent-readiness-canary'
 
 const AGENT_SKILLS = new Map([
   [AGENT_ISSUE_SKILL, {
@@ -19,6 +20,10 @@ const AGENT_SKILLS = new Map([
   [AGENT_SUPERVISION_SKILL, {
     source: new URL('../dsh-plugin/skills/supervise.md', import.meta.url),
     description: 'Audit one exact repository state and propose bounded policy-validated GitHub management actions.',
+  }],
+  [AGENT_READINESS_SKILL, {
+    source: new URL('../dsh-plugin/skills/readiness.md', import.meta.url),
+    description: 'Verify one configured Agent and provider with no repository or GitHub mutation.',
   }],
 ])
 

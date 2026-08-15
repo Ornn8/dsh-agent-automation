@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   MAX_RECOVERY_ATTEMPTS,
+  recordedCiWorkflow,
   recoveryDecision,
   recoveryMarkerBody,
   trustedFailedAgentRun,
@@ -12,6 +13,13 @@ const controller = 'Ornn8/dsh-agent-automation'
 const sha = 'c'.repeat(40)
 const head = 'a'.repeat(40)
 
+test('recovery preserves only one bounded recorded CI workflow name', () => {
+  assert.equal(recordedCiWorkflow('- CI workflow: `CI`'), 'CI')
+  assert.equal(recordedCiWorkflow('- CI workflow: `CI`\n- CI workflow: `Security`'), null)
+  assert.equal(recordedCiWorkflow('- CI workflow: ``'), null)
+  assert.equal(recordedCiWorkflow(`- CI workflow: \`${'x'.repeat(101)}\``), null)
+})
+
 function run(overrides = {}) {
   return {
     id: 81, name: 'Agent PR Rework', status: 'completed', conclusion: 'failure',
@@ -21,11 +29,14 @@ function run(overrides = {}) {
   }
 }
 
-test('only a failed or cancelled top-level agent run with immutable controller provenance can recover', () => {
+test('all GitHub terminal infrastructure failures recover with immutable controller provenance', () => {
   const trust = { controllerRepository: controller, controllerSha: sha }
   assert.equal(trustedFailedAgentRun({ run: run(), repository, trust }), 'pull-request')
   assert.equal(trustedFailedAgentRun({ run: run({ name: 'Agent PR CI Repair' }), repository, trust }), 'pull-request')
   assert.equal(trustedFailedAgentRun({ run: run({ conclusion: 'cancelled' }), repository, trust }), 'pull-request')
+  for (const conclusion of ['timed_out', 'startup_failure', 'stale']) {
+    assert.equal(trustedFailedAgentRun({ run: run({ conclusion }), repository, trust }), 'pull-request')
+  }
   assert.equal(trustedFailedAgentRun({ run: run({
     name: 'Agent Recovery',
     referenced_workflows: [{ path: `${controller}/.github/workflows/recover-backlog.yml@${sha}`, sha }],
@@ -61,6 +72,26 @@ test('recovery caps exact subjects at three durable attempts without recursive m
   })
   assert.deepEqual(decision, { action: 'dead-letter', attempt: 3 })
   assert.match(recoveryMarkerBody({ type: 'issue', number: 7 }, 3, 81, 'dead-letter', repository), /Status: \*\*dead-letter\*\*/)
+})
+
+test('recovery backs off transport failures and dead-letters auth, quota, or protocol failures', () => {
+  const arguments_ = {
+    run: run(), repository, trust: { controllerRepository: controller, controllerSha: sha },
+    subject: { type: 'pull-request', number: 12, head },
+    current: { state: 'open', head: { sha: head, repo: { full_name: repository } } },
+  }
+  assert.deepEqual(recoveryDecision({ ...arguments_, attempts: [], failureClass: 'transport' }), {
+    action: 'retry', attempt: 1, requestId: 'recovery-81-1', delaySeconds: 30,
+  })
+  assert.deepEqual(recoveryDecision({ ...arguments_, attempts: [{ attempt: 1 }], failureClass: 'transport' }), {
+    action: 'retry', attempt: 2, requestId: 'recovery-81-2', delaySeconds: 120,
+  })
+  assert.deepEqual(recoveryDecision({ ...arguments_, attempts: [], failureClass: 'auth-quota' }), {
+    action: 'dead-letter', attempt: 0, reason: 'auth-quota',
+  })
+  assert.deepEqual(recoveryDecision({ ...arguments_, attempts: [], failureClass: 'protocol' }), {
+    action: 'dead-letter', attempt: 0, reason: 'protocol',
+  })
 })
 
 test('a trusted intentional review BLOCK never schedules a second review, while reviewer infrastructure failure retries its exact pair', () => {

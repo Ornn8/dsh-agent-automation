@@ -2,7 +2,7 @@ import path from 'node:path'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { agentSkillDefinition, parseAgentAutomationResult } from './agent-work-result.mjs'
+import { AGENT_READINESS_SKILL, AGENT_REVIEW_SKILL, AGENT_SUPERVISION_SKILL, agentSkillDefinition, parseAgentAutomationResult } from './agent-work-result.mjs'
 import { prepareAgentReviewInput } from './agent-review-input.mjs'
 
 const PLUGIN_NAME = 'dsh-github-work'
@@ -99,15 +99,15 @@ export async function runClaudeCodeCli({ worker, invocation, runCommand, environ
   if (worker.mode === 'change' && !invocation.prompt.startsWith(`${marker} `)) {
     throw new Error(`Claude Code change prompt must invoke ${marker}`)
   }
-  if (worker.mode === 'review' && requiredSkill !== 'github-pr-review') {
-    throw new Error('Claude Code review must use github-pr-review')
+  if (worker.mode === 'review' && ![AGENT_REVIEW_SKILL, AGENT_SUPERVISION_SKILL, AGENT_READINESS_SKILL].includes(requiredSkill)) {
+    throw new Error(`Claude Code review does not implement ${requiredSkill}`)
   }
   const pluginDirectory = worker.mode === 'change'
     ? await materializeClaudePlugin(requiredSkill)
     : undefined
   let review
   try {
-    if (worker.mode === 'review') {
+    if (worker.mode === 'review' && requiredSkill === AGENT_REVIEW_SKILL) {
       review = await prepareAgentReviewInput({
         checkout: invocation.cwd,
         taskId: invocation.taskId,
@@ -122,7 +122,7 @@ export async function runClaudeCodeCli({ worker, invocation, runCommand, environ
     const sessionObserver = observeClaudeCodeSession(invocation.onStarted)
     const args = [
       '-p', '--output-format', 'stream-json', '--verbose',
-      ...(review ? [
+      ...(worker.mode === 'review' ? [
         '--setting-sources', 'project', '--disable-slash-commands',
         '--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep',
         '--disallowedTools', 'mcp__*', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
@@ -144,8 +144,8 @@ export async function runClaudeCodeCli({ worker, invocation, runCommand, environ
         CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: '1',
         CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1',
       } : environment,
-      input: review
-        ? `The trusted review input is review-input.json. The exact head checkout is ${invocation.cwd}.\n\nController review request:\n${invocation.prompt}`
+      input: worker.mode === 'review'
+        ? `${review ? `The trusted review input is review-input.json. The exact head checkout is ${invocation.cwd}.\n\n` : ''}Controller read-only request:\n${invocation.prompt}`
         : `/${PLUGIN_NAME}:${requiredSkill} ${invocation.prompt.slice(marker.length + 1)}`,
       timeoutMs: invocation.timeoutMs,
       signal: invocation.signal,

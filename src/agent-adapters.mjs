@@ -148,9 +148,12 @@ export function createAgentAdapters({
         validateCommandWorker(worker)
         const result = await runCommand(worker.executable, worker.args || [], {
           cwd: invocation.cwd,
-          env: hostCredentialEnvironment(),
+          env: worker.mode === 'review'
+            ? reviewerCredentialEnvironment()
+            : hostCredentialEnvironment(),
           input: JSON.stringify(invocation),
           timeoutMs: invocation.timeoutMs,
+          signal: invocation.signal,
         })
         return parseJson(result.stdout, 'command-json worker receipt')
       },
@@ -169,6 +172,9 @@ export function createAgentAdapters({
 function validateCommandWorker(worker) {
   if (typeof worker.executable !== 'string' || !worker.executable.trim()) {
     throw new Error('command-json worker executable must be a non-empty string')
+  }
+  if (!['change', 'review'].includes(worker.mode)) {
+    throw new Error('command-json worker mode must be change or review')
   }
   for (const field of ['args', 'healthArgs']) {
     if (worker[field] !== undefined

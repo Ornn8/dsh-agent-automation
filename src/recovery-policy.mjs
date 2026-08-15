@@ -1,10 +1,19 @@
 const FULL_SHA = /^[0-9a-f]{40}$/
 export const MAX_RECOVERY_ATTEMPTS = 3
+const RECOVERABLE_CONCLUSIONS = new Set([
+  'failure', 'cancelled', 'timed_out', 'startup_failure', 'stale',
+])
+
+/** Return the exact CI workflow name recorded by a trusted repair status comment. */
+export function recordedCiWorkflow(body) {
+  const matches = [...String(body || '').matchAll(/^- CI workflow: `([^`\r\n]{1,100})`$/gm)]
+  return matches.length === 1 ? matches[0][1] : null
+}
 
 function recoveryRole(run, repository, trust) {
   if (run?.repository?.full_name !== repository
     || run.status !== 'completed'
-    || !['failure', 'cancelled'].includes(run.conclusion)) return null
+    || !RECOVERABLE_CONCLUSIONS.has(run.conclusion)) return null
   if (!FULL_SHA.test(trust?.controllerSha || '')) return null
   const workflow = [
     '.github/workflows/dsh-issue.yml',
@@ -70,14 +79,23 @@ export function intentionalReviewBlock(run, jobs) {
 }
 
 /** Decide the single idempotent recovery transition after live subject validation. */
-export function recoveryDecision({ run, jobs, repository, trust, subject, current, attempts }) {
+export function recoveryDecision({ run, jobs, repository, trust, subject, current, attempts, failureClass }) {
   const role = trustedFailedAgentRun({ run, repository, trust })
   if ((role !== subject?.type && !(role === 'review' && subject?.type === 'pull-request'))
     || !validSubject(subject, current, repository)) return { action: 'ignore' }
   if (role === 'review' && intentionalReviewBlock(run, jobs)) return { action: 'ignore' }
   const completed = (attempts || []).filter(value => Number.isSafeInteger(value?.attempt) && value.attempt > 0)
   const attempt = completed.reduce((max, value) => Math.max(max, value.attempt), 0)
+  if (['auth-quota', 'protocol'].includes(failureClass)) {
+    return { action: 'dead-letter', attempt, reason: failureClass }
+  }
   if (attempt >= MAX_RECOVERY_ATTEMPTS) return { action: 'dead-letter', attempt }
   const next = attempt + 1
-  return { action: 'retry', attempt: next, requestId: `recovery-${run.id}-${next}` }
+  const decision = {
+    action: 'retry',
+    attempt: next,
+    requestId: `recovery-${run.id}-${next}`,
+  }
+  if (failureClass === 'transport') decision.delaySeconds = [30, 120, 300][next - 1]
+  return decision
 }

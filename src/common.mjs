@@ -14,9 +14,13 @@ export function run(command, args, options = {}) {
     signal,
     tee = false,
     timeoutMs = 45 * 60 * 1000,
+    maxOutputBytes = 8 * 1024 * 1024,
   } = options
 
   if (signal?.aborted) return Promise.reject(new Error(`${command} was cancelled before start`))
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1) {
+    return Promise.reject(new Error('maxOutputBytes must be a positive integer'))
+  }
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -26,7 +30,10 @@ export function run(command, args, options = {}) {
     })
     let stdout = ''
     let stderr = ''
+    let outputBytes = 0
     let settled = false
+    let terminationError
+    let terminationStarted = false
     const finish = (callback, value) => {
       if (settled) return
       settled = true
@@ -34,27 +41,54 @@ export function run(command, args, options = {}) {
       signal?.removeEventListener('abort', abort)
       callback(value)
     }
-    const abort = () => {
-      child.kill()
-      finish(reject, new Error(`${command} was cancelled`))
+    const terminateTree = () => {
+      if (terminationStarted || child.exitCode !== null || child.signalCode !== null) return
+      terminationStarted = true
+      if (process.platform === 'win32' && child.pid) {
+        const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+          windowsHide: true,
+          stdio: 'ignore',
+        })
+        killer.once('error', () => child.kill())
+        return
+      }
+      child.kill('SIGTERM')
+      const escalation = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      }, 2_000)
+      escalation.unref?.()
     }
+    const requestTermination = (error) => {
+      if (terminationError) return
+      terminationError = error
+      terminateTree()
+    }
+    const abort = () => requestTermination(new Error(`${command} was cancelled`))
     const timer = setTimeout(() => {
-      child.kill()
-      finish(reject, new Error(`${command} timed out after ${timeoutMs} ms`))
+      requestTermination(new Error(`${command} timed out after ${timeoutMs} ms`))
     }, timeoutMs)
 
     child.stdout.on('data', (chunk) => {
+      outputBytes += chunk.length
+      if (outputBytes > maxOutputBytes) {
+        requestTermination(new Error(`${command} exceeded the ${maxOutputBytes} byte output limit`))
+        return
+      }
       const text = chunk.toString()
       stdout += text
       try {
         onStdout?.(text)
       } catch (error) {
-        child.kill()
-        finish(reject, error)
+        requestTermination(error)
       }
       if (tee) process.stdout.write(text)
     })
     child.stderr.on('data', (chunk) => {
+      outputBytes += chunk.length
+      if (outputBytes > maxOutputBytes) {
+        requestTermination(new Error(`${command} exceeded the ${maxOutputBytes} byte output limit`))
+        return
+      }
       const text = chunk.toString()
       stderr += text
       if (tee) process.stderr.write(text)
@@ -62,7 +96,9 @@ export function run(command, args, options = {}) {
     child.once('error', error => finish(reject, error))
     child.once('close', (code, signal) => {
       const result = { code, signal, stdout, stderr }
-      if (code !== 0) {
+      if (terminationError) {
+        finish(reject, terminationError)
+      } else if (code !== 0) {
         const detail = stderr.trim() || stdout.trim() || `signal ${signal}`
         finish(reject, new Error(`${command} exited with code ${code}: ${detail}`))
       } else {
@@ -110,6 +146,7 @@ export async function loadConfig() {
   if (new Set(config.repositories).size !== config.repositories.length) {
     throw new Error('runner configuration repositories must not contain duplicates')
   }
+  validateRepositoryAutomationConfig(config)
   for (const repository of config.repositories) {
     resolveRepositoryWorker(config, repository, 'change')
     resolveRepositoryWorker(config, repository, 'review')
@@ -117,14 +154,91 @@ export async function loadConfig() {
   validateDshWorkerConfig(config)
   validateOpenCodeWorkerConfig(config)
   validateClaudeCodeWorkerConfig(config)
+  validateWorkerCapabilities(config)
   githubLogin(config)
   return config
 }
 
+const CHANGE_SKILLS = ['github-issue-work', 'github-pr-repair']
+const REVIEW_SKILLS = ['github-pr-review', 'github-repository-supervision']
+const READINESS_SKILL = 'agent-readiness-canary'
+
+function implementedWorkerCapabilities(worker) {
+  if (worker.adapter === 'codex-app') return { skills: [...REVIEW_SKILLS, READINESS_SKILL], hardReadOnlyReview: true }
+  if (worker.adapter === 'dsh-web') return { skills: [...CHANGE_SKILLS, 'github-pr-review', READINESS_SKILL], hardReadOnlyReview: false }
+  if (['opencode-cli', 'claude-code-cli'].includes(worker.adapter)) {
+    return worker.mode === 'review'
+      ? { skills: [...REVIEW_SKILLS, READINESS_SKILL], hardReadOnlyReview: true }
+      : { skills: [...CHANGE_SKILLS, READINESS_SKILL], hardReadOnlyReview: false }
+  }
+  if (worker.adapter === 'command-json') return { skills: [...CHANGE_SKILLS, READINESS_SKILL], hardReadOnlyReview: false }
+  return { skills: [], hardReadOnlyReview: false }
+}
+
+/** Validate generic CI workflow and required-check lists for every repository mapping. */
+export function validateRepositoryAutomationConfig(config) {
+  const mappings = config?.operations?.repositoryMappings
+  if (!Array.isArray(mappings)) throw new Error('runner configuration operations.repositoryMappings must be an array')
+  for (const mapping of mappings) {
+    for (const [field, limit] of [['ciWorkflows', 16], ['requiredChecks', 32]]) {
+      const values = mapping?.[field]
+      if (!Array.isArray(values) || values.length < 1 || values.length > limit
+        || new Set(values).size !== values.length
+        || values.some(value => typeof value !== 'string' || !value.trim() || value.length > 128 || /[\r\n]/.test(value))) {
+        throw new Error(`repositoryMappings.${field} must contain unique one-line names`)
+      }
+    }
+    if (mapping.requiredChecks.includes('codex/review')) {
+      throw new Error('repositoryMappings.requiredChecks must not contain codex/review')
+    }
+  }
+}
+
+/** Validate explicit worker capabilities against isolation implemented by each Adapter. */
+export function validateWorkerCapabilities(config) {
+  for (const [workerId, worker] of Object.entries(config?.workers || {})) {
+    const capabilities = worker?.capabilities
+    if (!capabilities || !Array.isArray(capabilities.skills)
+      || capabilities.skills.length === 0
+      || capabilities.skills.some(skill => typeof skill !== 'string' || !skill.trim())
+      || new Set(capabilities.skills).size !== capabilities.skills.length
+      || typeof capabilities.hardReadOnlyReview !== 'boolean') {
+      throw new Error(`workers.${workerId}.capabilities must declare unique skills and hardReadOnlyReview`)
+    }
+    const implemented = implementedWorkerCapabilities(worker)
+    for (const skill of capabilities.skills) {
+      if (!implemented.skills.includes(skill)) {
+        throw new Error(`workers.${workerId} Adapter does not implement declared skill ${skill}`)
+      }
+    }
+    if (capabilities.hardReadOnlyReview !== implemented.hardReadOnlyReview) {
+      throw new Error(`workers.${workerId} hardReadOnlyReview does not match Adapter isolation`)
+    }
+  }
+  for (const repository of config?.repositories || []) {
+    const changeWorkerId = resolveRepositoryWorker(config, repository, 'change')
+    const reviewWorkerId = resolveRepositoryWorker(config, repository, 'review')
+    const changeSkills = new Set(config.workers[changeWorkerId].capabilities.skills)
+    const reviewCapabilities = config.workers[reviewWorkerId].capabilities
+    for (const skill of CHANGE_SKILLS) {
+      if (!changeSkills.has(skill)) throw new Error(`Repository ${repository} change worker lacks ${skill}`)
+    }
+    for (const skill of REVIEW_SKILLS) {
+      if (!reviewCapabilities.skills.includes(skill)) throw new Error(`Repository ${repository} review worker lacks ${skill}`)
+    }
+    if (!changeSkills.has(READINESS_SKILL) || !reviewCapabilities.skills.includes(READINESS_SKILL)) {
+      throw new Error(`Repository ${repository} workers must implement ${READINESS_SKILL}`)
+    }
+    if (!reviewCapabilities.hardReadOnlyReview) {
+      throw new Error(`Repository ${repository} review worker lacks hard read-only isolation`)
+    }
+  }
+}
+
 /** Reject configuration formats that predate explicit worker declarations. */
 export function validateConfigSchemaVersion(config) {
-  if (config?.schemaVersion !== 2 || config?.operations?.schemaVersion !== 2) {
-    throw new Error('runner configuration schemaVersion must be 2')
+  if (config?.schemaVersion !== 3 || config?.operations?.schemaVersion !== 3) {
+    throw new Error('runner configuration schemaVersion must be 3')
   }
 }
 

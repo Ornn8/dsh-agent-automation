@@ -35,9 +35,10 @@ import {
 } from './baseline-issue.mjs'
 import { isReviewRepairRequestId } from './work-request.mjs'
 import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
+import { classifyAgentFailure } from './failure-classification.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
-const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
+let pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
 const expectedHead = requiredEnv('HEAD_SHA')
 const requestId = process.env.REPAIR_REQUEST_ID?.trim() || ''
 const ciWorkflowName = process.env.CI_WORKFLOW_NAME?.trim() || ''
@@ -65,7 +66,7 @@ const repairClass = ciRequest
 const automaticRepair = repairClass !== 'explicit-human'
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
-if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
+if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 0) {
   throw new Error(`Invalid PR_NUMBER: ${process.env.PR_NUMBER}`)
 }
 
@@ -76,7 +77,21 @@ async function ghJson(args, description) {
 
 await verifyGithubIdentity({ config })
 
-async function upsertStatus(status, branch, detail) {
+if (pullRequestNumber === 0) {
+  if (!ciRequest) throw new Error('PR_NUMBER=0 is permitted only for exact-head CI repair')
+  const candidates = await ghJson([
+    'pr', 'list', '--repo', repository, '--state', 'open',
+    '--json', 'number,headRefOid', '--limit', '101',
+  ], 'open pull requests for CI repair')
+  if (candidates.length > 100) throw new Error('CI repair exceeded its bounded 100 pull request snapshot')
+  const matches = candidates.filter(candidate => candidate.headRefOid === expectedHead)
+  if (matches.length !== 1) {
+    throw new Error(`Expected one open pull request at ${expectedHead}, found ${matches.length}`)
+  }
+  pullRequestNumber = matches[0].number
+}
+
+async function upsertStatus(status, branch, detail, failureClass) {
   const body = [
     marker,
     ciRequest ? '### DSH CI repair' : '### DSH review repair',
@@ -84,9 +99,11 @@ async function upsertStatus(status, branch, detail) {
     `- Status: **${status}**`,
     `- Controller SHA: \`${controllerSha}\``,
     `- Repair class: \`${repairClass}\``,
+    ...(ciRequest ? [`- CI workflow: \`${ciWorkflowName}\``] : []),
     `- Reviewed head: \`${expectedHead}\``,
     `- Branch: \`${branch}\``,
     `- Run: ${requiredEnv('RUN_URL')}`,
+    ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
     `- Detail: ${detail}`,
     '',
     '_DSH owns the technical response and any implementation changes._',
@@ -310,7 +327,8 @@ try {
     }
   }
 } catch (error) {
-  await upsertStatus('failed', branch, `The repair run failed: ${String(error.message).slice(0, 1000)}`)
+  const failureClass = classifyAgentFailure(error)
+  await upsertStatus('failed', branch, `The repair run failed: ${String(error.message).slice(0, 1000)}`, failureClass)
     .catch(() => undefined)
   await setRepairLabels({
     add: ciRequest ? ['agent/dsh-failed'] : ['automation/review-blocked', 'agent/dsh-failed'],

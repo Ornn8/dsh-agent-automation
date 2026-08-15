@@ -10,7 +10,7 @@ param(
   [string]$ControllerSha,
 
   [Parameter(Mandatory)]
-  [string]$CiWorkflowName,
+  [string]$CiWorkflowNamesJson,
 
   [Parameter(Mandatory)]
   [string]$UpstreamRepository,
@@ -27,6 +27,7 @@ $workflowNames = @(
   'agent-issues.yml',
   'agent-pr-ci-repair.yml',
   'agent-pr-land.yml',
+  'agent-landing-reconcile.yml',
   'agent-pr-review.yml',
   'agent-pr-rework.yml',
   'agent-repository-supervision.yml',
@@ -40,7 +41,17 @@ function Require-Value {
 
 Require-Value -Name 'ControllerRepository' -Value $ControllerRepository
 Require-Value -Name 'ControllerSha' -Value $ControllerSha
-Require-Value -Name 'CiWorkflowName' -Value $CiWorkflowName
+Require-Value -Name 'CiWorkflowNamesJson' -Value $CiWorkflowNamesJson
+try { $CiWorkflowNames = @($CiWorkflowNamesJson | ConvertFrom-Json -ErrorAction Stop) } catch {
+  throw 'CiWorkflowNamesJson must be a JSON array of workflow names.'
+}
+if (-not $CiWorkflowNames.Count -or @($CiWorkflowNames | Select-Object -Unique).Count -ne $CiWorkflowNames.Count) {
+  throw 'CiWorkflowNamesJson must contain unique workflow names.'
+}
+foreach ($name in $CiWorkflowNames) {
+  if ($name -isnot [string]) { throw 'CiWorkflowNamesJson must contain only strings.' }
+  Require-Value -Name 'CiWorkflowNamesJson' -Value $name
+}
 Require-Value -Name 'UpstreamRepository' -Value $UpstreamRepository
 if ($ControllerRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'ControllerRepository must be an owner/repository name.'
@@ -51,8 +62,8 @@ if ($UpstreamRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
 if ($ControllerSha -notmatch '^[0-9a-f]{40}$') {
   throw 'ControllerSha must be a lowercase full 40-character commit SHA.'
 }
-if ($CiWorkflowName -match '[\r\n\x00]') {
-  throw 'CiWorkflowName must be one line without NUL.'
+if (@($CiWorkflowNames | Where-Object { $_ -match '[\r\n\x00]' }).Count) {
+  throw 'CiWorkflowNamesJson must contain one-line names without NUL.'
 }
 
 $git = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
@@ -79,8 +90,7 @@ $outputRoot = Join-Path $resolvedRoot '.github\workflows'
 $replacements = @{
   '{{CONTROLLER_REPOSITORY}}' = $ControllerRepository
   '{{CONTROLLER_SHA}}' = $ControllerSha
-  '{{CI_WORKFLOW_NAME}}' = $CiWorkflowName
-  '{{CI_WORKFLOW_NAME_JSON}}' = ($CiWorkflowName | ConvertTo-Json -Compress)
+  '{{CI_WORKFLOW_NAMES_JSON}}' = (ConvertTo-Json -InputObject @($CiWorkflowNames) -Compress)
   '{{UPSTREAM_REPOSITORY}}' = $UpstreamRepository
 }
 $utf8 = [Text.UTF8Encoding]::new($false)

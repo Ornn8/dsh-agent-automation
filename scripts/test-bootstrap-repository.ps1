@@ -28,12 +28,13 @@ $TemplateRoot = (Resolve-Path -LiteralPath $TemplateRoot).Path
 $sha = '0123456789abcdef0123456789abcdef01234567'
 $repository = 'Ornn8/dsh-agent-automation'
 $upstreamRepository = 'deepseek-ai/deepseek-harness'
-$ciWorkflow = 'Target CI'
+$ciWorkflows = @('Target CI', 'Security')
 $names = @(
   'agent-health.yml',
   'agent-issues.yml',
   'agent-pr-ci-repair.yml',
   'agent-pr-land.yml',
+  'agent-landing-reconcile.yml',
   'agent-pr-review.yml',
   'agent-pr-rework.yml',
   'agent-repository-supervision.yml',
@@ -50,7 +51,7 @@ try {
     '-TargetCheckout', $temp,
     '-ControllerRepository', $repository,
     '-ControllerSha', $sha,
-    '-CiWorkflowName', $ciWorkflow,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
     '-UpstreamRepository', $upstreamRepository
   )
   Invoke-Bootstrap -Arguments ($arguments + '-DryRun')
@@ -62,8 +63,7 @@ try {
     $expected = Get-Content -LiteralPath (Join-Path $TemplateRoot $name) -Raw
     $expected = $expected.Replace('{{CONTROLLER_REPOSITORY}}', $repository)
     $expected = $expected.Replace('{{CONTROLLER_SHA}}', $sha)
-    $expected = $expected.Replace('{{CI_WORKFLOW_NAME}}', $ciWorkflow)
-    $expected = $expected.Replace('{{CI_WORKFLOW_NAME_JSON}}', ($ciWorkflow | ConvertTo-Json -Compress))
+    $expected = $expected.Replace('{{CI_WORKFLOW_NAMES_JSON}}', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress))
     $expected = $expected.Replace('{{UPSTREAM_REPOSITORY}}', $upstreamRepository)
     Assert-True ($actual -ceq $expected) "First render of $name did not exactly match its template."
   }
@@ -77,12 +77,20 @@ try {
   Assert-True ($rendered -notmatch 'controller_sha|worker_id|runner_labels_json') 'Generated YAML exposes controller or runner selection to callers.'
   Assert-True ($rendered -notmatch 'with:\s*\r?\n\s*repository:') 'Generated YAML exposes a reusable repository input.'
   Assert-True ($rendered -match 'role: review' -and $rendered -match 'role: change') 'Health workflow did not keep separate roles.'
-  Assert-True ($rendered -match 'ci_workflow_name: \$\{\{ vars\.DSH_AUTOMATION_CI_WORKFLOW \}\}') 'CI repair or rework did not pass DSH_AUTOMATION_CI_WORKFLOW.'
+  $healthWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-health.yml') -Raw
+  Assert-True ($healthWorkflow -match 'runner-watchdog\.yml') 'Health workflow omitted the GitHub-hosted queue watchdog.'
+  Assert-True ($healthWorkflow -match "(?m)^    - cron: '29 3 \* \* \*'\r?$") 'Health workflow omitted the daily provider canary.'
+  Assert-True ($rendered -match 'ci_workflow_name: \$\{\{ github\.event\.workflow_run\.name \}\}') 'CI repair did not pass the exact failed workflow name.'
   foreach ($name in @('agent-pr-ci-repair.yml', 'agent-pr-land.yml')) {
     $workflow = Get-Content -LiteralPath (Join-Path $temp ".github\workflows\$name") -Raw
-    Assert-True ($workflow -match '(?m)^    workflows: \["Target CI"\]\r?$') "$name does not subscribe workflow_run to the rendered CI workflow name."
-    Assert-True ($workflow -match 'github\.event\.workflow_run\.name == vars\.DSH_AUTOMATION_CI_WORKFLOW') "$name does not retain its CI workflow variable comparison."
+    $workflowList = ConvertTo-Json -InputObject @($ciWorkflows) -Compress
+    Assert-True ($workflow -match "(?m)^    workflows: $([Regex]::Escape($workflowList))\r?$") "$name does not subscribe workflow_run to the rendered CI workflow names."
+    Assert-True ($workflow -match 'contains\(fromJSON\(vars\.DSH_AUTOMATION_CI_WORKFLOWS\), github\.event\.workflow_run\.name\)') "$name does not retain its configured CI workflow membership check."
   }
+  $landingReconcileWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-landing-reconcile.yml') -Raw
+  Assert-True ($landingReconcileWorkflow -match "(?m)^    - cron: '8-59/15 \* \* \* \*'\r?$") 'Landing reconciliation omitted its hosted 15-minute schedule.'
+  Assert-True ($landingReconcileWorkflow -match [Regex]::Escape("uses: $repository/.github/workflows/reconcile-landing.yml@$sha")) 'Landing reconciliation omitted the immutable controller workflow.'
+  Assert-True ($landingReconcileWorkflow -notmatch 'self-hosted') 'Landing reconciliation must stay GitHub-hosted.'
   Assert-True ($rendered -match 'recover-backlog\.yml') 'Generated YAML omitted recovery.'
   $supervisionWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-repository-supervision.yml') -Raw
   Assert-True ($supervisionWorkflow -match '(?m)^    - cron: ''17 \*/6 \* \* \*''\r?$') 'Repository supervision omitted its offset six-hour schedule.'
@@ -105,7 +113,7 @@ try {
   Assert-True ($issuesWorkflow -match '(?m)^    types: \[dsh-issue\]\r?$') 'Agent Issues lacks the GitHub-token recursion-safe Issue trigger.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
   Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR CI Repair, Agent PR Review\]\r?$') 'Agent Recovery must include each trusted model-backed entry workflow.'
-  Assert-True ($recoveryWorkflow -match [Regex]::Escape('contains(fromJSON(''["failure", "cancelled"]''), github.event.workflow_run.conclusion)')) 'Agent Recovery must retain cancelled-run recovery.'
+  Assert-True ($recoveryWorkflow -match [Regex]::Escape('contains(fromJSON(''["failure", "cancelled", "timed_out", "startup_failure", "stale"]''), github.event.workflow_run.conclusion)')) 'Agent Recovery must retain every terminal infrastructure conclusion.'
 
   & git -C $temp add .github/workflows
   & git -C $temp -c user.name=Bootstrap -c user.email=bootstrap@example.invalid commit -qm 'bootstrap fixtures'
@@ -141,22 +149,36 @@ try {
     '-TargetCheckout', $temp,
     '-ControllerRepository', $repository,
     '-ControllerSha', 'main',
-    '-CiWorkflowName', $ciWorkflow,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
     '-UpstreamRepository', $upstreamRepository
   ) -ExpectedExitCode 1
   Invoke-Bootstrap -Arguments @(
     '-TargetCheckout', (Join-Path $temp '.github'),
     '-ControllerRepository', $repository,
     '-ControllerSha', $sha,
-    '-CiWorkflowName', $ciWorkflow,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
     '-UpstreamRepository', $upstreamRepository
   ) -ExpectedExitCode 1
   Invoke-Bootstrap -Arguments @(
     '-TargetCheckout', $temp,
     '-ControllerRepository', $repository,
     '-ControllerSha', $sha,
-    '-CiWorkflowName', $ciWorkflow,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
     '-UpstreamRepository', 'not-a-repository'
+  ) -ExpectedExitCode 1
+  Invoke-Bootstrap -Arguments @(
+    '-TargetCheckout', $temp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', $sha,
+    '-CiWorkflowNamesJson', '{not-json}',
+    '-UpstreamRepository', $upstreamRepository
+  ) -ExpectedExitCode 1
+  Invoke-Bootstrap -Arguments @(
+    '-TargetCheckout', $temp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', $sha,
+    '-CiWorkflowNamesJson', '["CI","CI"]',
+    '-UpstreamRepository', $upstreamRepository
   ) -ExpectedExitCode 1
 
   Write-Output 'bootstrap-repository tests passed.'

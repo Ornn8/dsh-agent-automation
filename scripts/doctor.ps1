@@ -29,7 +29,7 @@ if ($DryRun) {
     Write-Output "DRY-RUN instance $($instance.Id): $scope -> $($instance.TaskName)"
   }
   foreach ($mapping in @($ops.repositoryMappings)) {
-    Write-Output "DRY-RUN protection $($mapping.repository): strict; $($mapping.ciRequiredCheckName) and codex/review bound to GitHub Actions app id 15368"
+    Write-Output "DRY-RUN protection $($mapping.repository): strict; $(@($mapping.requiredChecks) -join ', ') and codex/review bound to GitHub Actions app id 15368"
   }
   Write-Output "DRY-RUN operations runtime snapshot: $($runtimeSnapshot.id) -> $($runtimeSnapshot.root)"
   Write-Output 'Doctor dry-run completed: no network call, task change, process change, registration, creation, or deletion was requested.'
@@ -90,9 +90,12 @@ foreach ($instance in $instances) {
   $task = Get-ScheduledTask -TaskName $instance.TaskName -ErrorAction SilentlyContinue
   $owned = Test-OwnedProcessRecord -Operations $ops -InstanceId $instance.Id
   if ($entry.Count -eq 1 -and -not [bool]$entry[0].taskEnabled) {
+    Add-Finding "$($instance.Id) heartbeat" $true 'not required while intentionally offline'
     $taskOk = $null -eq $task -and $owned.Ok -and -not $owned.Running
     Add-Finding "$($instance.Id) task/process" $taskOk $(if ($taskOk) { 'intentionally uninstalled; runtime retained' } else { 'manifest disables task but a task/process remains or PID state is invalid' })
   } else {
+    $heartbeat = Test-OperationHeartbeat -Operations $ops -InstanceId $instance.Id
+    Add-Finding "$($instance.Id) heartbeat" $heartbeat.Ok $heartbeat.Detail
     $taskOk = $null -ne $task -and $task.State -eq 'Running' -and $owned.Ok -and $owned.Running
     Add-Finding "$($instance.Id) task/process" $taskOk $(if ($task) { "$($task.State); $($owned.Detail)" } else { 'not installed' })
   }
@@ -110,6 +113,12 @@ if ($ops.dshWebHost.enabled) {
   $task = Get-ScheduledTask -TaskName (Get-DshWebTaskName) -ErrorAction SilentlyContinue
   $owned = Test-OwnedProcessRecord -Operations $ops -InstanceId 'dsh-web'
   $dshManaged = $manifest -and [bool]$manifest.dshWebManaged
+  if ($dshManaged) {
+    $heartbeat = Test-OperationHeartbeat -Operations $ops -InstanceId 'dsh-web'
+    Add-Finding 'DSH Web Host heartbeat' $heartbeat.Ok $heartbeat.Detail
+  } else {
+    Add-Finding 'DSH Web Host heartbeat' $true 'not required while intentionally offline'
+  }
   $dshOk = $dshManaged -and $null -ne $task -and $task.State -eq 'Running' -and $owned.Ok -and $owned.Running
   $taskDetail = if ($task) { "$($task.State); $($owned.Detail)" } else { 'not installed' }
   Add-Finding 'DSH Web Host task/process' $dshOk $taskDetail
@@ -134,10 +143,12 @@ if ($Online) {
   } catch { Add-Finding 'GitHub CLI principal' $false 'gh api user failed' }
   foreach ($mapping in @($ops.repositoryMappings)) {
     try {
-      $actual = & $loaded.Config.ghExecutable variable get DSH_AUTOMATION_CI_WORKFLOW --repo $mapping.repository --json value --jq '.value' 2>$null
-      $matches = $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($actual) -and $actual.Trim().Equals($mapping.ciWorkflowName, [StringComparison]::Ordinal)
-      $variableDetail = if ($matches) { 'matches ciWorkflowName' } else { 'missing or mismatched' }
-      Add-Finding "$($mapping.repository) CI workflow variable" $matches $variableDetail
+      $actualWorkflows = & $loaded.Config.ghExecutable variable get DSH_AUTOMATION_CI_WORKFLOWS --repo $mapping.repository --json value --jq '.value' 2>$null
+      $workflowMatches = $LASTEXITCODE -eq 0 -and $actualWorkflows.Trim().Equals((ConvertTo-Json -InputObject @($mapping.ciWorkflows) -Compress), [StringComparison]::Ordinal)
+      Add-Finding "$($mapping.repository) CI workflows variable" $workflowMatches $(if ($workflowMatches) { 'matches ciWorkflows' } else { 'missing or mismatched' })
+      $actualChecks = & $loaded.Config.ghExecutable variable get DSH_AUTOMATION_REQUIRED_CHECKS --repo $mapping.repository --json value --jq '.value' 2>$null
+      $checkMatches = $LASTEXITCODE -eq 0 -and $actualChecks.Trim().Equals((ConvertTo-Json -InputObject @($mapping.requiredChecks) -Compress), [StringComparison]::Ordinal)
+      Add-Finding "$($mapping.repository) required checks variable" $checkMatches $(if ($checkMatches) { 'matches requiredChecks' } else { 'missing or mismatched' })
     } catch { Add-Finding "$($mapping.repository) CI workflow variable" $false 'query failed' }
     try {
       $protection = Get-RepositoryRequiredStatusChecks -Mapping $mapping -GhExecutable $loaded.Config.ghExecutable
