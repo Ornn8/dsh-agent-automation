@@ -68,6 +68,42 @@ function compactRun(run) {
   }
 }
 
+const ACTIVE_WORKFLOW_RUN_STATUSES = ['queued', 'in_progress', 'requested', 'waiting', 'pending']
+
+/** Read the newest workflow runs plus every currently active run within the bounded page budget. */
+export async function loadRelevantWorkflowRuns({
+  repository,
+  config,
+  environment,
+  request = githubJson,
+  pages = githubPages,
+}) {
+  const [recent, ...activeCollections] = await Promise.all([
+    request({
+      config,
+      environment,
+      path: `repos/${repository}/actions/runs?per_page=100`,
+      description: 'recent workflow runs',
+    }),
+    ...ACTIVE_WORKFLOW_RUN_STATUSES.map(status => pages({
+      config,
+      environment,
+      path: `repos/${repository}/actions/runs?status=${status}`,
+      description: `${status} workflow runs`,
+      collection: 'workflow_runs',
+    })),
+  ])
+  if (!Array.isArray(recent?.workflow_runs)) {
+    throw new Error('Recent workflow runs did not return a workflow_runs array')
+  }
+  const runs = new Map()
+  for (const run of recent.workflow_runs) runs.set(run.id, run)
+  for (const collection of activeCollections) {
+    for (const run of collection.workflow_runs) runs.set(run.id, run)
+  }
+  return [...runs.values()].sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)))
+}
+
 function compactCheck(check) {
   return {
     id: check.id,
@@ -349,7 +385,7 @@ export async function buildRepositorySnapshot({
     githubJson({ config, environment, path: `repos/${repository}/issues?state=closed&per_page=40&sort=updated&direction=desc`, description: 'recent closed Issues' }),
     githubPages({ config, environment, path: `repos/${repository}/pulls?state=open&sort=updated&direction=desc`, description: 'open pull requests' }),
     githubJson({ config, environment, path: `repos/${repository}/pulls?state=closed&per_page=40&sort=updated&direction=desc`, description: 'recent closed pull requests' }),
-    githubPages({ config, environment, path: `repos/${repository}/actions/runs`, description: 'workflow runs', collection: 'workflow_runs' }),
+    loadRelevantWorkflowRuns({ repository, config, environment }),
     githubPages({ config, environment, path: `repos/${repository}/labels`, description: 'labels' }),
     githubJson({ config, environment, path: `repos/${repository}/commits?per_page=30`, description: 'target commits' }),
     githubJson({ config, environment, path: `repos/${upstreamRepository}/commits?sha=${encodeURIComponent(upstreamDefaultBranch)}&per_page=30`, description: 'upstream commits' }),
@@ -398,7 +434,7 @@ export async function buildRepositorySnapshot({
     labels: rawLabels.map(label => label.name),
     issues,
     pullRequests,
-    runs: (rawRuns.workflow_runs || []).map(compactRun),
+    runs: rawRuns.map(compactRun),
     controller,
   }
 }

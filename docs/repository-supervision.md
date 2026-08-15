@@ -56,7 +56,7 @@ The cron minute is intentionally offset from the top of the hour. GitHub schedul
 - Unsafe `agent/dsh` labels are removed deterministically even when the model omits the correction.
 - Repeated fingerprints do not duplicate Issues or comments.
 - Every Issue or pull request target is reread immediately before its mutation; changed state stops the remaining plan.
-- Lists are read through at most three 100-item pages; a still-full final page stops the audit instead of accepting an incomplete snapshot.
+- Complete collections are read through at most three 100-item pages; a still-full final page stops the audit instead of accepting an incomplete snapshot. The repository-wide run inventory intentionally contains the newest 100 workflow runs plus every queued, requested, waiting, pending, or in-progress run; exact open-pull-request checks and runs are collected separately.
 - Formal pull-request reviews are not available to this workflow.
 
 ## Dry run and emergency disablement
