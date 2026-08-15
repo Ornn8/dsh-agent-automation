@@ -6,7 +6,7 @@ on:
   repository_dispatch:
     types: [dsh-issue]
   issues:
-    types: [opened, reopened, labeled]
+    types: [opened, reopened, edited, labeled]
 
 permissions:
   actions: read
@@ -21,7 +21,7 @@ jobs:
       (github.event_name == 'push'
         && github.ref_name == github.event.repository.default_branch)
       || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'issues' && contains(fromJSON('["opened","reopened"]'), github.event.action))
+      || (github.event_name == 'issues' && contains(fromJSON('["opened","reopened","edited"]'), github.event.action))
       || (github.event_name == 'issues'
         && github.event.action == 'labeled'
         && github.event.label.name == 'agent/dsh-failed')
@@ -31,6 +31,7 @@ jobs:
     if: >-
       github.event_name == 'repository_dispatch'
       || (github.event_name == 'issues'
+        && github.event.action == 'labeled'
         && github.event.label.name == 'agent/dsh'
         && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-issue.yml@{{CONTROLLER_SHA}}

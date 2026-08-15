@@ -52,9 +52,31 @@ To add an agent:
 
 No controller workflow needs agent-specific branches. For a command-line agent, `command-json` sends the invocation as JSON on stdin and reads the terminal receipt as JSON from stdout.
 
+## Submitting Issue work
+
+A trusted repository owner, member, or collaborator can queue change work by placing exactly one declaration in an open Issue. Issue title, prose, and acceptance criteria remain the human-readable source of work; the declaration contains routing data only.
+
+````markdown
+<!-- agent-work:v1 -->
+```json
+{
+  "version": 1,
+  "dispatch": "ready",
+  "role": "change",
+  "kind": "integration",
+  "branch": "agent/ci-baseline-integration",
+  "dependsOn": []
+}
+```
+````
+
+`version`, `dispatch`, `role`, `kind`, and `dependsOn` are required. `dispatch` is either `ready` or `hold`; `dispatch: "hold"` does not start a Worker. The current role is `change`. Supported kinds are `implementation`, `bug-fix`, `integration`, and `documentation`. `dependsOn` contains unique Issue numbers and work waits while any listed Issue remains open. `branch` is optional and defaults to `agent/issue-<number>`.
+
+Opening, reopening, or editing the Issue reevaluates the declaration. The parser accepts one strict JSON object; unknown fields fail closed, as do duplicate declarations, invalid values, and unsafe branches. Formatting-only edits keep the same idempotency key, while a routing-field change receives a new key. Do not put shell commands, credentials, agent names, implementation instructions, or acceptance criteria in the routing object.
+
 ## Current behavior
 
-1. Adding the exact `agent/dsh` label to a trusted Issue starts the configured change Worker. The backlog dispatcher selects one ready Issue after each default-branch merge, respects explicit dependencies, and emits an explicit `repository_dispatch` because GitHub suppresses ordinary workflow recursion from its job token.
+1. A ready `agent-work:v1` declaration on a trusted Issue queues the configured change Worker. The backlog dispatcher selects one ready Issue, waits for declared dependencies, records `agent/dsh` as observable queue state for the current DSH Adapter, and emits an explicit `repository_dispatch` because GitHub suppresses ordinary workflow recursion from its job token. The exact label remains a legacy manual trigger for existing repositories.
 2. Opening or updating a same-repository pull request starts the configured review Worker on the review runner. The current Codex Adapter creates a visible ChatGPT Desktop task with the configured project directory using `gpt-5.6-sol` at medium reasoning and archives automated review tasks beyond the newest six. App-server-created tasks remain in Desktop's ungrouped list because the public protocol has no Desktop project-id field. The automated turn runs from an isolated directory with the verified review checkout mounted read-only.
 3. A blocking exact-pair review publishes one idempotent change WorkRequest. Failed CI and explicit trusted rework comments use the same change queue through their validated request forms. When DSH proves that failed CI is unchanged on the default branch, its repair Skill creates or reuses one labeled same-repository Issue instead of changing the unrelated pull request; the ordinary Issue queue then owns that fix.
 4. A default-branch advance first updates behind same-repository pull requests through GitHub's guarded update-branch API. The update runs on the change-role runner with its verified host GitHub credential, so GitHub emits the ordinary pull-request events that start both CI and exact-pair review; the Actions job token is deliberately not used for this mutation because GitHub suppresses its downstream workflow events. Current pairs that did not need a branch update receive an explicit `repository_dispatch` review request; label changes remain audit state and are not treated as event transport. PASS then requests deterministic landing: the landing controller requires a successful GitHub Actions CheckRun whose run and `referenced_workflows` provenance bind the current exact base/head pair to the pinned controller revision, plus the configured Actions-owned aggregate CI CheckRun; it revalidates and squash-merges.

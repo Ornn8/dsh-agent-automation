@@ -100,7 +100,7 @@ if (work.type === 'repair') {
     'api', '--method', 'POST', `repos/${repository}/dispatches`,
     '-f', 'event_type=dsh-issue',
     '-F', `client_payload[issue_number]=${work.number}`,
-    '-f', `client_payload[request_id]=backlog-${work.number}`,
+    '-f', `client_payload[request_id]=${work.requestId || `backlog-${work.number}`}`,
   ], { env: githubEnvironment })
   process.stdout.write(`Dispatched Issue #${work.number} through the trusted repository event.\n`)
 }

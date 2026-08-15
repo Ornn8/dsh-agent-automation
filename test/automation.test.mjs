@@ -56,6 +56,7 @@ import {
   reviewThreadConfig,
 } from '../src/codex-session.mjs'
 import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
+import { agentWorkRequestId, parseAgentWork } from '../src/agent-work.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -837,6 +838,71 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
   assert.deepEqual(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
   }), { type: 'issue', number: 3 })
+})
+
+test('backlog dispatch selects a ready agent-work declaration after its dependencies close', () => {
+  const declaration = {
+    version: 1,
+    dispatch: 'ready',
+    role: 'change',
+    kind: 'integration',
+    branch: 'agent/integrate-ci-baseline',
+    dependsOn: [39],
+  }
+  const body = `Resolve the CI baseline cycle.\n\n<!-- agent-work:v1 -->\n\`\`\`json\n${JSON.stringify(declaration)}\n\`\`\``
+  const workIssue = {
+    number: 40,
+    state: 'open',
+    title: 'Resolve circular CI-baseline repair landing dependency',
+    body,
+    author_association: 'OWNER',
+    labels: [],
+  }
+  const dependency = {
+    number: 39,
+    state: 'open',
+    title: 'Existing dependency',
+    body: '',
+    author_association: 'OWNER',
+    labels: [],
+  }
+
+  assert.equal(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [dependency, workIssue],
+  }), null)
+
+  dependency.state = 'closed'
+  assert.deepEqual(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [dependency, workIssue],
+  }), {
+    type: 'issue',
+    number: 40,
+    role: 'change',
+    requestId: agentWorkRequestId(parseAgentWork(body)),
+  })
+
+  workIssue.body = workIssue.body.replace('"ready"', '"hold"')
+  assert.equal(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [dependency, workIssue],
+  }), null)
+})
+
+test('a later malformed work declaration cannot block an earlier ready Issue', () => {
+  const readyBody = '<!-- agent-work:v1 -->\n```json\n{"version":1,"dispatch":"ready","role":"change","kind":"implementation","dependsOn":[]}\n```'
+  const malformedBody = '<!-- agent-work:v1 -->\n```json\n{"version":1,"dispatch":"ready","role":"change","kind":"unknown","dependsOn":[]}\n```'
+  assert.deepEqual(selectBacklogWork({
+    repository: 'Ornn8/deepseek-harness',
+    pullRequests: [],
+    issues: [
+      { number: 41, state: 'open', title: 'Broken declaration', body: malformedBody, author_association: 'OWNER', labels: [] },
+      { number: 40, state: 'open', title: 'Ready work', body: readyBody, author_association: 'OWNER', labels: [] },
+    ],
+  }), {
+    type: 'issue',
+    number: 40,
+    role: 'change',
+    requestId: agentWorkRequestId(parseAgentWork(readyBody)),
+  })
 })
 
 test('backlog dispatch consumes the CI baseline Issue emitted by the repair Skill', () => {

@@ -1,4 +1,5 @@
 import { declaredIssueBranch, trustedAssociation } from './common.mjs'
+import { agentWorkRequestId, parseAgentWork } from './agent-work.mjs'
 import { baselineIssueWorkItem } from './baseline-issue.mjs'
 import { hasTrustedExactReviewRun } from './landing-policy.mjs'
 
@@ -62,6 +63,25 @@ function actionableIssue(issue) {
     || Boolean(baselineIssueWorkItem(issue))
 }
 
+function issueDispatch(issue) {
+  const work = parseAgentWork(issue.body)
+  if (work) {
+    if (work.dispatch !== 'ready') return null
+    return {
+      dependencies: work.dependsOn,
+      selected: {
+        type: 'issue',
+        number: issue.number,
+        role: work.role,
+        requestId: agentWorkRequestId(work),
+      },
+    }
+  }
+  return actionableIssue(issue)
+    ? { dependencies: issueDependencies(issue.body), selected: { type: 'issue', number: issue.number } }
+    : null
+}
+
 function closesIssue(pullRequest, issueNumber) {
   return new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${issueNumber}\\b`, 'i')
     .test(pullRequest.body || '')
@@ -84,14 +104,17 @@ export function selectBacklogWork({ repository, pullRequests, issues, trustedBlo
   const openIssueNumbers = new Set(issues
     .filter(issue => issue.state === 'open')
     .map(issue => issue.number))
-  const issue = [...issues]
-    .filter(candidate => candidate.state === 'open'
-      && trustedAssociation(candidate.author_association)
-      && actionableIssue(candidate)
-      && !labelNames(candidate).has('agent/dsh-failed')
-      && !labelNames(candidate).has('agent/dsh-blocked')
-      && issueDependencies(candidate.body).every(number => !openIssueNumbers.has(number))
-      && !pullRequests.some(pullRequest => closesIssue(pullRequest, candidate.number)))
-    .sort((left, right) => left.number - right.number)[0]
-  return issue ? { type: 'issue', number: issue.number } : null
+  const candidates = [...issues]
+    .filter(candidate => candidate.state === 'open' && trustedAssociation(candidate.author_association))
+    .sort((left, right) => left.number - right.number)
+  for (const candidate of candidates) {
+    if (labelNames(candidate).has('agent/dsh-failed')
+      || labelNames(candidate).has('agent/dsh-blocked')
+      || pullRequests.some(pullRequest => closesIssue(pullRequest, candidate.number))) continue
+    const dispatch = issueDispatch(candidate)
+    if (dispatch && dispatch.dependencies.every(number => !openIssueNumbers.has(number))) {
+      return dispatch.selected
+    }
+  }
+  return null
 }

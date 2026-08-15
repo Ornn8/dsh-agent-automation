@@ -20,6 +20,7 @@ import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import { baselineIssueWorkItem } from './baseline-issue.mjs'
 import { DSH_ISSUE_SKILL, dshWorkPrompt } from './dsh-work.mjs'
+import { resolveAgentWorkDispatch } from './agent-work.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
@@ -83,11 +84,15 @@ if (!issue.labels?.some(label => label.name === 'agent/dsh')) {
   throw new Error(`Issue #${issueNumber} no longer has the exact agent/dsh label`)
 }
 
+const agentDispatch = resolveAgentWorkDispatch(issue.body || '', issueNumber, issueRequestId)
+const agentWork = agentDispatch?.work
 const branch = authorizedIssueBranch(
   issueNumber,
-  issueBranch(issue.body || '', /^\[BUG\]\s+/i.test(issue.title || '') || baselineIssueWorkItem(issue)
-    ? { number: issueNumber }
-    : undefined),
+  agentDispatch
+    ? agentDispatch.branch
+    : issueBranch(issue.body || '', /^\[BUG\]\s+/i.test(issue.title || '') || baselineIssueWorkItem(issue)
+      ? { number: issueNumber }
+      : undefined),
   defaultBranch,
 )
 const existing = await ghJson([
@@ -147,6 +152,7 @@ try {
     issueNumber,
     defaultBranch,
     branch,
+    ...(agentWork ? { work: agentWork } : {}),
   })
 
   const workerReceipt = await runAgentWorker({

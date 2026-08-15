@@ -4,9 +4,9 @@
 
 ### Automation Domain
 
-This Module owns WorkRequest validation, exact revision identity, idempotency, review verdicts, repair postconditions, and landing eligibility. It contains no model-provider logic. Its Interface uses roles (`change` and `review`) rather than product names.
+This Module owns WorkRequest validation, exact revision identity, idempotency, review verdicts, repair postconditions, and landing eligibility. It contains no model-provider logic. Its Interface uses roles (`change` and `review`) rather than product names. A trusted Issue may declare change routing through one strict `agent-work:v1` JSON block; the Issue prose remains the work specification.
 
-The WorkRequest is the durable Seam between roles. Its subject is either one Issue or one pull request; the request kind fixes which subject is valid. A producer ends after GitHub accepts the event. A consumer starts in a separate workflow run and independently revalidates the live pull request.
+The WorkRequest is the durable Seam between roles. Its subject is either one Issue or one pull request; the request kind fixes which subject is valid. An Issue declaration uses a canonical field hash as its request identity, so formatting changes are idempotent and routing changes produce a new request. A producer ends after GitHub accepts the event. A consumer starts in a separate workflow run and independently revalidates the live Issue or pull request.
 
 ### Agent Worker
 
@@ -35,6 +35,7 @@ GitHub runner labels are the scheduling Interface. `agent-reviewer` and `agent-c
 ```mermaid
 flowchart LR
   G["GitHub event"] --> C["Deterministic controller"]
+  I["Trusted Issue agent-work:v1"] --> C
   C -->|"review role"| RQ["agent-reviewer queue"]
   RQ --> RA["Configured review Worker"]
   RA -->|"immutable Actions proof"| L["Deterministic landing"]
@@ -53,6 +54,7 @@ There is no direct Agent-to-Agent call. GitHub records the handoff before the pr
 - The review Adapter starts each turn in an empty controller-created directory and exposes the head checkout only as read-only data. Repository instructions come from the verified base revision; head-authored instructions cannot become reviewer policy.
 - A controller accepts `completed` only after independently checking the role postcondition, such as a new pull request head, an exact-pair verdict, or an explicit same-head rereview request.
 - Workflows select only the immutable `change` or `review` role. The local controller resolves its worker from the one configured repository mapping and rejects any missing, duplicate, or unknown mapping before invoking an adapter.
+- Issue creation, reopening, or editing queues change work only when the live trusted Issue contains one strict ready `agent-work:v1` declaration. Open dependencies defer dispatch. The worker rejects a queued canonical hash when the declaration changed or disappeared before execution.
 - Workflow and local process timeouts are finite. Cancellation does not become success.
 - A review BLOCK terminates the review job after publishing a WorkRequest. It does not wait for change work.
 - A default-branch advance updates each behind same-repository pull request with its expected head SHA, waits for GitHub to expose the new exact pair, and explicitly dispatches its review because job-token writes do not recurse into workflows. Stacked and fork pull requests are not modified.
@@ -62,7 +64,7 @@ There is no direct Agent-to-Agent call. GitHub records the handoff before the pr
 - The DSH work bundle contributes only `github-issue-work` and `github-pr-repair` as user-explicit, model-hidden runtime Skills. The ordinary Web profile owns agent creation, model selection, durable events, tools, and presentation. A missing Skill fails before the first model call; ACP is not a substitute because its sessions are automation transport rather than Web UI sessions.
 - A CI repair that proves the same failure on the default branch terminates as `blocked` only after its Skill creates or reuses an open same-repository Issue with the exact baseline marker and `agent/dsh` label. The controller verifies that Issue and records `automation/ci-baseline`; the ordinary Issue queue performs the fix. Other valid blocked results become terminal `automation/repair-blocked` state and do not enter automatic recovery. A default-branch advance clears both terminal projections before requesting a new exact-pair review.
 - A completed failed or cancelled top-level Agent Issues, Agent PR Rework, or Agent PR CI Repair run wakes one model-free recovery workflow. Recovery verifies the recorded reusable controller reference, revalidates the current Issue or pull request head, and records at most three exact-subject retry attempts. The cap is a visible `agent/dsh-failed` dead-letter; labels and comments are audit state and cannot authorize recovery.
-- Issue implementation uses the trusted Issue's validated branch declaration, or `agent/issue-<number>` for a bug or a marker-verified CI baseline Issue without one. The controller rejects the protected default branch and any declared branch already used by another open pull request. Marker authorship is audit data used only to avoid overwriting another actor's comment; it never authorizes landing or privileged work.
+- Issue implementation uses the ready declaration's optional validated branch and otherwise `agent/issue-<number>`. Legacy bug, CI-baseline, and explicit branch forms remain accepted during migration. The controller rejects the protected default branch and any declared branch already used by another open pull request. Marker authorship is audit data used only to avoid overwriting another actor's comment; it never authorizes landing or privileged work.
 - A valid blocked Issue receipt records `agent/dsh-blocked`, removes `agent/dsh`, and ends without workflow failure or automatic recovery. A later owner decision can explicitly relabel the Issue; default-branch backlog dispatch skips the blocked projection.
 
 The remaining common failure domains are GitHub, the network, and any machine that hosts more than one runner. Moving a runner to another host changes only its labels and machine-local worker configuration.
