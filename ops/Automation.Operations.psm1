@@ -172,6 +172,8 @@ function Get-RunnerInstances {
       for ($replica = 1; $replica -le [int]$ops.roles.$roleName.replicas; $replica += 1) {
         $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
         $id = "organization-$($roleName)$replicaSuffix"
+        $runnerNameBase = "$($ops.roles.$roleName.runnerNamePrefix)-$organizationKey-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))"
+        $runnerName = if ($replica -eq 1) { $runnerNameBase } else { "$($runnerNameBase.Substring(0, [Math]::Min(64 - $replicaSuffix.Length, $runnerNameBase.Length)))$replicaSuffix" }
         $instances.Add([pscustomobject]@{
           Id = $id
           Role = $roleName
@@ -179,7 +181,7 @@ function Get-RunnerInstances {
           Repository = $null
           RegistrationKind = 'organization'
           RegistrationOwner = $ops.controller.organization
-          RunnerName = "$($ops.roles.$roleName.runnerNamePrefix)-$organizationKey-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))$replicaSuffix"
+          RunnerName = $runnerName
           Labels = @($ops.roles.$roleName.labels)
           RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
           WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
@@ -197,6 +199,8 @@ function Get-RunnerInstances {
         for ($replica = 1; $replica -le [int]$ops.roles.$roleName.replicas; $replica += 1) {
           $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
           $id = "target-$key-$($roleName)$replicaSuffix"
+          $runnerNameBase = "$($ops.roles.$roleName.runnerNamePrefix)-$key-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))"
+          $runnerName = if ($replica -eq 1) { $runnerNameBase } else { "$($runnerNameBase.Substring(0, [Math]::Min(64 - $replicaSuffix.Length, $runnerNameBase.Length)))$replicaSuffix" }
           $instances.Add([pscustomobject]@{
             Id = $id
             Role = $roleName
@@ -204,7 +208,7 @@ function Get-RunnerInstances {
             Repository = $mapping.repository
             RegistrationKind = 'repository'
             RegistrationOwner = $mapping.repository
-            RunnerName = "$($ops.roles.$roleName.runnerNamePrefix)-$key-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))$replicaSuffix"
+            RunnerName = $runnerName
             Labels = @($ops.roles.$roleName.labels)
             RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
             WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
@@ -791,17 +795,19 @@ function Read-InstallManifest {
   }
   $ids = @()
   foreach ($entry in @($manifest.instances)) {
-    if ($entry.id -notmatch '^(?:target-[A-Za-z0-9_.-]+-(?:change|review)|organization-(?:change|review))$') { throw "Invalid manifest instance id: $($entry.id)" }
+    if ($entry.id -notmatch '^(?:target-[A-Za-z0-9_.-]+-(?:change|review)|organization-(?:change|review))(?:-r[2-8])?$') { throw "Invalid manifest instance id: $($entry.id)" }
     if ($entry.id -in $ids) { throw "Duplicate manifest instance id: $($entry.id)" }
     $ids += $entry.id
     if ($entry.role -notin $script:RoleNames -or $entry.registrationKind -notin @('organization', 'repository')) { throw "Invalid manifest role or registration kind for $($entry.id)" }
     if ($entry.registrationOwner -notmatch '^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?$') { throw "Invalid manifest registration owner for $($entry.id)" }
     if ($entry.registrationKind -eq 'repository') {
-      if ($entry.repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or $entry.registrationOwner -cne $entry.repository -or $entry.id -cne "target-$(Get-RepositoryKey -Repository $entry.repository)-$($entry.role)") { throw "Invalid repository registration identity for $($entry.id)" }
-    } elseif (-not [string]::IsNullOrWhiteSpace($entry.repository) -or $entry.id -cne "organization-$($entry.role)") {
+      if ($entry.repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or $entry.registrationOwner -cne $entry.repository) { throw "Invalid repository registration identity for $($entry.id)" }
+      $expectedId = "target-$(Get-RepositoryKey -Repository $entry.repository)-$($entry.role)"
+      if ($entry.id -notmatch "^$([regex]::Escape($expectedId))(?:-r[2-8])?$") { throw "Invalid repository registration identity for $($entry.id)" }
+    } elseif (-not [string]::IsNullOrWhiteSpace($entry.repository) -or $entry.id -notmatch "^organization-$([regex]::Escape([string]$entry.role))(?:-r[2-8])?$") {
       throw "Invalid organization registration identity for $($entry.id)"
     }
-    if ($entry.runnerName -notmatch '^[A-Za-z0-9_.-]+$' -or -not @($entry.labels).Count -or @($entry.labels | Where-Object { $_ -notmatch '^[A-Za-z0-9_.-]+$' }).Count) { throw "Invalid manifest runner name or labels for $($entry.id)" }
+    if ($entry.runnerName -notmatch '^[A-Za-z0-9_.-]+$' -or $entry.runnerName.Length -gt 64 -or -not @($entry.labels).Count -or @($entry.labels | Where-Object { $_ -notmatch '^[A-Za-z0-9_.-]+$' }).Count) { throw "Invalid manifest runner name or labels for $($entry.id)" }
     if ($entry.taskEnabled -isnot [bool]) { throw "Invalid manifest taskEnabled for $($entry.id)" }
     Assert-PathInside -Child $entry.runnerRoot -Parent $manifestInstallRoot -Name "$($entry.id) manifest runner root"
     Assert-PathInside -Child $entry.workDirectory -Parent $manifestStateRoot -Name "$($entry.id) manifest work directory"
@@ -1039,6 +1045,7 @@ function Invoke-OperationsSelfTest {
   $targetInstances = @(Get-RunnerInstances -Loaded $fakeLoaded)
   $results += [pscustomobject]@{ Name = 'target mode creates configured role replicas per repository'; Passed = ($targetInstances.Count -eq 10) }
   $results += [pscustomobject]@{ Name = 'target replica task names are unique'; Passed = (@($targetInstances.TaskName | Select-Object -Unique).Count -eq 10) }
+  $results += [pscustomobject]@{ Name = 'target replica runner names are unique and fit GitHub limits'; Passed = (@($targetInstances.RunnerName | Select-Object -Unique).Count -eq 10 -and -not @($targetInstances.RunnerName | Where-Object { $_.Length -gt 64 }).Count) }
   $results += [pscustomobject]@{ Name = 'replica one retains the original deterministic instance ID'; Passed = ($targetInstances.Id -contains 'target-owner-one-30fa40f53d1e-change') }
   $results += [pscustomobject]@{ Name = 'additional replicas have deterministic suffixed instance IDs'; Passed = ($targetInstances.Id -contains 'target-owner-one-30fa40f53d1e-change-r3') }
   $ownedStart = [DateTime]::SpecifyKind([DateTime]'2026-01-02T03:04:05', [DateTimeKind]::Utc)
