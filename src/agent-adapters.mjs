@@ -9,6 +9,7 @@ import {
 import { runReviewTask } from './codex-session.mjs'
 import { dshModelSelection, dshRpc, runDshWebSession } from './dsh-web-session.mjs'
 import { runOpenCodeCli } from './opencode-cli.mjs'
+import { runClaudeCodeCli } from './claude-code-cli.mjs'
 import { AGENT_REVIEW_SKILL } from './agent-work-result.mjs'
 
 /** Build the machine-local adapter registry used by the Agent Worker module. */
@@ -107,6 +108,23 @@ export function createAgentAdapters({
     },
     'opencode-cli': {
       run: input => runOpenCodeCli({
+        ...input,
+        runCommand,
+        environment: input.worker.mode === 'review'
+          ? reviewerCredentialEnvironment()
+          : hostCredentialEnvironment(),
+      }),
+      health: async ({ worker }) => {
+        const result = await runCommand(worker.executable, ['--version'], {
+          env: worker.mode === 'review'
+            ? reviewerCredentialEnvironment()
+            : hostCredentialEnvironment(),
+        })
+        return { detail: result.stdout.trim() }
+      },
+    },
+    'claude-code-cli': {
+      run: input => runClaudeCodeCli({
         ...input,
         runCommand,
         environment: input.worker.mode === 'review'

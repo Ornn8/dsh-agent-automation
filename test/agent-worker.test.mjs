@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { checkAgentWorker, normalizeWorkerConfig, runAgentWorker } from '../src/agent-worker.mjs'
 import { createAgentAdapters } from '../src/agent-adapters.mjs'
+import { parseClaudeCodeOutput } from '../src/claude-code-cli.mjs'
 import { parseOpenCodeRunOutput } from '../src/opencode-cli.mjs'
 
 test('a controller invokes any configured worker through one interface', async () => {
@@ -94,6 +95,168 @@ test('a command-json adapter lets a new agent join without controller changes', 
   assert.equal(JSON.parse(calls[0].options.input).taskId, 'issue-42')
   assert.equal(receipt.sessionId, 'luna-42')
   assert.equal(receipt.output, 'result')
+})
+
+test('the Claude Code CLI adapter runs change work through the shared worker interface', async () => {
+  const calls = []
+  const started = []
+  let mountedSkill
+  let pluginDirectory
+  const finalMessage = '完成。\n<!-- agent-automation-result\n{"version":1,"outcome":"completed","summary":"已提交 PR。"}\n-->'
+  const adapters = createAgentAdapters({
+    runCommand: async (command, args, options) => {
+      calls.push({ command, args, options })
+      pluginDirectory = args[args.indexOf('--plugin-dir') + 1]
+      mountedSkill = await readFile(path.join(
+        pluginDirectory, 'skills', 'github-issue-work', 'SKILL.md',
+      ), 'utf8')
+      const firstEvent = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-change' })
+      options.onStdout(`${firstEvent}\n`)
+      assert.deepEqual(started, [{ sessionId: 'claude-change' }])
+      return {
+        stdout: [
+          firstEvent,
+          JSON.stringify({
+            type: 'result', subtype: 'success', is_error: false,
+            session_id: 'claude-change', result: finalMessage,
+          }),
+        ].join('\n'),
+        stderr: '',
+      }
+    },
+  })
+
+  const receipt = await runAgentWorker({
+    config: { workers: { claude: {
+      adapter: 'claude-code-cli', executable: 'claude.exe', mode: 'change',
+      model: 'opus', effort: 'max',
+    } } },
+    workerId: 'claude',
+    invocation: {
+      taskId: 'issue-repo-42-request', cwd: 'F:\\checkout', title: 'Issue 42',
+      prompt: '/github-issue-work {"repository":"owner/repo","issueNumber":42}',
+      requiredSkill: 'github-issue-work', timeoutMs: 90_000,
+      onStarted: value => started.push(value),
+    },
+    adapters,
+  })
+
+  assert.equal(calls[0].command, 'claude.exe')
+  assert.equal(calls[0].args.includes('--permission-mode'), true)
+  assert.equal(calls[0].args.includes('bypassPermissions'), true)
+  assert.equal(calls[0].args.includes('opus'), true)
+  assert.equal(calls[0].args.includes('max'), true)
+  assert.equal(calls[0].options.cwd, 'F:\\checkout')
+  assert.match(calls[0].options.input, /^\/dsh-github-work:github-issue-work /)
+  assert.match(mountedSkill, /^---\nname: github-issue-work\n/)
+  await assert.rejects(access(pluginDirectory))
+  assert.deepEqual(started, [{ sessionId: 'claude-change' }])
+  assert.equal(receipt.sessionId, 'claude-change')
+  assert.equal(receipt.outcome, 'completed')
+  assert.equal(receipt.detail, '已提交 PR。')
+  assert.equal(receipt.output, finalMessage)
+})
+
+test('the Claude Code CLI adapter isolates untrusted review work from credentials and writes', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-claude-review-test-'))
+  const checkout = path.join(root, 'checkout')
+  await mkdir(checkout)
+  const base = '3'.repeat(40)
+  const head = '4'.repeat(40)
+  let claudeCall
+  let reviewBundle
+  let reviewSkill
+  const adapters = createAgentAdapters({
+    runCommand: async (command, args, options) => {
+      if (command === 'git.exe') {
+        if (args.includes('diff')) return { stdout: 'diff --git a/src/b.js b/src/b.js\n+review me\n', stderr: '' }
+        if (args.includes('ls-tree')) return { stdout: 'AGENTS.md\nsrc/AGENTS.md\nsrc/b.js\n', stderr: '' }
+        if (args.includes('show')) return { stdout: `trusted guidance for ${args.at(-1)}\n`, stderr: '' }
+        throw new Error(`Unexpected git invocation: ${args.join(' ')}`)
+      }
+      claudeCall = { command, args, options }
+      reviewBundle = JSON.parse(await readFile(path.join(options.cwd, 'review-input.json'), 'utf8'))
+      reviewSkill = await readFile(args[args.indexOf('--append-system-prompt-file') + 1], 'utf8')
+      const firstEvent = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-review' })
+      options.onStdout(`${firstEvent}\n`)
+      return {
+        stdout: [
+          firstEvent,
+          JSON.stringify({
+            type: 'result', subtype: 'success', is_error: false,
+            session_id: 'claude-review', result: 'VERDICT: PASS',
+          }),
+        ].join('\n'),
+        stderr: '',
+      }
+    },
+  })
+  try {
+    const receipt = await runAgentWorker({
+      config: { workers: { reviewer: {
+        adapter: 'claude-code-cli', executable: 'claude.exe', gitExecutable: 'git.exe',
+        mode: 'review', model: 'sonnet', effort: 'high',
+      } } },
+      workerId: 'reviewer',
+      invocation: {
+        taskId: `review-${base}-${head}`, cwd: checkout, title: 'Review PR #42',
+        prompt: 'Review this exact pull request pair.', requiredSkill: 'github-pr-review',
+        timeoutMs: 60_000,
+      },
+      adapters,
+    })
+
+    assert.equal(claudeCall.command, 'claude.exe')
+    assert.notEqual(claudeCall.options.cwd, checkout)
+    assert.equal(claudeCall.args.includes('--setting-sources'), true)
+    assert.equal(claudeCall.args.includes('project'), true)
+    assert.equal(claudeCall.args.includes('--disable-slash-commands'), true)
+    assert.equal(claudeCall.args.includes('dontAsk'), true)
+    assert.equal(claudeCall.args.includes('Read,Glob,Grep'), true)
+    assert.equal(claudeCall.args.includes('mcp__*'), true)
+    assert.equal(claudeCall.args.includes('--strict-mcp-config'), true)
+    assert.equal(claudeCall.args.includes('{"mcpServers":{}}'), true)
+    assert.equal(claudeCall.args.includes(checkout), true)
+    assert.equal(claudeCall.options.env.GH_TOKEN, undefined)
+    assert.equal(claudeCall.options.env.GITHUB_TOKEN, undefined)
+    assert.equal(claudeCall.options.env.ANTHROPIC_API_KEY, undefined)
+    assert.equal(claudeCall.options.env.DEEPSEEK_API_KEY, undefined)
+    assert.equal(claudeCall.options.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1')
+    assert.equal(claudeCall.options.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1')
+    assert.equal(claudeCall.options.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1')
+    assert.deepEqual(reviewBundle, {
+      version: 1,
+      base,
+      head,
+      diff: 'diff --git a/src/b.js b/src/b.js\n+review me\n',
+      guidance: {
+        'AGENTS.md': `trusted guidance for ${base}:AGENTS.md\n`,
+        'src/AGENTS.md': `trusted guidance for ${base}:src/AGENTS.md\n`,
+      },
+    })
+    assert.match(reviewSkill, /^The trusted controller invokes this Skill/)
+    assert.equal(receipt.sessionId, 'claude-review')
+    assert.equal(receipt.output, 'VERDICT: PASS')
+    await assert.rejects(access(claudeCall.options.cwd))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Claude Code JSON output fails closed on malformed, failed, duplicate, or mixed sessions', () => {
+  assert.throws(() => parseClaudeCodeOutput('not-json'), /not valid JSON/)
+  assert.throws(() => parseClaudeCodeOutput([
+    JSON.stringify({ type: 'system', session_id: 'one' }),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'two', result: 'done' }),
+  ].join('\n')), /exactly one session_id/)
+  assert.throws(() => parseClaudeCodeOutput(JSON.stringify({
+    type: 'result', subtype: 'error_max_turns', is_error: true,
+    session_id: 'one', result: 'stopped',
+  })), /session failed/)
+  assert.throws(() => parseClaudeCodeOutput([
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'one', result: 'one' }),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'one', result: 'two' }),
+  ].join('\n')), /exactly one result/)
 })
 
 test('the OpenCode CLI adapter runs change work through the shared worker interface', async () => {

@@ -56,6 +56,24 @@
               }
             }]
           }
+        }, {
+          "if": { "properties": { "adapter": { "const": "claude-code-cli" } }, "required": ["adapter"] },
+          "then": {
+            "required": ["executable", "mode", "model", "effort"],
+            "properties": {
+              "executable": { "type": "string", "minLength": 1 },
+              "mode": { "enum": ["change", "review"] },
+              "model": { "type": "string", "minLength": 1 },
+              "effort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultracode"] }
+            },
+            "allOf": [{
+              "if": { "properties": { "mode": { "const": "review" } }, "required": ["mode"] },
+              "then": {
+                "required": ["gitExecutable"],
+                "properties": { "gitExecutable": { "type": "string", "minLength": 1 } }
+              }
+            }]
+          }
         }]
       }
     },

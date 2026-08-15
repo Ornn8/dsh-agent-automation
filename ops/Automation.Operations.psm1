@@ -56,6 +56,21 @@ function Assert-AgentWorkerConfiguration {
       }
       continue
     }
+    if ($worker.adapter -eq 'claude-code-cli') {
+      foreach ($field in 'executable', 'model', 'effort') {
+        if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
+          throw "workers.$($property.Name).$field is required for a claude-code-cli worker"
+        }
+      }
+      if ($worker.effort -notin @('low', 'medium', 'high', 'xhigh', 'max', 'ultracode')) {
+        throw "workers.$($property.Name).effort is not supported"
+      }
+      if ($worker.mode -notin @('change', 'review')) { throw "workers.$($property.Name).mode must be change or review" }
+      if ($worker.mode -eq 'review' -and ($worker.gitExecutable -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.gitExecutable))) {
+        throw "workers.$($property.Name).gitExecutable is required for review"
+      }
+      continue
+    }
     if ($worker.adapter -ne 'opencode-cli') { continue }
     foreach ($field in 'executable', 'model', 'variant') {
       if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
@@ -981,6 +996,13 @@ function Invoke-OperationsSelfTest {
   try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = $validOpenCodeReview }); $results[-1].Passed = $true } catch {}
   $results += [pscustomobject]@{ Name = 'OpenCode review worker rejects a missing Git executable'; Passed = $false }
   try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'opencode-cli'; executable = 'opencode.exe'; mode = 'review'; model = 'openai/gpt-5'; variant = 'medium' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'gitExecutable' }
+  $validClaudeReview = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'sonnet'; effort = 'high' }
+  $results += [pscustomobject]@{ Name = 'Claude Code review worker requires a complete CLI selection'; Passed = $false }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = $validClaudeReview }); $results[-1].Passed = $true } catch {}
+  $results += [pscustomobject]@{ Name = 'Claude Code review worker rejects a missing Git executable'; Passed = $false }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; mode = 'review'; model = 'sonnet'; effort = 'high' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'gitExecutable' }
+  $results += [pscustomobject]@{ Name = 'Claude Code worker rejects an unsupported effort'; Passed = $false }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'sonnet'; effort = 'impossible' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'effort' }
   $fakeOps = [pscustomobject]@{
     installRoot = $selfTestInstallRoot
     stateRoot = $selfTestStateRoot
