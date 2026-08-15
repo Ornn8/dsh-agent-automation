@@ -97,6 +97,7 @@ try {
   Assert-True ($supervisionWorkflow -match [Regex]::Escape("upstream_repository: $upstreamRepository")) 'Repository supervision omitted the rendered upstream repository.'
   Assert-True ($supervisionWorkflow -match [Regex]::Escape("uses: $repository/.github/workflows/repository-supervisor.yml@$sha")) 'Repository supervision omitted the immutable controller workflow.'
   Assert-True ($supervisionWorkflow -match [Regex]::Escape("apply_changes: `${{ github.event_name == 'schedule' || inputs.apply_changes }}")) 'Repository supervision did not keep manual dry-run and scheduled apply behavior separate.'
+  Assert-True ($supervisionWorkflow -match '(?m)^  contents: write\r?$') 'Repository supervision cannot emit the deterministic Issue dispatch.'
   $issuesWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-issues.yml') -Raw
   foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: write', 'pull-requests: write')) {
     Assert-True ($issuesWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent Issues omitted caller permission $permission."

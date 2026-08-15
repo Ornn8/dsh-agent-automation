@@ -37,7 +37,7 @@ test('reusable workflow isolates the model and bounds target writes', async () =
   const workflow = await readFile(new URL('../.github/workflows/repository-supervisor.yml', import.meta.url), 'utf8')
   assert.match(workflow, /workflow_call:/)
   assert.match(workflow, /runs-on: \[self-hosted, agent-reviewer\]/)
-  assert.match(workflow, /contents: read/)
+  assert.match(workflow, /contents: write/)
   assert.match(workflow, /issues: write/)
   assert.match(workflow, /pull-requests: write/)
   assert.match(workflow, /persist-credentials: false/g)
