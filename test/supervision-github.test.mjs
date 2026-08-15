@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { githubPages } from '../src/supervision-github.mjs'
+import { loadRelevantWorkflowRuns } from '../src/supervision-snapshot.mjs'
 
 test('reads every bounded GitHub page and fails closed when the third page is full', async () => {
   const requested = []
@@ -39,4 +40,42 @@ test('merges paginated GitHub envelope arrays and honors their total count', asy
   })
   assert.equal(result.total_count, 200)
   assert.deepEqual(result.workflow_runs, values)
+})
+
+test('repository workflow snapshot bounds history but includes every active status', async () => {
+  const requestedStatuses = []
+  const recent = [
+    { id: 1, created_at: '2026-08-15T10:00:00Z', status: 'completed' },
+    { id: 2, created_at: '2026-08-15T09:00:00Z', status: 'queued' },
+  ]
+  const active = {
+    queued: [{ id: 2, created_at: '2026-08-15T09:00:00Z', status: 'queued' }],
+    in_progress: [{ id: 3, created_at: '2026-08-14T09:00:00Z', status: 'in_progress' }],
+    requested: [],
+    waiting: [],
+    pending: [],
+  }
+  const result = await loadRelevantWorkflowRuns({
+    repository: 'example/project',
+    request: async ({ path }) => {
+      assert.equal(path, 'repos/example/project/actions/runs?per_page=100')
+      return { workflow_runs: recent }
+    },
+    pages: async ({ path, collection }) => {
+      assert.equal(collection, 'workflow_runs')
+      const status = new URL(path, 'https://api.github.invalid/').searchParams.get('status')
+      requestedStatuses.push(status)
+      return { workflow_runs: active[status] }
+    },
+  })
+  assert.deepEqual(requestedStatuses, ['queued', 'in_progress', 'requested', 'waiting', 'pending'])
+  assert.deepEqual(result.map(run => run.id), [1, 2, 3])
+})
+
+test('repository workflow snapshot rejects a malformed recent response', async () => {
+  await assert.rejects(loadRelevantWorkflowRuns({
+    repository: 'example/project',
+    request: async () => ({ total_count: 2 }),
+    pages: async () => ({ workflow_runs: [] }),
+  }), /Recent workflow runs did not return a workflow_runs array/)
 })
