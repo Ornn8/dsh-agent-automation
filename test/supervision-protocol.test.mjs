@@ -40,7 +40,12 @@ const issueBody = ({ dependency = '', branch = 'agent/gui-02-standalone-shell' }
   '- `src/file.mjs:1` demonstrates the defect.',
 ].filter(value => value !== undefined).join('\n')
 
-const evidence = [{ source: 'master', reference: 'src/file.mjs:1', detail: 'The default branch contains the failing path.' }]
+const evidence = [{
+  source: 'master',
+  reference: 'src/file.mjs:1',
+  excerpt: 'const failingPath = true',
+  detail: 'The default branch contains the failing path.',
+}]
 
 function snapshot(overrides = {}) {
   return {
@@ -112,12 +117,30 @@ test('blocks agent/dsh when an open pull request or active run already owns the 
   assert.match(result.reasons.join(' '), /workflow run 99/)
 })
 
-test('enforces the GUI predecessor sequence', () => {
+test('uses explicit Issue dependencies instead of repository-specific sequencing', () => {
   const state = snapshot({ issues: [
     { number: 2, title: '[GUI-01] Baseline', body: issueBody({ branch: 'agent/gui-01' }), state: 'open', labels: [], comments: [] },
     { number: 3, title: '[GUI-02] Standalone shell', body: issueBody(), state: 'open', labels: [], comments: [] },
   ] })
-  assert.match(agentDshEligibility(state.issues[1], state).reasons.join(' '), /#2 must be closed/)
+  assert.deepEqual(agentDshEligibility(state.issues[1], state), { eligible: true, reasons: [] })
+  state.issues[1].body = issueBody({ dependency: 'Depends on #2.' })
+  assert.match(agentDshEligibility(state.issues[1], state).reasons.join(' '), /dependency #2 is still open/)
+})
+
+test('requires an exact source excerpt for file and upstream evidence', () => {
+  const proposal = {
+    version: 1,
+    summary: 'Create one evidence-backed Issue.',
+    actions: [{
+      type: 'create_issue',
+      fingerprint: 'missing-source-excerpt',
+      title: '[BUG] Missing source excerpt',
+      body: issueBody({ branch: 'agent/missing-source-excerpt' }),
+      labels: [],
+      evidence: [{ source: 'master', reference: 'src/file.mjs:1', detail: 'A real path alone is insufficient evidence.' }],
+    }],
+  }
+  assert.throws(() => validateSupervisionProposal(proposal), /excerpt/)
 })
 
 test('allows agent/dsh only for a complete ready Issue', () => {

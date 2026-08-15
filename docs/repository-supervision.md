@@ -37,7 +37,7 @@ jobs:
   supervise:
     uses: Ornn8/dsh-agent-automation/.github/workflows/repository-supervisor.yml@<full-controller-sha>
     with:
-      upstream_repository: deepseek-ai/deepseek-harness
+      upstream_repository: upstream-owner/upstream-repository
       apply_changes: ${{ github.event_name == 'schedule' || inputs.apply_changes }}
       max_mutations: 5
 ```
@@ -47,13 +47,16 @@ The cron minute is intentionally offset from the top of the hour. GitHub schedul
 ## Guardrails
 
 - The target default branch and upstream head are re-read at run time.
+- Default-branch, pull-request, and upstream file evidence includes an exact line excerpt that the controller rereads; pull-request and upstream evidence must identify a line added or modified by the referenced change, and upstream evidence must name a commit that is reachable from the audited upstream head but absent from the target branch.
 - The target checkout must equal the live default-branch head.
-- The configured review worker must use the credential-isolated `codex-app` adapter.
+- The configured review Adapter must isolate credentials and provide read-only access for `github-repository-supervision`; unsupported Skills fail before any GitHub write.
 - Repository content and GitHub discussion are treated as untrusted data.
 - The model cannot execute code or use GitHub CLI.
 - At most one Issue and five total GitHub mutations may be proposed per run.
 - Unsafe `agent/dsh` labels are removed deterministically even when the model omits the correction.
 - Repeated fingerprints do not duplicate Issues or comments.
+- Every Issue or pull request target is reread immediately before its mutation; changed state stops the remaining plan.
+- Lists are read through at most three 100-item pages; a still-full final page stops the audit instead of accepting an incomplete snapshot.
 - Formal pull-request reviews are not available to this workflow.
 
 ## Dry run and emergency disablement

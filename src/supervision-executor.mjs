@@ -1,5 +1,5 @@
 import { appendFile } from 'node:fs/promises'
-import { githubJson } from './supervision-github.mjs'
+import { githubJson, githubPages } from './supervision-github.mjs'
 import { issueTitleSimilarity } from './supervision-protocol.mjs'
 import { run } from './common.mjs'
 
@@ -18,6 +18,49 @@ function evidenceSourcesFor(action) {
   return new Set(['issue_state'])
 }
 
+function referencedLine(content, line, reference) {
+  const lines = String(content).split(/\r?\n/)
+  if (line < 1 || line > lines.length) throw new Error(`Evidence line is outside ${reference}`)
+  return lines[line - 1]
+}
+
+function assertEvidenceExcerpt(item, content, line) {
+  if (!referencedLine(content, line, item.reference).includes(item.excerpt)) {
+    throw new Error(`Evidence excerpt does not match line ${line} of ${item.reference}`)
+  }
+}
+
+function addedPatchLine(patch, line) {
+  let newLine
+  for (const text of String(patch || '').split(/\r?\n/)) {
+    const hunk = text.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+    if (hunk) {
+      newLine = Number.parseInt(hunk[1], 10)
+      continue
+    }
+    if (newLine === undefined || text.startsWith('\\')) continue
+    if (text.startsWith('+') && !text.startsWith('+++')) {
+      if (newLine === line) return text.slice(1)
+      newLine += 1
+      continue
+    }
+    if (text.startsWith('-') && !text.startsWith('---')) continue
+    if (text.startsWith(' ')) newLine += 1
+  }
+  return undefined
+}
+
+function assertChangedEvidenceExcerpt(item, patch, line) {
+  const changedLine = addedPatchLine(patch, line)
+  if (changedLine === undefined || !changedLine.includes(item.excerpt)) {
+    throw new Error(`Evidence excerpt does not match a changed line ${line} of ${item.reference}`)
+  }
+}
+
+function encodedRepositoryPath(path) {
+  return path.split('/').map(segment => encodeURIComponent(segment)).join('/')
+}
+
 /** Map controller close semantics onto the values accepted by GitHub's Issue API. */
 export function issueCloseStateReason(reason) {
   if (reason === 'completed') return 'completed'
@@ -25,7 +68,14 @@ export function issueCloseStateReason(reason) {
   throw new Error(`Unsupported Issue close reason: ${reason}`)
 }
 
-async function validateEvidence(action, snapshot, { config, targetCheckout }) {
+export async function validateSupervisionEvidence(action, snapshot, {
+  config,
+  targetCheckout,
+  environment,
+  repository = snapshot?.repository,
+  runCommand = run,
+  githubRequest = githubJson,
+}) {
   const allowed = evidenceSourcesFor(action)
   for (const item of action.evidence) {
     if (!allowed.has(item.source)) throw new Error(`${action.type} cannot use ${item.source} evidence`)
@@ -33,11 +83,9 @@ async function validateEvidence(action, snapshot, { config, targetCheckout }) {
     if (item.source === 'master') {
       const match = item.reference.match(/^(.+):(\d+)$/)
       if (!match || !safeRepositoryPath(match[1])) throw new Error(`Invalid master evidence reference: ${item.reference}`)
-      const content = (await run(config.gitExecutable, ['-C', targetCheckout, 'show', `HEAD:${match[1]}`])).stdout
+      const content = (await runCommand(config.gitExecutable, ['-C', targetCheckout, 'show', `HEAD:${match[1]}`])).stdout
       const line = Number.parseInt(match[2], 10)
-      if (line < 1 || line > content.split(/\r?\n/).length) {
-        throw new Error(`Master evidence line is outside ${match[1]}: ${line}`)
-      }
+      assertEvidenceExcerpt(item, content, line)
       continue
     }
 
@@ -51,10 +99,28 @@ async function validateEvidence(action, snapshot, { config, targetCheckout }) {
     }
 
     if (item.source === 'upstream') {
-      const match = item.reference.match(/^sha:([0-9a-f]{40})$/i)
-      if (!match || match[1].toLowerCase() !== snapshot.upstream.headSha.toLowerCase() || snapshot.upstream.behind < 1) {
-        throw new Error(`Upstream evidence does not name the current ahead-of-fork upstream head: ${item.reference}`)
+      const match = item.reference.match(/^sha:([0-9a-f]{40}):(.+):(\d+)$/i)
+      if (!match || !safeRepositoryPath(match[2]) || snapshot.upstream.behind < 1) {
+        throw new Error(`Invalid upstream evidence reference: ${item.reference}`)
       }
+      const commit = match[1].toLowerCase()
+      const upstreamMergeBase = (await runCommand(config.gitExecutable, [
+        '-C', targetCheckout, 'merge-base', commit, snapshot.upstream.gitRef,
+      ])).stdout.trim().toLowerCase()
+      if (upstreamMergeBase !== commit) throw new Error(`Upstream evidence commit is not reachable from the audited upstream head: ${commit}`)
+      const targetMergeBase = (await runCommand(config.gitExecutable, [
+        '-C', targetCheckout, 'merge-base', commit, 'HEAD',
+      ])).stdout.trim().toLowerCase()
+      if (targetMergeBase === commit) throw new Error(`Upstream evidence commit is already present in the target default branch: ${commit}`)
+      const content = (await runCommand(config.gitExecutable, [
+        '-C', targetCheckout, 'show', `${commit}:${match[2]}`,
+      ])).stdout
+      const line = Number.parseInt(match[3], 10)
+      assertEvidenceExcerpt(item, content, line)
+      const patch = (await runCommand(config.gitExecutable, [
+        '-C', targetCheckout, 'show', '--format=', '--unified=0', '--no-ext-diff', commit, '--', match[2],
+      ])).stdout
+      assertChangedEvidenceExcerpt(item, patch, line)
       continue
     }
 
@@ -62,12 +128,25 @@ async function validateEvidence(action, snapshot, { config, targetCheckout }) {
       const match = item.reference.match(/^#(\d+):(.+):(\d+)$/)
       if (!match || !safeRepositoryPath(match[2])) throw new Error(`Invalid pull request evidence reference: ${item.reference}`)
       const pullRequest = snapshot.pullRequests.find(pr => pr.number === Number.parseInt(match[1], 10))
-      if (!pullRequest || !pullRequest.files.some(file => file.path === match[2])) {
+      const changedFile = pullRequest?.files.find(file => file.path === match[2])
+      if (!pullRequest || !changedFile) {
         throw new Error(`Pull request evidence path is not in the audited pull request: ${item.reference}`)
       }
       if (action.type === 'comment_pr' && pullRequest.number !== action.number) {
         throw new Error(`comment_pr evidence must name pull request #${action.number}`)
       }
+      const file = await githubRequest({
+        config,
+        environment,
+        path: `repos/${repository}/contents/${encodedRepositoryPath(match[2])}?ref=${encodeURIComponent(pullRequest.head.sha)}`,
+        description: `pull request #${pullRequest.number} evidence file`,
+      })
+      if (file?.encoding !== 'base64' || typeof file.content !== 'string') {
+        throw new Error(`Pull request evidence file is not a base64 GitHub file: ${item.reference}`)
+      }
+      const line = Number.parseInt(match[3], 10)
+      assertEvidenceExcerpt(item, Buffer.from(file.content.replace(/\s/g, ''), 'base64').toString('utf8'), line)
+      assertChangedEvidenceExcerpt(item, changedFile.patch, line)
       continue
     }
 
@@ -102,14 +181,110 @@ function withMarker(body, marker) {
 function blockedComment(action) {
   const details = action.blockingReasons.join('; ')
   return withMarker(
-    `BLOCKED: Issue #${action.number} cannot execute now because ${details}. DSH must stop, create no commit, push no branch, open no pull request, and discard temporary work.`,
+    `BLOCKED: Issue #${action.number} cannot execute now because ${details}. The assigned change agent must stop, create no commit, push no branch, open no pull request, and discard temporary work.`,
     action.marker,
   )
 }
 
-async function executeAction(action, { repository, config, environment }) {
+function labelValues(labels) {
+  return (labels || []).map(label => typeof label === 'string' ? label : label.name).filter(Boolean).sort()
+}
+
+function issueMutationIdentity(issue) {
+  return JSON.stringify({
+    state: issue?.state,
+    stateReason: issue?.stateReason ?? issue?.state_reason ?? null,
+    updatedAt: issue?.updatedAt ?? issue?.updated_at,
+    title: issue?.title,
+    body: issue?.body,
+    labels: labelValues(issue?.labels),
+  })
+}
+
+function issueIdentityAfterLabelRemoval(issue, label) {
+  return JSON.stringify({
+    state: issue?.state,
+    stateReason: issue?.stateReason ?? issue?.state_reason ?? null,
+    title: issue?.title,
+    body: issue?.body,
+    labels: labelValues(issue?.labels).filter(value => value !== label),
+  })
+}
+
+function currentIssueIdentityAfterLabelRemoval(issue) {
+  return JSON.stringify({
+    state: issue?.state,
+    stateReason: issue?.stateReason ?? issue?.state_reason ?? null,
+    title: issue?.title,
+    body: issue?.body,
+    labels: labelValues(issue?.labels),
+  })
+}
+
+function pullRequestMutationIdentity(pullRequest) {
+  return JSON.stringify({
+    state: pullRequest?.state,
+    draft: Boolean(pullRequest?.draft),
+    updatedAt: pullRequest?.updatedAt ?? pullRequest?.updated_at,
+    mergedAt: pullRequest?.mergedAt ?? pullRequest?.merged_at ?? null,
+    closedAt: pullRequest?.closedAt ?? pullRequest?.closed_at ?? null,
+    title: pullRequest?.title,
+    body: pullRequest?.body,
+    labels: labelValues(pullRequest?.labels),
+    headRef: pullRequest?.head?.ref,
+    headSha: pullRequest?.head?.sha,
+    baseRef: pullRequest?.base?.ref,
+    baseSha: pullRequest?.base?.sha,
+  })
+}
+
+async function assertMutationTargetCurrent(action, snapshot, {
+  repository,
+  config,
+  environment,
+  githubRequest,
+}) {
   if (action.type === 'create_issue') {
-    await githubJson({
+    const currentIssues = await githubPages({
+      config,
+      environment,
+      path: `repos/${repository}/issues?state=all&sort=updated&direction=desc`,
+      description: 'live Issues before Issue creation',
+      request: githubRequest,
+    })
+    const duplicate = currentIssues.find(issue => !issue.pull_request && issueTitleSimilarity(action.title, issue.title) >= 0.72)
+    if (duplicate) throw new Error(`Repository state changed before create_issue: Issue #${duplicate.number} now overlaps the proposal`)
+    return
+  }
+
+  if (action.type === 'comment_pr') {
+    const audited = snapshot.pullRequests.find(pullRequest => pullRequest.number === action.number)
+    const current = await githubRequest({
+      config, environment, path: `repos/${repository}/pulls/${action.number}`, description: `pull request #${action.number} mutation precondition`,
+    })
+    if (!audited || pullRequestMutationIdentity(audited) !== pullRequestMutationIdentity(current)) {
+      throw new Error(`Pull request #${action.number} changed before its supervision mutation`)
+    }
+    return
+  }
+
+  const numbers = action.type === 'close_issue' && action.reason === 'duplicate'
+    ? [action.number, action.duplicateOf]
+    : [action.number]
+  for (const number of numbers) {
+    const audited = snapshot.issues.find(issue => issue.number === number)
+    const current = await githubRequest({
+      config, environment, path: `repos/${repository}/issues/${number}`, description: `Issue #${number} mutation precondition`,
+    })
+    if (!audited || issueMutationIdentity(audited) !== issueMutationIdentity(current)) {
+      throw new Error(`Issue #${number} changed before its supervision mutation`)
+    }
+  }
+}
+
+async function executeAction(action, { repository, config, environment, githubRequest, snapshot }) {
+  if (action.type === 'create_issue') {
+    await githubRequest({
       config,
       environment,
       path: `repos/${repository}/issues`,
@@ -120,7 +295,7 @@ async function executeAction(action, { repository, config, environment }) {
     return
   }
   if (action.type === 'comment_issue' || action.type === 'comment_pr') {
-    await githubJson({
+    await githubRequest({
       config,
       environment,
       path: `repos/${repository}/issues/${action.number}/comments`,
@@ -131,7 +306,7 @@ async function executeAction(action, { repository, config, environment }) {
     return
   }
   if (action.type === 'close_issue') {
-    await githubJson({
+    await githubRequest({
       config,
       environment,
       path: `repos/${repository}/issues/${action.number}`,
@@ -142,7 +317,7 @@ async function executeAction(action, { repository, config, environment }) {
     return
   }
   if (action.type === 'reopen_issue') {
-    await githubJson({
+    await githubRequest({
       config,
       environment,
       path: `repos/${repository}/issues/${action.number}`,
@@ -153,7 +328,7 @@ async function executeAction(action, { repository, config, environment }) {
     return
   }
   if (action.type === 'add_label') {
-    await githubJson({
+    await githubRequest({
       config,
       environment,
       path: `repos/${repository}/issues/${action.number}/labels`,
@@ -164,12 +339,25 @@ async function executeAction(action, { repository, config, environment }) {
     return
   }
 
-  await run(config.ghExecutable, [
-    'api', '--method', 'DELETE',
-    `repos/${repository}/issues/${action.number}/labels/${encodeURIComponent(action.label)}`,
-  ], { env: environment })
+  await githubRequest({
+    config,
+    environment,
+    path: `repos/${repository}/issues/${action.number}/labels/${encodeURIComponent(action.label)}`,
+    description: `removed label from Issue #${action.number}`,
+    method: 'DELETE',
+  })
   if (action.label === 'agent/dsh' && action.commentRequired) {
-    await githubJson({
+    const audited = snapshot.issues.find(issue => issue.number === action.number)
+    const current = await githubRequest({
+      config,
+      environment,
+      path: `repos/${repository}/issues/${action.number}`,
+      description: `Issue #${action.number} blocked-comment precondition`,
+    })
+    if (!audited || issueIdentityAfterLabelRemoval(audited, action.label) !== currentIssueIdentityAfterLabelRemoval(current)) {
+      throw new Error(`Issue #${action.number} changed before its blocked supervision comment`)
+    }
+    await githubRequest({
       config,
       environment,
       path: `repos/${repository}/issues/${action.number}/comments`,
@@ -189,10 +377,23 @@ export async function applySupervisionPlan({
   environment,
   targetCheckout,
   applyChanges,
+  githubRequest = githubJson,
+  runCommand = run,
 }) {
-  for (const action of plan.actions) await validateEvidence(action, snapshot, { config, targetCheckout })
+  for (const action of plan.actions) {
+    await validateSupervisionEvidence(action, snapshot, {
+      config, targetCheckout, environment, repository, githubRequest, runCommand,
+    })
+  }
   if (!applyChanges) return
-  for (const action of plan.actions) await executeAction(action, { repository, config, environment })
+  for (const action of plan.actions) {
+    await assertMutationTargetCurrent(action, snapshot, {
+      repository, config, environment, githubRequest,
+    })
+    await executeAction(action, {
+      repository, config, environment, githubRequest, snapshot,
+    })
+  }
 }
 
 /** Write an English GitHub Actions summary for applied and dry-run audits. */

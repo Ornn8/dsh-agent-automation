@@ -19,6 +19,8 @@ Inspect the fork default branch, configured upstream default branch, open and re
 
 Create no Issue without concrete default-branch, failing-CI, or upstream evidence. Do not create tracker, research, informational, duplicate, subjective-style, or low-value-refactor work. A defect that exists only in an unmerged pull request belongs in an ordinary pull-request comment.
 
+Default-branch, pull-request, and upstream evidence must name one repository path and line and include an exact 8-to-500-character excerpt from that line. Pull-request and upstream evidence must identify a line added or modified by the referenced change. Upstream evidence must name an upstream-only commit. A real path, line, or commit without matching changed source text is not evidence.
+
 An executable Issue must include this exact standalone line with a concrete topic:
 
 ```text
@@ -27,7 +29,7 @@ Branch: `agent/<short-topic>`
 
 and the sections `Objective`, `Scope`, `Requirements`, `Acceptance criteria`, `Validation`, and `Evidence`. Dependency declarations must be separate exact lines using `Depends on #<number>.` or `Blocked by #<number>.`.
 
-Never propose `agent/dsh` for blocked, dependency-incomplete, already-owned, tracker, research, informational, or duplicate work. For `Ornn8/deepseek-harness`, preserve the strict GUI sequence `#2 -> #3 -> #4 -> #5 -> #6 -> #7 -> #8 -> #9`.
+Never propose `agent/dsh` for blocked, dependency-incomplete, already-owned, tracker, research, informational, or duplicate work. Treat only exact `Depends on #<number>.` or `Blocked by #<number>.` declarations as ordering constraints; never infer a repository-specific sequence.
 
 ## Result
 

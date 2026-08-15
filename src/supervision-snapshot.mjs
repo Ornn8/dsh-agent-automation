@@ -1,5 +1,5 @@
 import { run } from './common.mjs'
-import { githubJson } from './supervision-github.mjs'
+import { githubJson, githubPages } from './supervision-github.mjs'
 
 function clip(value, limit) {
   const text = typeof value === 'string' ? value : ''
@@ -169,7 +169,7 @@ async function loadAuditedIssue({ repository, number, config, environment }) {
     description: `Issue #${number} exact state`,
   })
   if (before.pull_request) throw new Error(`Issue #${number} unexpectedly resolved to a pull request`)
-  const comments = await githubJson({
+  const comments = await githubPages({
     config,
     environment,
     path: `repos/${repository}/issues/${number}/comments?per_page=100`,
@@ -188,7 +188,7 @@ async function loadAuditedIssue({ repository, number, config, environment }) {
 async function loadIssues({ repository, config, environment, rawIssues }) {
   const compact = []
   let recentClosed = 0
-  for (const listedIssue of rawIssues.filter(issue => !issue.pull_request).slice(0, 140)) {
+  for (const listedIssue of rawIssues.filter(issue => !issue.pull_request)) {
     const exactAudit = listedIssue.state === 'open' || recentClosed < 20
     if (listedIssue.state === 'closed') recentClosed += 1
     compact.push(exactAudit
@@ -210,22 +210,24 @@ async function loadOpenPullRequest({ repository, number, config, environment }) 
   }
   const headSha = before.head.sha
   const [comments, reviewComments, reviews, files, checkRuns, workflowRuns] = await Promise.all([
-    githubJson({ config, environment, path: `repos/${repository}/issues/${number}/comments?per_page=100`, description: `pull request #${number} comments` }),
-    githubJson({ config, environment, path: `repos/${repository}/pulls/${number}/comments?per_page=100`, description: `pull request #${number} inline review comments` }),
-    githubJson({ config, environment, path: `repos/${repository}/pulls/${number}/reviews?per_page=100`, description: `pull request #${number} reviews` }),
-    githubJson({ config, environment, path: `repos/${repository}/pulls/${number}/files?per_page=100`, description: `pull request #${number} files` }),
-    githubJson({
+    githubPages({ config, environment, path: `repos/${repository}/issues/${number}/comments`, description: `pull request #${number} comments` }),
+    githubPages({ config, environment, path: `repos/${repository}/pulls/${number}/comments`, description: `pull request #${number} inline review comments` }),
+    githubPages({ config, environment, path: `repos/${repository}/pulls/${number}/reviews`, description: `pull request #${number} reviews` }),
+    githubPages({ config, environment, path: `repos/${repository}/pulls/${number}/files`, description: `pull request #${number} files` }),
+    githubPages({
       config,
       environment,
-      path: `repos/${repository}/commits/${headSha}/check-runs?per_page=100`,
+      path: `repos/${repository}/commits/${headSha}/check-runs`,
       description: `pull request #${number} checks`,
       headers: ['Accept: application/vnd.github+json'],
+      collection: 'check_runs',
     }),
-    githubJson({
+    githubPages({
       config,
       environment,
-      path: `repos/${repository}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=50`,
+      path: `repos/${repository}/actions/runs?head_sha=${encodeURIComponent(headSha)}`,
       description: `pull request #${number} workflow runs`,
+      collection: 'workflow_runs',
     }),
   ])
   const after = await githubJson({
@@ -248,7 +250,7 @@ async function loadOpenPullRequest({ repository, number, config, environment }) 
 
 async function loadPullRequests({ repository, config, environment, rawPullRequests }) {
   const compact = []
-  for (const listedPullRequest of rawPullRequests.slice(0, 140)) {
+  for (const listedPullRequest of rawPullRequests) {
     let pullRequest = listedPullRequest
     let comments = []
     let reviewComments = []
@@ -343,15 +345,15 @@ export async function buildRepositorySnapshot({
   const forkDiffStat = (await run(config.gitExecutable, ['-C', targetCheckout, 'diff', '--stat', `${upstreamRef}...HEAD`])).stdout.trim()
 
   const [openIssues, recentClosedIssues, openPullRequests, recentClosedPullRequests, rawRuns, rawLabels, targetCommits, upstreamCommits, branches] = await Promise.all([
-    githubJson({ config, environment, path: `repos/${repository}/issues?state=open&per_page=100&sort=updated&direction=desc`, description: 'open Issues' }),
+    githubPages({ config, environment, path: `repos/${repository}/issues?state=open&sort=updated&direction=desc`, description: 'open Issues' }),
     githubJson({ config, environment, path: `repos/${repository}/issues?state=closed&per_page=40&sort=updated&direction=desc`, description: 'recent closed Issues' }),
-    githubJson({ config, environment, path: `repos/${repository}/pulls?state=open&per_page=100&sort=updated&direction=desc`, description: 'open pull requests' }),
+    githubPages({ config, environment, path: `repos/${repository}/pulls?state=open&sort=updated&direction=desc`, description: 'open pull requests' }),
     githubJson({ config, environment, path: `repos/${repository}/pulls?state=closed&per_page=40&sort=updated&direction=desc`, description: 'recent closed pull requests' }),
-    githubJson({ config, environment, path: `repos/${repository}/actions/runs?per_page=100`, description: 'workflow runs' }),
-    githubJson({ config, environment, path: `repos/${repository}/labels?per_page=100`, description: 'labels' }),
+    githubPages({ config, environment, path: `repos/${repository}/actions/runs`, description: 'workflow runs', collection: 'workflow_runs' }),
+    githubPages({ config, environment, path: `repos/${repository}/labels`, description: 'labels' }),
     githubJson({ config, environment, path: `repos/${repository}/commits?per_page=30`, description: 'target commits' }),
     githubJson({ config, environment, path: `repos/${upstreamRepository}/commits?sha=${encodeURIComponent(upstreamDefaultBranch)}&per_page=30`, description: 'upstream commits' }),
-    githubJson({ config, environment, path: `repos/${repository}/branches?per_page=100`, description: 'branches' }),
+    githubPages({ config, environment, path: `repos/${repository}/branches`, description: 'branches' }),
   ])
   const rawIssues = uniqueByNumber(openIssues, recentClosedIssues)
   const rawPullRequests = uniqueByNumber(openPullRequests, recentClosedPullRequests)

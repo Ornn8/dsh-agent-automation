@@ -44,6 +44,19 @@ function Get-RepositoryKey {
   return "$slug-$hash"
 }
 
+function Get-RunnerName {
+  param(
+    [Parameter(Mandatory)][string]$Prefix,
+    [Parameter(Mandatory)][string]$RepositoryKey,
+    [Parameter(Mandatory)][ValidateRange(1, 8)][int]$Replica
+  )
+  $machine = ([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length))
+  $base = "$Prefix-$RepositoryKey-$machine"
+  if ($Replica -eq 1) { return $base }
+  $suffix = "-r$Replica"
+  return "$($base.Substring(0, [Math]::Min(64 - $suffix.Length, $base.Length)))$suffix"
+}
+
 function Assert-AgentWorkerConfiguration {
   param([Parameter(Mandatory)]$Workers)
   foreach ($property in @($Workers.psobject.Properties)) {
@@ -172,8 +185,7 @@ function Get-RunnerInstances {
       for ($replica = 1; $replica -le [int]$ops.roles.$roleName.replicas; $replica += 1) {
         $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
         $id = "organization-$($roleName)$replicaSuffix"
-        $runnerNameBase = "$($ops.roles.$roleName.runnerNamePrefix)-$organizationKey-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))"
-        $runnerName = if ($replica -eq 1) { $runnerNameBase } else { "$($runnerNameBase.Substring(0, [Math]::Min(64 - $replicaSuffix.Length, $runnerNameBase.Length)))$replicaSuffix" }
+        $runnerName = Get-RunnerName -Prefix $ops.roles.$roleName.runnerNamePrefix -RepositoryKey $organizationKey -Replica $replica
         $instances.Add([pscustomobject]@{
           Id = $id
           Role = $roleName
@@ -199,8 +211,7 @@ function Get-RunnerInstances {
         for ($replica = 1; $replica -le [int]$ops.roles.$roleName.replicas; $replica += 1) {
           $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
           $id = "target-$key-$($roleName)$replicaSuffix"
-          $runnerNameBase = "$($ops.roles.$roleName.runnerNamePrefix)-$key-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))"
-          $runnerName = if ($replica -eq 1) { $runnerNameBase } else { "$($runnerNameBase.Substring(0, [Math]::Min(64 - $replicaSuffix.Length, $runnerNameBase.Length)))$replicaSuffix" }
+          $runnerName = Get-RunnerName -Prefix $ops.roles.$roleName.runnerNamePrefix -RepositoryKey $key -Replica $replica
           $instances.Add([pscustomobject]@{
             Id = $id
             Role = $roleName

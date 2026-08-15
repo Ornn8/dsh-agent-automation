@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import readline from 'node:readline'
 
-export const REVIEW_TASK_TITLE_PREFIX = '[DSH GitHub 审查] '
+export const REVIEW_TASK_TITLE_PREFIX = '[Agent GitHub 审查] '
 
 const REVIEW_SHELL_ENVIRONMENT_KEYS = [
   'COMSPEC', 'PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'TEMP',
