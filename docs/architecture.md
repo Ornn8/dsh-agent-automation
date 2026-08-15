@@ -32,6 +32,10 @@ Controller scripts validate and publish GitHub state using the host controller i
 
 GitHub runner labels are the scheduling Interface. `agent-reviewer` and `agent-change` use different registrations, processes, work directories, concurrency groups, and task timeouts. They may run on different machines without controller changes.
 
+On Windows, every role and Web Host Scheduled Task starts through one Agent-neutral Role Process Host. Its Interface is an executable, a JSON string-array of arguments, and a working directory. The Implementation creates a private desktop and a kill-on-close Job Object before resuming the target supervisor, so console or GUI descendants remain off the user's default desktop and share one termination unit. Adapters do not receive Windows launch options, and the process host does not inspect the selected Adapter. The private desktop prevents unwanted interactive windows; it does not isolate files, credentials, network access, or process privileges.
+
+Change and review Workers installed under the same Windows principal are one security trust domain. `hardReadOnlyReview` constrains the review Adapter's own execution; it does not protect that reviewer from a full-access change Worker on the same account or host. An adversarial separation requires distinct hosts or independently administered operating-system principals and credentials.
+
 ## Event flow
 
 ```mermaid
@@ -52,7 +56,7 @@ There is no direct Agent-to-Agent call. GitHub records the handoff before the pr
 ## Termination boundaries
 
 - A Worker run terminates only with `completed`, `blocked`, `superseded`, `timed-out`, or `failed`.
-- Landing accepts only the controller-created `codex/review` CheckRun on the exact PR head. Its GitHub Actions app, details URL, exact `pull_request_target` run, PR base/head, and `referenced_workflows` path `${controllerRepository}/${workflowPath}@${controllerSha}` plus SHA bind it to the trusted controller. A `pull_request_target` run carries the PR head in `head_sha`; the separate `pull_requests[].base.sha` field binds the base. Dynamic run names are display data, not role authority. Comments and commit statuses are not landing authority.
+- Landing accepts only the controller-created `agent/review` CheckRun on the exact PR head. Its GitHub Actions app, details URL, exact `pull_request_target` run, PR base/head, and `referenced_workflows` path `${controllerRepository}/${workflowPath}@${controllerSha}` plus SHA bind it to the trusted controller. A `pull_request_target` run carries the PR head in `head_sha`; the separate `pull_requests[].base.sha` field binds the base. Dynamic run names are display data, not role authority. Comments and commit statuses are not landing authority.
 - The review Adapter starts each turn in an empty controller-created directory and exposes the head checkout only as read-only data. Repository instructions come from the verified base revision; head-authored instructions cannot become reviewer policy.
 - A controller accepts `completed` only after independently checking the role postcondition, such as a new pull request head, an exact-pair verdict, or an explicit same-head rereview request.
 - Workflows select only the immutable `change` or `review` role. The local controller resolves its worker from the one configured repository mapping and rejects any missing, duplicate, or unknown mapping before invoking an adapter.

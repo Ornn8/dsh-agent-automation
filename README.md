@@ -1,19 +1,188 @@
 # Agent Automation Control Plane
 
-This repository connects GitHub events to independently queued local agent workers without model polling. DeepSeek Harness, Codex, OpenCode, and Claude Code are replaceable Worker implementations behind the same interface.
+This is a Windows-hosted automation system for GitHub.com. It turns Issues, pull requests, CI failures, and review results into queued work for local AI agents.
 
-## Architecture
+“Agent-neutral” means the controller can use DeepSeek Harness, Codex, OpenCode, Claude Code, or another Worker through one interface.
 
-GitHub is the durable control plane. A target repository contains only thin event-forwarding workflows pinned to one audited controller commit. Reusable controller workflows validate the event and exact repository revision, select a role, and invoke a configured Worker through an Adapter.
+Portable dry-run planning and CI validation run on Windows, Linux, and macOS. Managed installation and service execution are currently implemented only for Windows x64.
 
-The two current roles are independent:
+Change and review Workers can be stopped, replaced, or scaled independently.
 
-- `change` handles Issue implementation, review repair, CI repair, and trusted rework requests.
-- `review` statically reviews one exact pull request base/head pair and returns PASS or BLOCK.
+Workers on the same Windows account and machine remain in one security trust domain.
 
-A BLOCK ends the review job. The controller then publishes an immutable `agent_work_requested` WorkRequest for the `change` role. A separate runner queue consumes it. The reviewer never calls the change agent directly, and neither queue waits for the other process to become idle.
+Separate processes, work directories, credentials, and queues provide lifecycle and fault isolation—not a security boundary.
 
-The public Worker invocation is:
+Use separate hosts or operating-system accounts when the change Worker must not be able to affect the reviewer.
+
+## Five-minute overview
+
+```mermaid
+flowchart LR
+  H["Human or agent opens an Issue"] --> G["GitHub validates and queues work"]
+  G --> C["Change Worker implements and opens a PR"]
+  C --> CI["Repository CI"]
+  C --> R["Read-only review Worker"]
+  CI -->|failure| C
+  R -->|BLOCK| C
+  CI -->|pass| L["Deterministic landing controller"]
+  R -->|PASS for exact base/head| L
+  L --> M["Squash merge"]
+```
+
+Nothing polls a model. GitHub events wake idle self-hosted runners. Deterministic controller code validates live repository state before starting a Worker or merging a pull request.
+
+Agents do not need individual GitHub accounts. The host controller owns privileged GitHub operations, while model processes receive no Actions token.
+
+A minimal Issue looks like this:
+
+````markdown
+Implement a dark-mode toggle and cover it with tests.
+
+Acceptance criteria:
+- The saved preference survives a restart.
+- Existing light-mode behavior remains unchanged.
+
+<!-- agent-work:v1 -->
+```json
+{
+  "version": 1,
+  "dispatch": "ready",
+  "role": "change",
+  "kind": "implementation",
+  "dependsOn": []
+}
+```
+````
+
+Opening or editing that Issue queues the repository's configured change Worker. The Worker creates a branch and pull request. CI failures and blocking reviews return to the same change queue.
+
+A pull request merges only after the configured CI checks and the controller-owned `agent/review` CheckRun pass for its current exact head pair.
+
+## Prerequisites
+
+- GitHub.com. GitHub Enterprise Server is not supported because the controller depends on `job.workflow_repository` and `job.workflow_sha`, which GHES does not expose with the required semantics.
+- PowerShell 7, Git, GitHub CLI, and Node.js 22 or newer for planning and validation.
+- A Windows x64 host for managed installation and execution. Linux and macOS currently support plan generation, not service installation.
+- GitHub Actions Runner 2.334.0 or newer. The example configuration pins 2.336.0.
+- Repository administration rights for runner registration, Actions variables, and branch protection.
+- Existing authentication for every selected Agent Adapter. Provider keys stay outside this repository.
+
+`job.workflow_repository` and `job.workflow_sha` are the source of truth for checking out the reusable controller. Do not replace them with caller-supplied repository or revision inputs.
+
+## Quick start
+
+Start from an audited controller commit and keep the machine configuration outside the checkout:
+
+```powershell
+$controller = 'D:\src\dsh-agent-automation'
+$target = 'D:\src\target-repository'
+$config = 'F:\dsh-agent-automation-state\agent-config.json'
+
+Copy-Item "$controller\config.example.json" $config
+
+pwsh -NoProfile -File "$controller\scripts\bootstrap-repository.ps1" `
+  -TargetCheckout $target `
+  -ControllerRepository owner/dsh-agent-automation `
+  -ControllerSha 0123456789abcdef0123456789abcdef01234567 `
+  -CiWorkflowNamesJson '["CI"]' `
+  -UpstreamRepository upstream-owner/upstream-repository `
+  -DryRun
+
+pwsh -NoProfile -File "$controller\scripts\doctor.ps1" -Configuration $config -DryRun
+pwsh -NoProfile -File "$controller\scripts\install.ps1" -Configuration $config -DryRun
+```
+
+Inspect both dry runs, then repeat without `-DryRun`.
+
+Every dry run also emits one compact, versioned JSON line. Installation and doctor use the `AUTOMATION_INSTALLATION_PLAN_JSON=` prefix; target bootstrap uses `AUTOMATION_BOOTSTRAP_PLAN_JSON=`.
+
+The installation plan records the target platform, paths, runner artifact and checksum, normalized labels, services, repository variables, and branch-protection requirements. Add the corresponding runner artifact under `operations.runner.artifacts`, then pass `-TargetPlatform linux-x64`, `linux-arm64`, `macos-x64`, or `macos-arm64` to inspect another platform without touching that host or GitHub.
+
+A non-dry install rejects a target platform that differs from the current host. Non-Windows execution fails explicitly because systemd and launchd installers have not been implemented.
+
+Before starting a Worker, the installer verifies the GitHub identity, runner archive checksum, runtime snapshot, target workflows, repository variables, and branch protection.
+
+`ControllerSha` must be a published lowercase 40-character SHA that remains reachable from the controller's default branch.
+
+After squash or rebase publication, verify that the published commit tree matches the reviewed pull-request head tree before pinning the published commit.
+
+The complete install, migration, failure-injection, and removal procedures are in the [Windows operations guide](docs/operations.md).
+
+## How work moves
+
+### Issue work
+
+The `agent-work:v1` declaration is routing data, not the task description. Issue title, prose, and acceptance criteria remain the human-readable source of work.
+
+- Required fields: `version`, `dispatch`, `role`, `kind`, and `dependsOn`.
+- `dispatch` is `ready` or `hold`; `dispatch: "hold"` does not start a Worker.
+- The current role is `change`.
+- Supported kinds are `implementation`, `bug-fix`, `integration`, and `documentation`.
+- `dependsOn` contains unique open Issue numbers. Work waits until they close.
+- Optional `branch` defaults to `agent/issue-<number>`.
+
+Malformed declarations and unknown fields fail closed. Unsafe branch names and untrusted authors fail closed too.
+
+Do not put commands, credentials, Agent names, or implementation instructions inside the routing object.
+
+### Pull-request review and repair
+
+A same-repository, non-draft pull request queues the configured review Worker. The Worker receives a controller-created read-only checkout and guidance from the verified base revision.
+
+The Worker cannot execute pull-request code or inherit GitHub credentials.
+
+PASS and BLOCK bind the exact base and head SHAs. A changed head makes the result stale. BLOCK creates one idempotent repair WorkRequest for the change role.
+
+Failed CI and an explicit trusted rework request enter the same queue after independent GitHub-state validation.
+
+Landing is model-free. It requires:
+
+1. The current pull request is open, non-draft, and mergeable.
+2. Every configured required check has passed.
+3. The GitHub Actions-owned `agent/review` CheckRun passed on the exact head.
+4. The CheckRun's workflow run proves the exact repository, base, head, controller workflow path, and pinned controller SHA.
+
+Comments, labels, and legacy commit statuses are audit projections; none can authorize a merge.
+
+### Supervision and recovery
+
+Optional repository supervision uses a read-only Worker to propose evidence-backed maintenance actions.
+
+Before every mutation, the controller validates each path, changed line, excerpt, dependency, and live target state.
+
+The controller contains no project-specific ordering or product policy.
+
+Hosted reconciliation closes deferred landing states and recovers bounded infrastructure failures.
+
+A watchdog detects Agent jobs that remain queued too long. Local replicas record heartbeats, and a daily canary performs one real Adapter readiness check.
+
+## Choosing an Agent
+
+Repository mappings are the only Agent-selection point. Assign compatible named Workers to `changeWorker` and `reviewWorker`; target workflows and the GitHub protocol do not change.
+
+Bundled Adapters:
+
+- `dsh-web`: DeepSeek Harness sessions and its installed GitHub-work plugin.
+- `codex-app`: visible ChatGPT Desktop review tasks.
+- `opencode-cli`: OpenCode change or hard-read-only review mode.
+- `claude-code-cli`: Claude Code change or hard-read-only review mode.
+- `command-json`: a generic change-only subprocess protocol.
+
+A review Worker must declare `github-pr-review`, `github-repository-supervision`, and controller-verifiable hard-read-only execution. Prompt text alone is not isolation.
+
+The example DSH Worker uses full change permissions and is therefore change-only. Codex, OpenCode, and Claude Code use dedicated reviewer isolation.
+
+Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). Each Worker declares its own provider/model settings.
+
+Review comments render that controller-owned Worker metadata instead of hardcoding a model in presentation code.
+
+Change and review concurrency is configured independently with `operations.roles.<role>.replicas` from 1 through 8.
+
+GitHub may run different subjects in parallel. Workflow concurrency keys serialize duplicate work for one Issue or pull request.
+
+## Adapter interface
+
+New Agents implement the same invocation and terminal receipt:
 
 ```json
 {
@@ -21,12 +190,10 @@ The public Worker invocation is:
   "cwd": "X:\\isolated-checkout",
   "title": "visible local task title",
   "prompt": "adapter input",
-  "requiredSkill": "optional adapter capability",
+  "requiredSkill": "optional capability",
   "timeoutMs": 10800000
 }
 ```
-
-Every Adapter returns one terminal receipt:
 
 ```json
 {
@@ -37,115 +204,35 @@ Every Adapter returns one terminal receipt:
 }
 ```
 
-Unknown workers, adapters, outcomes, or malformed results fail closed. See [the architecture document](docs/architecture.md) for Module and termination boundaries.
+Unknown Workers, Adapters, outcomes, capabilities, or malformed results fail closed. See [architecture](docs/architecture.md) for module responsibilities and termination behavior.
 
-## Adding or replacing an agent
+## Runtime and trust boundaries
 
-An agent does not need its own GitHub account. GitHub event publication and validation use one controller identity on the host; job-scoped publication uses the Actions identity. Model workers receive no Actions token.
-
-To add an agent:
-
-1. Add a named entry under `workers` in the machine-local configuration.
-2. Use an existing Adapter (`dsh-web`, `codex-app`, `opencode-cli`, `claude-code-cli`, or `command-json`) or add one Adapter that implements run and health plus explicit `skills` and `hardReadOnlyReview` capabilities.
-3. Set the repository mapping's `changeWorker` or `reviewWorker` to that named entry.
-4. Register an idle self-hosted runner with the controller-owned `agent-change` or `agent-reviewer` label.
-
-No controller workflow needs agent-specific branches. Configuration rejects a review mapping unless its Worker declares both the required review and supervision Skills and a controller-enforced hard read-only mode. The bundled `command-json` Adapter is change-only; adding a review mode requires a separate credential-isolated, cancellation-aware Adapter implementation rather than a prompt promise.
-
-## Submitting Issue work
-
-A trusted repository owner, member, or collaborator can queue change work by placing exactly one declaration in an open Issue. Issue title, prose, and acceptance criteria remain the human-readable source of work; the declaration contains routing data only.
-
-````markdown
-<!-- agent-work:v1 -->
-```json
-{
-  "version": 1,
-  "dispatch": "ready",
-  "role": "change",
-  "kind": "integration",
-  "branch": "agent/ci-baseline-integration",
-  "dependsOn": []
-}
-```
-````
-
-`version`, `dispatch`, `role`, `kind`, and `dependsOn` are required. `dispatch` is either `ready` or `hold`; `dispatch: "hold"` does not start a Worker. The current role is `change`. Supported kinds are `implementation`, `bug-fix`, `integration`, and `documentation`. `dependsOn` contains unique Issue numbers and work waits while any listed Issue remains open. `branch` is optional and defaults to `agent/issue-<number>`.
-
-Opening, reopening, or editing the Issue reevaluates the declaration, and closing a dependency reevaluates the backlog. The worker rereads every dependency immediately before a model starts. The parser accepts one strict JSON object; unknown fields fail closed, as do duplicate declarations, invalid values, and unsafe branches. Formatting-only edits keep the same idempotency key, while a routing-field change receives a new key. Do not put shell commands, credentials, agent names, implementation instructions, or acceptance criteria in the routing object.
-
-## Current behavior
-
-1. A ready `agent-work:v1` declaration on a trusted Issue queues the configured change Worker. The backlog dispatcher selects one ready Issue, waits for declared dependencies, records `agent/dsh` as observable queue state for the current DSH Adapter, and emits an explicit `repository_dispatch` because GitHub suppresses ordinary workflow recursion from its job token. The exact label remains a legacy manual trigger for existing repositories.
-2. Opening or updating a same-repository pull request starts the configured review Worker on the review runner. The current Codex Adapter creates a visible ChatGPT Desktop task with the configured project directory using `gpt-5.6-sol` at medium reasoning and archives automated review tasks beyond the newest six. App-server-created tasks remain in Desktop's ungrouped list because the public protocol has no Desktop project-id field. The automated turn runs from an isolated directory with the verified review checkout mounted read-only.
-3. A blocking exact-pair review publishes one idempotent change WorkRequest. Failed CI and explicit trusted rework comments use the same change queue through their validated request forms. When DSH proves that failed CI is unchanged on the default branch, its repair Skill creates or reuses one labeled same-repository Issue instead of changing the unrelated pull request; the ordinary Issue queue then owns that fix.
-4. A default-branch advance first updates behind same-repository pull requests through GitHub's guarded update-branch API. The update runs on the change-role runner with its verified host GitHub credential, so GitHub emits the ordinary pull-request events that start both CI and exact-pair review; the Actions job token is deliberately not used for this mutation because GitHub suppresses its downstream workflow events. Current pairs that did not need a branch update receive an explicit `repository_dispatch` review request; label changes remain audit state and are not treated as event transport. PASS then requests deterministic landing: the landing controller requires a successful GitHub Actions CheckRun whose run and `referenced_workflows` provenance bind the current exact base/head pair to the pinned controller revision, plus the configured Actions-owned aggregate CI CheckRun; it revalidates and squash-merges.
-5. Optional repository supervision runs the configured review Worker through `github-repository-supervision`. It reads a bounded complete GitHub snapshot, accepts only exact evidence, applies explicit `Depends on #N.` declarations, rereads each target before every mutation, and dispatches newly owned Issue work explicitly. The controller contains no repository-specific sequence or product policy.
-
-The runners are idle outbound GitHub listeners. They make no model calls while no matching job exists, except for the daily readiness canary. Hosted reconciliation closes deferred landing states, a hosted watchdog detects Agent jobs queued longer than the bounded threshold, and each local replica writes a heartbeat. Model-free landing, reconciliation, dispatch, and queue watchdog checks are deterministic.
-
-GitHub work uses five controller-owned Skills: `github-issue-work`, `github-pr-repair`, `github-pr-review`, `github-repository-supervision`, and `agent-readiness-canary`. The DSH Adapter installs them through the bundled `dsh-github-work` Cordis plugin, OpenCode materializes native `SKILL.md` files, and Claude Code loads a temporary native plugin for trusted change work. Claude review injects the same review Skill while disabling Slash Commands and loading only the neutral project setting source, so pull-request customizations cannot join the session. Controller scripts send only the selected Skill name, verified routing data, and standard Worker invocation; they do not contain agent-specific project procedure text. Change work ends with the same strict hidden receipt on every Adapter, and the controller independently verifies the corresponding live pull request or Issue. Review output uses the same exact-pair review parser regardless of its Worker.
-
-## Local configuration
-
-Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). The file contains paths and repository allowlists, not provider keys. Every `dsh-web` worker declares the DSH-owned `agentPreset` and `permissionPreset` plus `provider`, `model`, and `reasoningEffort`; the Adapter supplies the agent preset to `session.create`, applies the permission preset through DSH's `/permission` command, and only then submits work. Preset names stay open to shipped or locally authored DSH presets rather than becoming controller-owned enums. Every `opencode-cli` worker declares an executable, role mode, `provider/model`, and variant; every `claude-code-cli` worker declares an executable, role mode, model, and effort. Review workers also declare the Git executable used by the trusted Adapter to prepare exact-base guidance and the diff. Each agent continues to use its own existing authentication.
-
-Repository mappings are the only agent-selection point. Assign any capability-compatible Adapter to `changeWorker` or `reviewWorker`; target workflows, Issue declarations, repair requests, review parsing, and landing policy do not change. A review Worker must expose controller-verifiable hard read-only execution; therefore the example DSH worker with `danger-full-access` and the generic `command-json` Adapter are change-only. OpenCode, Claude Code, and Codex supply dedicated reviewer isolation. Separate worker entries remain preferable for independent credentials, models, and lifecycle control.
-
-OpenCode also has an explicit live adapter smoke outside the default test suite because it consumes provider quota. See the [Windows operations guide](docs/operations.md) for the `npm run smoke:opencode` command and its provider, model, variant, and credential overrides.
-
-Runner concurrency is also Adapter-neutral. Set `operations.roles.change.replicas` or `operations.roles.review.replicas` from 1 through 8 to register that many isolated runners with the same role label. GitHub can then dispatch different Issues or pull requests concurrently, while each subject's workflow concurrency key still prevents duplicate work. Replica 1 retains the original deterministic instance name; later replicas use `-r2`, `-r3`, and so on.
-
-Configuration schema version 3 accepts only explicit `workers`, declared capabilities, and repository mappings. Each mapping supplies `ciWorkflows[]` and `requiredChecks[]`, allowing several trusted CI workflows and required checks without model-specific routing. Legacy scalar CI fields, `dshWebBaseUrl`, and `codex*` fields are rejected. Existing installations must migrate the machine-local configuration explicitly before starting the new runtime snapshot.
-
-## Quick start on Windows
-
-The complete deployment, upgrade, fault-injection, and removal procedure is in the [Windows operations guide](docs/operations.md). Start from an audited controller commit and a machine-local configuration outside the checkout:
-
-```powershell
-$controller = 'D:\src\dsh-agent-automation'
-$target = 'D:\src\target-repository'
-$config = 'F:\dsh-agent-automation-state\agent-config.json'
-
-Copy-Item "$controller\config.example.json" $config
-pwsh -NoProfile -File "$controller\scripts\bootstrap-repository.ps1" `
-  -TargetCheckout $target `
-  -ControllerRepository owner/dsh-agent-automation `
-  -ControllerSha 0123456789abcdef0123456789abcdef01234567 `
-  -CiWorkflowNamesJson '["CI","Security"]' `
-  -UpstreamRepository upstream-owner/upstream-repository `
-  -DryRun
-pwsh -NoProfile -File "$controller\scripts\test-operations.ps1"
-pwsh -NoProfile -File "$controller\scripts\test-bootstrap-repository.ps1"
-pwsh -NoProfile -File "$controller\scripts\doctor.ps1" -Configuration $config -DryRun
-pwsh -NoProfile -File "$controller\scripts\install.ps1" -Configuration $config -DryRun
-```
-
-`ControllerSha` must be a published lowercase 40-character SHA that remains permanently reachable from the controller default branch. If a controller PR is squash- or rebase-merged, first verify that the published commit tree exactly matches the reviewed PR-head tree, then pin the published commit; never pin a PR head from a branch that may be deleted. The offline bootstrap renderer does not verify GitHub reachability.
-
-Review the rendered workflows and dry-run output before removing `-DryRun`. The actual installer validates the active GitHub identity, runner archive checksum, immutable operations snapshot, repository variable, and branch protection, then packs and installs the repository's credential-free DSH bundle into the existing Web profile before either worker starts. It stores no model or GitHub credential in this repository.
-
-## Runner isolation
-
-Run review and change roles with distinct runner registrations and working directories:
+The two runner roles use separate registrations, work directories, queues, and host services. The plan derives standard GitHub labels from the target platform; role configuration contains only custom routing labels. A Windows x64 plan produces:
 
 - `[self-hosted, Windows, X64, agent-reviewer]`
 - `[self-hosted, Windows, X64, agent-change]`
 
-Stopping the review runner leaves change work operational. Stopping the change runner leaves review work operational and keeps change WorkRequests queued in GitHub. Both still share the host machine, network, and GitHub, which remain common physical failure domains.
+Stopping either role leaves the other operational. On Windows, every managed task starts through one Adapter-neutral Role Process Host.
 
-## Security and failure behavior
+A private desktop prevents descendant command-line windows from appearing on the user's desktop. A Job Object provides process-tree termination.
 
-- Fork pull requests never reach local workers.
-- Privileged Issue and explicit rework requests revalidate author association and live repository state.
-- Review workers receive no GitHub token and inspect pull request code without executing it.
-- Review turns start in a controller-created neutral directory. Repository guidance is read only from the verified base revision, so a pull request cannot install reviewer instructions through its head checkout.
-- Review comments and WorkRequests bind full base and head SHAs. Ref movement makes the result stale.
-- Comments, labels, and compatibility commit statuses are diagnostic projections only. Landing trusts the exact GitHub Actions CheckRun, workflow run, and immutable reusable-workflow provenance, so forged text cannot become PASS.
-- Missing or malformed worker output never becomes PASS.
-- Each exact blocked pair has one idempotency key. A new head creates a new review; a same-head rebuttal creates at most one rereview. Repair completion accepts either the pending rereview label or a newly created GitHub Actions-owned `codex/review` CheckRun for the exact head, so immediate label consumption cannot turn a successful handoff into a false failure.
-- CI repair may rerun failed jobs without changing source. The controller accepts that same-head completion only when the original failed run reaches a later successful attempt for the same configured workflow and exact head.
-- Reusable workflows reject mutable controller revisions and pin third-party Actions by full commit SHA.
-- Landing requires protected checks to be app-bound and strict, so a base advance invalidates the reviewed pair before GitHub accepts the merge.
+This is lifecycle containment only. The roles still share the host filesystem, network, kernel, account privileges, and GitHub identity.
 
-Run controller tests with `npm test`. On Windows, also run `scripts/test-operations.ps1` and `scripts/test-bootstrap-repository.ps1`. See [CONTRIBUTING.md](CONTRIBUTING.md) for change requirements and [SECURITY.md](SECURITY.md) for private vulnerability reporting.
+For a real security boundary, put review and change Workers on separate machines or separately administered operating-system identities and credentials.
+
+## Development
+
+Run:
+
+```powershell
+npm test
+npm run typecheck
+pwsh -NoProfile -File scripts/test-operations.ps1
+pwsh -NoProfile -File scripts/test-installation-plan.ps1
+pwsh -NoProfile -File scripts/test-bootstrap-repository.ps1
+```
+
+The portable plan suite runs on Windows and Linux in CI and covers Linux, macOS, and Windows plan values. The Windows operations suite includes Pester coverage for branch-protection and install/remove safety contracts plus an OS canary for the private desktop and Job Object process tree.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
