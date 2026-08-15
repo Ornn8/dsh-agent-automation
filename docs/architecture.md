@@ -17,7 +17,7 @@ This Module owns the stable invocation and terminal receipt Interface. Its Depth
 Adapters translate the Worker Interface to one runtime:
 
 - `dsh-web` uses the local DeepSeek Harness Web Host. Change work is a structured WorkRequest sent through a controller-installed, user-explicit Cordis Skill; the Adapter verifies the Skill is present before prompting and does not carry the role procedure itself. The Adapter preallocates the visible session from the immutable task id and treats the durable prompt rpc id as the admission receipt, so transport recovery cannot create a second turn. A hidden final result reports `completed` or `blocked`; it does not authorize GitHub changes, and the Automation Domain revalidates the live postcondition.
-- `codex-app` starts a visible ChatGPT Desktop turn immediately, then sets its stable review title and project location after that turn completes. App Server task metadata is not mutated while its rollout writer is active.
+- `codex-app` starts a visible ChatGPT Desktop turn immediately, then attempts its stable review title, project location, and retention after that turn completes. App Server task metadata is not mutated while its rollout writer is active, and a stale task that cannot be archived does not discard a completed review result.
 - `command-json` supports any executable that accepts JSON stdin and returns a JSON receipt.
 
 Adding an Adapter is local: the Automation Domain and target workflows do not change.

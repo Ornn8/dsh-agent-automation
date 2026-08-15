@@ -49,6 +49,7 @@ import {
 import {
   listAllActiveThreads,
   materializeReviewTask,
+  settleReviewTaskMetadata,
   reviewInitializeParams,
   reviewTurnPermissions,
   reviewTaskIdsToArchive,
@@ -443,7 +444,8 @@ test('Codex review restores the visible project cwd after isolating the automate
   const source = await readFile(new URL('../src/codex-session.mjs', import.meta.url), 'utf8')
   assert.match(source, /const turn = await call\('turn\/start'/)
   assert.match(source, /cwd: taskCwd/)
-  assert.match(source, /await call\('thread\/settings\/update', \{ threadId, cwd: projectCwd \}\)/)
+  assert.match(source, /settleReviewTaskMetadata\(call, \{ threadId, title, projectCwd, keep \}\)/)
+  assert.match(source, /call\('thread\/settings\/update', \{ threadId, cwd: projectCwd \}\)/)
 })
 
 test('Codex retention reads every active-task page and rejects repeated cursors', async () => {
@@ -572,6 +574,31 @@ test('Codex starts the first turn without racing durable task metadata', async (
   assert.deepEqual(result, { threadId: 'fresh-review', turnId: 'review-turn' })
   assert.deepEqual(calls.map(call => call.method), ['thread/start', 'turn/start'])
   assert.equal(calls[1].params.threadId, 'fresh-review')
+})
+
+test('Codex review results do not depend on task metadata housekeeping', async () => {
+  const calls = []
+  const warnings = []
+  await settleReviewTaskMetadata(async (method, params) => {
+    calls.push({ method, params })
+    if (method === 'thread/name/set') throw new Error('rollout is empty')
+    if (method === 'thread/list') return {
+      data: [{ id: 'old-review', name: '[DSH GitHub 审查] PR #1 @old' }],
+      nextCursor: null,
+    }
+    if (method === 'thread/archive') throw new Error('thread has an active writer')
+    return {}
+  }, {
+    threadId: 'fresh-review',
+    title: '[DSH GitHub 审查] PR #32 @head',
+    projectCwd: 'F:\\dsh-gui',
+    keep: 1,
+  }, warning => warnings.push(warning))
+
+  assert.deepEqual(calls.map(call => call.method), [
+    'thread/name/set', 'thread/settings/update', 'thread/list', 'thread/archive',
+  ])
+  assert.equal(warnings.length, 2)
 })
 
 test('backlog Issue dispatch is not lost to GitHub token recursion suppression', async () => {

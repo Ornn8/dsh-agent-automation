@@ -99,6 +99,29 @@ export function reviewTaskIdsToArchive(threads, currentThreadId, keep = 6) {
   return reviews.map(thread => thread.id).filter(id => !retained.includes(id))
 }
 
+/** Apply user-interface metadata without allowing housekeeping to discard a completed review. */
+export async function settleReviewTaskMetadata(call, {
+  threadId, title, projectCwd, keep,
+}, warn = message => console.warn(message)) {
+  const attempt = async (operation, action) => {
+    try {
+      return await action()
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      warn(`ChatGPT Desktop task ${operation} skipped: ${detail}`)
+      return undefined
+    }
+  }
+
+  await attempt('naming', () => call('thread/name/set', { threadId, name: title }))
+  await attempt('project restore', () => call('thread/settings/update', { threadId, cwd: projectCwd }))
+  const activeThreads = await attempt('retention scan', () => listAllActiveThreads(call))
+  if (!activeThreads) return
+  for (const staleThreadId of reviewTaskIdsToArchive(activeThreads, threadId, keep)) {
+    await attempt('archive', () => call('thread/archive', { threadId: staleThreadId }))
+  }
+}
+
 
 /** Read every active task without silently truncating retention at one page. */
 export async function listAllActiveThreads(call) {
@@ -262,13 +285,8 @@ export async function runReviewTask({
     process.stdout.write(`ChatGPT Desktop review task created: ${threadId}\n`)
 
     await completion
-    await call('thread/name/set', { threadId, name: title })
-    await call('thread/settings/update', { threadId, cwd: projectCwd })
-    const activeThreads = await listAllActiveThreads(call)
-    for (const staleThreadId of reviewTaskIdsToArchive(activeThreads, threadId, keep)) {
-      await call('thread/archive', { threadId: staleThreadId })
-    }
     if (!finalMessage.trim()) throw new Error('Codex review task completed without a final assistant message')
+    await settleReviewTaskMetadata(call, { threadId, title, projectCwd, keep })
     return { threadId, finalMessage: finalMessage.trim() }
   } finally {
     signal?.removeEventListener('abort', cancel)
