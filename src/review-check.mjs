@@ -1,12 +1,47 @@
 import { parseJson, run } from './common.mjs'
 
 export const REVIEW_CHECK_NAME = 'codex/review'
+const GITHUB_ACTIONS_APP_ID = 15368
 
 function checkArguments(method, repository, checkId, fields) {
   const path = checkId === undefined
     ? `repos/${repository}/check-runs`
     : `repos/${repository}/check-runs/${checkId}`
   return ['api', '--method', method, path, ...fields.flatMap(([key, value]) => ['-f', `${key}=${value}`])]
+}
+
+function isRepositoryRunUrl(value, repository) {
+  try {
+    const url = new URL(value)
+    const prefix = `/${repository}/`
+    return url.origin === 'https://github.com'
+      && url.pathname.startsWith(prefix)
+      && (/^actions\/runs\/\d+(?:\/.*)?$/.test(url.pathname.slice(prefix.length))
+        || /^runs\/\d+(?:\/.*)?$/.test(url.pathname.slice(prefix.length)))
+  } catch {
+    return false
+  }
+}
+
+/** Return trusted GitHub Actions review CheckRun ids for one exact head. */
+export function trustedReviewCheckIds(response, { repository, head }) {
+  if (!Array.isArray(response?.check_runs)) throw new Error('Invalid review CheckRun response')
+  if (response.total_count > response.check_runs.length) {
+    throw new Error('Review CheckRun snapshot is incomplete')
+  }
+  return new Set(response.check_runs
+    .filter(check => check?.name === REVIEW_CHECK_NAME
+      && check.head_sha === head
+      && check.app?.id === GITHUB_ACTIONS_APP_ID
+      && isRepositoryRunUrl(check.details_url, repository)
+      && Number.isSafeInteger(check.id)
+      && check.id > 0)
+    .map(check => check.id))
+}
+
+/** Report whether a new trusted review CheckRun appeared after a repair began. */
+export function hasNewReviewCheck(before, after) {
+  return [...after].some(checkId => !before.has(checkId))
 }
 
 /** Create the GitHub Actions-owned review CheckRun on the exact pull request head. */
