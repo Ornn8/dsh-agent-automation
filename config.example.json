@@ -90,10 +90,12 @@
     "roles": {
       "change": {
         "runnerNamePrefix": "dsh-agent-change",
+        "replicas": 4,
         "labels": ["self-hosted", "Windows", "X64", "agent-change"]
       },
       "review": {
         "runnerNamePrefix": "dsh-agent-review",
+        "replicas": 1,
         "labels": ["self-hosted", "Windows", "X64", "agent-reviewer"]
       }
     },

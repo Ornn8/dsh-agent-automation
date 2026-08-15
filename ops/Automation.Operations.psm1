@@ -116,6 +116,12 @@ function Read-OperationsConfig {
     $role = $ops.roles.$roleName
     if (-not $role) { throw "operations.roles.$roleName is required" }
     if ([string]::IsNullOrWhiteSpace($role.runnerNamePrefix) -or $role.runnerNamePrefix -match '[^A-Za-z0-9_.-]' -or $role.runnerNamePrefix.Length -gt 16) { throw "roles.$roleName.runnerNamePrefix is invalid" }
+    $replicasProperty = $role.PSObject.Properties['replicas']
+    if (-not $replicasProperty) {
+      $role | Add-Member -NotePropertyName replicas -NotePropertyValue 1
+    } elseif (($replicasProperty.Value -isnot [int] -and $replicasProperty.Value -isnot [long]) -or [int]$replicasProperty.Value -lt 1 -or [int]$replicasProperty.Value -gt 8) {
+      throw "roles.$roleName.replicas must be an integer between 1 and 8"
+    }
     if (-not @($role.labels).Count -or @($role.labels | Where-Object { $_ -notmatch '^[A-Za-z0-9_.-]+$' }).Count) { throw "roles.$roleName.labels must be non-empty simple labels" }
   }
   if ($ops.roles.change.labels -notcontains 'agent-change') { throw 'change role must have the agent-change label' }
@@ -163,35 +169,17 @@ function Get-RunnerInstances {
     if ($repositorySet.Count) { throw '-Repositories is not valid in organization mode because each role runner is shared by every allowlisted target' }
     $organizationKey = Get-RepositoryKey -Repository "$($ops.controller.organization)/organization"
     foreach ($roleName in $roleSet) {
-      $id = "organization-$roleName"
-      $instances.Add([pscustomobject]@{
-        Id = $id
-        Role = $roleName
-        Repository = $null
-        RegistrationKind = 'organization'
-        RegistrationOwner = $ops.controller.organization
-        RunnerName = "$($ops.roles.$roleName.runnerNamePrefix)-$organizationKey-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))"
-        Labels = @($ops.roles.$roleName.labels)
-        RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
-        WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
-        TaskName = "DSH-Agent-Automation-$id"
-        LogFile = Join-Path $ops.logsRoot "$id-supervisor.log"
-        FaultFile = Join-Path $ops.stateRoot (Join-Path 'faults' "$id.restart")
-      })
-    }
-  } else {
-    $selectedMappings = @($ops.repositoryMappings | Where-Object { -not $repositorySet.Count -or $_.repository -in $repositorySet })
-    foreach ($mapping in $selectedMappings) {
-      $key = Get-RepositoryKey -Repository $mapping.repository
-      foreach ($roleName in $roleSet) {
-        $id = "target-$key-$roleName"
+      for ($replica = 1; $replica -le [int]$ops.roles.$roleName.replicas; $replica += 1) {
+        $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
+        $id = "organization-$($roleName)$replicaSuffix"
         $instances.Add([pscustomobject]@{
           Id = $id
           Role = $roleName
-          Repository = $mapping.repository
-          RegistrationKind = 'repository'
-          RegistrationOwner = $mapping.repository
-          RunnerName = "$($ops.roles.$roleName.runnerNamePrefix)-$key-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))"
+          Replica = $replica
+          Repository = $null
+          RegistrationKind = 'organization'
+          RegistrationOwner = $ops.controller.organization
+          RunnerName = "$($ops.roles.$roleName.runnerNamePrefix)-$organizationKey-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))$replicaSuffix"
           Labels = @($ops.roles.$roleName.labels)
           RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
           WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
@@ -199,6 +187,32 @@ function Get-RunnerInstances {
           LogFile = Join-Path $ops.logsRoot "$id-supervisor.log"
           FaultFile = Join-Path $ops.stateRoot (Join-Path 'faults' "$id.restart")
         })
+      }
+    }
+  } else {
+    $selectedMappings = @($ops.repositoryMappings | Where-Object { -not $repositorySet.Count -or $_.repository -in $repositorySet })
+    foreach ($mapping in $selectedMappings) {
+      $key = Get-RepositoryKey -Repository $mapping.repository
+      foreach ($roleName in $roleSet) {
+        for ($replica = 1; $replica -le [int]$ops.roles.$roleName.replicas; $replica += 1) {
+          $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
+          $id = "target-$key-$($roleName)$replicaSuffix"
+          $instances.Add([pscustomobject]@{
+            Id = $id
+            Role = $roleName
+            Replica = $replica
+            Repository = $mapping.repository
+            RegistrationKind = 'repository'
+            RegistrationOwner = $mapping.repository
+            RunnerName = "$($ops.roles.$roleName.runnerNamePrefix)-$key-$(([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length)))$replicaSuffix"
+            Labels = @($ops.roles.$roleName.labels)
+            RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
+            WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
+            TaskName = "DSH-Agent-Automation-$id"
+            LogFile = Join-Path $ops.logsRoot "$id-supervisor.log"
+            FaultFile = Join-Path $ops.stateRoot (Join-Path 'faults' "$id.restart")
+          })
+        }
       }
     }
   }
@@ -1013,8 +1027,8 @@ function Invoke-OperationsSelfTest {
     dshWebHost = [pscustomobject]@{ enabled = $false }
     runner = [pscustomobject]@{ version = '1.0.0'; sha256 = ('a' * 64) }
     roles = [pscustomobject]@{
-      change = [pscustomobject]@{ runnerNamePrefix = 'change'; labels = @('agent-change') }
-      review = [pscustomobject]@{ runnerNamePrefix = 'review'; labels = @('agent-reviewer') }
+      change = [pscustomobject]@{ runnerNamePrefix = 'change'; replicas = 3; labels = @('agent-change') }
+      review = [pscustomobject]@{ runnerNamePrefix = 'review'; replicas = 2; labels = @('agent-reviewer') }
     }
     repositoryMappings = @(
       [pscustomobject]@{ repository = 'owner/one' },
@@ -1023,8 +1037,10 @@ function Invoke-OperationsSelfTest {
   }
   $fakeLoaded = [pscustomobject]@{ Operations = $fakeOps; Config = [pscustomobject]@{ repositories = @('owner/one', 'owner/two') } }
   $targetInstances = @(Get-RunnerInstances -Loaded $fakeLoaded)
-  $results += [pscustomobject]@{ Name = 'target mode creates two roles per repository'; Passed = ($targetInstances.Count -eq 4) }
-  $results += [pscustomobject]@{ Name = 'target task names are unique'; Passed = (@($targetInstances.TaskName | Select-Object -Unique).Count -eq 4) }
+  $results += [pscustomobject]@{ Name = 'target mode creates configured role replicas per repository'; Passed = ($targetInstances.Count -eq 10) }
+  $results += [pscustomobject]@{ Name = 'target replica task names are unique'; Passed = (@($targetInstances.TaskName | Select-Object -Unique).Count -eq 10) }
+  $results += [pscustomobject]@{ Name = 'replica one retains the original deterministic instance ID'; Passed = ($targetInstances.Id -contains 'target-owner-one-30fa40f53d1e-change') }
+  $results += [pscustomobject]@{ Name = 'additional replicas have deterministic suffixed instance IDs'; Passed = ($targetInstances.Id -contains 'target-owner-one-30fa40f53d1e-change-r3') }
   $ownedStart = [DateTime]::SpecifyKind([DateTime]'2026-01-02T03:04:05', [DateTimeKind]::Utc)
   $ownedRecord = [pscustomobject]@{ rootPid = 42; rootStartTimeUtc = $ownedStart.ToString('O') }
   $ownedProcess = [pscustomobject]@{ Id = 42; StartTime = $ownedStart }
@@ -1059,12 +1075,12 @@ function Invoke-OperationsSelfTest {
   $fakeOps.repositoryMappings = @($fakeOps.repositoryMappings[0])
   $fakeLoaded.Config.repositories = @('owner/one')
   $removedMappingState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
-  $results += [pscustomobject]@{ Name = 'manifest reconciliation detects removed repository instances'; Passed = ($removedMappingState.StaleEntries.Count -eq 2) }
+  $results += [pscustomobject]@{ Name = 'manifest reconciliation detects removed repository instances'; Passed = ($removedMappingState.StaleEntries.Count -eq 5) }
   $fakeOps.repositoryMappings = @([pscustomobject]@{ repository = 'owner/one' }, [pscustomobject]@{ repository = 'owner/two' })
   $fakeLoaded.Config.repositories = @('owner/one', 'owner/two')
   $fakeOps.installRoot = "$selfTestInstallRoot-moved"
   $changedRootState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
-  $results += [pscustomobject]@{ Name = 'manifest reconciliation detects changed managed paths'; Passed = ($changedRootState.ChangedEntries.Count -eq 4) }
+  $results += [pscustomobject]@{ Name = 'manifest reconciliation detects changed managed paths'; Passed = ($changedRootState.ChangedEntries.Count -eq 10) }
   $fakeOps.installRoot = $selfTestInstallRoot
   $fakeOps.runner.version = '2.0.0'
   $changedPackageState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
@@ -1106,9 +1122,9 @@ function Invoke-OperationsSelfTest {
   $fakeOps.controller.registrationScope = 'organization'
   $fakeOps.controller.organization = 'owner'
   $organizationInstances = @(Get-RunnerInstances -Loaded $fakeLoaded)
-  $results += [pscustomobject]@{ Name = 'organization mode shares one runner per role'; Passed = ($organizationInstances.Count -eq 2) }
+  $results += [pscustomobject]@{ Name = 'organization mode creates configured shared role replicas'; Passed = ($organizationInstances.Count -eq 5) }
   $scopeState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
-  $results += [pscustomobject]@{ Name = 'manifest reconciliation detects scope migration'; Passed = ($scopeState.ScopeChanged -and $scopeState.StaleEntries.Count -eq 4 -and $scopeState.MissingEntries.Count -eq 2) }
+  $results += [pscustomobject]@{ Name = 'manifest reconciliation detects scope migration'; Passed = ($scopeState.ScopeChanged -and $scopeState.StaleEntries.Count -eq 10 -and $scopeState.MissingEntries.Count -eq 5) }
   $requiredMapping = [pscustomobject]@{ ciRequiredCheckName = 'all checks passed' }
   $requiredNames = Get-RequiredCheckNames -Mapping $requiredMapping
   $currentProtection = [pscustomobject]@{

@@ -91,6 +91,8 @@ Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.jso
 
 Repository mappings are the only agent-selection point. Assign any configured Adapter to `changeWorker` or `reviewWorker`; target workflows, Issue declarations, repair requests, review parsing, and landing policy do not change. One DSH, OpenCode, or Claude Code installation can serve both roles through two worker entries, while separate entries remain preferable for independent credentials, models, and lifecycle control.
 
+Runner concurrency is also Adapter-neutral. Set `operations.roles.change.replicas` or `operations.roles.review.replicas` from 1 through 8 to register that many isolated runners with the same role label. GitHub can then dispatch different Issues or pull requests concurrently, while each subject's workflow concurrency key still prevents duplicate work. Replica 1 retains the original deterministic instance name; later replicas use `-r2`, `-r3`, and so on.
+
 Configuration schema version 2 accepts only explicit `workers` and `repositoryMappings`; legacy `dshWebBaseUrl` and `codex*` fields are rejected. Existing installations must add the required `github.login`, `workers`, and `operations` fields before using the open-source installer.
 
 ## Quick start on Windows
