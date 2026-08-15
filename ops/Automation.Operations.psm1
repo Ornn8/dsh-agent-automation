@@ -47,7 +47,12 @@ function Test-OperationHeartbeat {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [pscustomobject]@{ Ok = $false; Detail = 'missing' } }
   try {
     $value = Get-Content -LiteralPath $path -Raw -Encoding utf8 | ConvertFrom-Json
-    $age = [DateTime]::UtcNow - [DateTime]::Parse($value.observedAtUtc).ToUniversalTime()
+    $observedAtUtc = [DateTimeOffset]::Parse(
+      $value.observedAtUtc,
+      [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::AssumeUniversal
+    ).UtcDateTime
+    $age = [DateTime]::UtcNow - $observedAtUtc
     $ok = $value.instanceId -ceq $InstanceId -and [int64]$value.rootPid -gt 0 -and $age.TotalSeconds -le $MaximumAgeSeconds
     return [pscustomobject]@{ Ok = $ok; Detail = if ($ok) { 'fresh' } else { 'stale or invalid' } }
   } catch { return [pscustomobject]@{ Ok = $false; Detail = 'invalid JSON or timestamp' } }
@@ -1139,6 +1144,10 @@ function Invoke-OperationsSelfTest {
     )
   }
   $fakeLoaded = [pscustomobject]@{ Operations = $fakeOps; Config = [pscustomobject]@{ repositories = @('owner/one', 'owner/two') } }
+  Write-OperationHeartbeat -Operations $fakeOps -InstanceId 'self-test' -RootPid $PID
+  $freshHeartbeat = Test-OperationHeartbeat -Operations $fakeOps -InstanceId 'self-test'
+  Remove-Item -LiteralPath (Join-Path (Join-Path $fakeOps.stateRoot 'heartbeats') 'self-test.json') -Force
+  $results += [pscustomobject]@{ Name = 'fresh UTC heartbeat survives a non-UTC host time zone'; Passed = $freshHeartbeat.Ok }
   $targetInstances = @(Get-RunnerInstances -Loaded $fakeLoaded)
   $results += [pscustomobject]@{ Name = 'target mode creates configured role replicas per repository'; Passed = ($targetInstances.Count -eq 10) }
   $results += [pscustomobject]@{ Name = 'target replica task names are unique'; Passed = (@($targetInstances.TaskName | Select-Object -Unique).Count -eq 10) }
