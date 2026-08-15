@@ -1,6 +1,6 @@
 # Agent Automation Control Plane
 
-This repository connects GitHub events to independently queued local agent workers without model polling. It is not tied to DeepSeek Harness or Codex: those are two current Worker implementations behind the same interface.
+This repository connects GitHub events to independently queued local agent workers without model polling. DeepSeek Harness, Codex, OpenCode, and Claude Code are replaceable Worker implementations behind the same interface.
 
 ## Architecture
 
@@ -46,8 +46,8 @@ An agent does not need its own GitHub account. GitHub event publication and vali
 To add an agent:
 
 1. Add a named entry under `workers` in the machine-local configuration.
-2. Use an existing Adapter (`dsh-web`, `codex-app`, or `command-json`) or add one Adapter that implements run and health.
-3. Configure the role-owned worker id (`dsh` for change or `codex` for review) to use that Adapter.
+2. Use an existing Adapter (`dsh-web`, `codex-app`, `opencode-cli`, `claude-code-cli`, or `command-json`) or add one Adapter that implements run and health.
+3. Set the repository mapping's `changeWorker` or `reviewWorker` to that named entry.
 4. Register an idle self-hosted runner with the controller-owned `agent-change` or `agent-reviewer` label.
 
 No controller workflow needs agent-specific branches. For a command-line agent, `command-json` sends the invocation as JSON on stdin and reads the terminal receipt as JSON from stdout.
@@ -83,13 +83,13 @@ Opening, reopening, or editing the Issue reevaluates the declaration, and closin
 
 The runners are idle outbound GitHub listeners. They make no model calls while no matching job exists. Landing, reconciliation, dispatch, and health checks are deterministic.
 
-GitHub work uses the three controller-owned Skills `github-issue-work`, `github-pr-repair`, and `github-pr-review`. The DSH Adapter installs them through the bundled `dsh-github-work` Cordis plugin, while the OpenCode Adapter materializes the same source text as native `SKILL.md` files in a per-invocation temporary configuration directory. Controller scripts send only the selected Skill name, verified routing data, and standard Worker invocation; they do not contain agent-specific procedure text. DSH sessions remain visible through the ordinary Web agent factory and event stream. OpenCode runs through its non-interactive JSON event stream. Change work ends with the same strict hidden receipt on either adapter, and the controller independently verifies the corresponding live pull request or Issue. Review output uses the same exact-pair review parser regardless of whether Codex App, DSH Web, or OpenCode CLI produced it.
+GitHub work uses the three controller-owned Skills `github-issue-work`, `github-pr-repair`, and `github-pr-review`. The DSH Adapter installs them through the bundled `dsh-github-work` Cordis plugin, OpenCode materializes native `SKILL.md` files, and Claude Code loads a temporary native plugin for trusted change work. Claude review injects the same review Skill while disabling Slash Commands and loading only the neutral project setting source, so pull-request customizations cannot join the session. Controller scripts send only the selected Skill name, verified routing data, and standard Worker invocation; they do not contain agent-specific procedure text. Change work ends with the same strict hidden receipt on every Adapter, and the controller independently verifies the corresponding live pull request or Issue. Review output uses the same exact-pair review parser regardless of its Worker.
 
 ## Local configuration
 
-Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). The file contains paths and repository allowlists, not provider keys. Every `dsh-web` worker declares `provider`, `model`, and `reasoningEffort`; every `opencode-cli` worker declares an executable, `change` or `review` mode, `provider/model`, and variant. Review mode also declares the Git executable used by the trusted adapter to prepare exact-base guidance and the diff before OpenCode starts. Each agent continues to use its own existing provider configuration.
+Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). The file contains paths and repository allowlists, not provider keys. Every `dsh-web` worker declares `provider`, `model`, and `reasoningEffort`; every `opencode-cli` worker declares an executable, role mode, `provider/model`, and variant; every `claude-code-cli` worker declares an executable, role mode, model, and effort. Review workers also declare the Git executable used by the trusted Adapter to prepare exact-base guidance and the diff. Each agent continues to use its own existing authentication.
 
-Repository mappings are the only agent-selection point. Assign any configured adapter to `changeWorker` or `reviewWorker`; target workflows, Issue declarations, repair requests, review parsing, and landing policy do not change. A single DSH or OpenCode installation can serve both roles through two worker entries, while separate entries remain preferable for independent credentials, models, and lifecycle control.
+Repository mappings are the only agent-selection point. Assign any configured Adapter to `changeWorker` or `reviewWorker`; target workflows, Issue declarations, repair requests, review parsing, and landing policy do not change. One DSH, OpenCode, or Claude Code installation can serve both roles through two worker entries, while separate entries remain preferable for independent credentials, models, and lifecycle control.
 
 Configuration schema version 2 accepts only explicit `workers` and `repositoryMappings`; legacy `dshWebBaseUrl` and `codex*` fields are rejected. Existing installations must add the required `github.login`, `workers`, and `operations` fields before using the open-source installer.
 

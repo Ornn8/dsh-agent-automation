@@ -17,6 +17,7 @@ import {
   run,
   trustedAssociation,
   validateConfigSchemaVersion,
+  validateClaudeCodeWorkerConfig,
   validateDshWorkerConfig,
   validateOpenCodeWorkerConfig,
   verifyGithubIdentity,
@@ -486,6 +487,34 @@ test('OpenCode workers declare one complete role-specific CLI selection', () => 
       model: 'openai/gpt-5', variant: 'medium',
     },
   } }), /workers\.review gitExecutable/)
+})
+
+test('Claude Code workers declare one complete role-specific CLI selection', () => {
+  assert.doesNotThrow(() => validateClaudeCodeWorkerConfig({ workers: {
+    change: {
+      adapter: 'claude-code-cli', executable: 'claude.exe', mode: 'change',
+      model: 'opus', effort: 'max',
+    },
+    review: {
+      adapter: 'claude-code-cli', executable: 'claude.exe', gitExecutable: 'git.exe',
+      mode: 'review', model: 'sonnet', effort: 'high',
+    },
+  } }))
+  assert.throws(() => validateClaudeCodeWorkerConfig({ workers: {
+    change: { adapter: 'claude-code-cli', executable: 'claude.exe', mode: 'change', effort: 'max' },
+  } }), /workers\.change model/)
+  assert.throws(() => validateClaudeCodeWorkerConfig({ workers: {
+    review: {
+      adapter: 'claude-code-cli', executable: 'claude.exe', mode: 'review',
+      model: 'sonnet', effort: 'high',
+    },
+  } }), /workers\.review gitExecutable/)
+  assert.throws(() => validateClaudeCodeWorkerConfig({ workers: {
+    review: {
+      adapter: 'claude-code-cli', executable: 'claude.exe', gitExecutable: 'git.exe',
+      mode: 'review', model: 'sonnet', effort: 'impossible',
+    },
+  } }), /workers\.review effort/)
 })
 
 test('DSH Web review returns its final message without requiring a change receipt', async () => {

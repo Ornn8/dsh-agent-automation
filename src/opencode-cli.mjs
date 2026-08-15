@@ -6,6 +6,7 @@ import {
   agentSkillDefinition,
   parseAgentAutomationResult,
 } from './agent-work-result.mjs'
+import { prepareAgentReviewInput } from './agent-review-input.mjs'
 
 function requiredText(value, name) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} must be a non-empty string`)
@@ -39,43 +40,18 @@ export function parseOpenCodeRunOutput(stdout) {
   return { sessionId: [...sessionIds][0], finalMessage }
 }
 
-function reviewPair(taskId) {
-  const match = /^review-([0-9a-f]{40})-([0-9a-f]{40})$/.exec(taskId)
-  if (!match) throw new Error('OpenCode review taskId must bind one lowercase full base and head SHA')
-  return { base: match[1], head: match[2] }
-}
-
 async function prepareReview({ worker, invocation, runCommand, environment }) {
-  const { base, head } = reviewPair(invocation.taskId)
   const gitExecutable = requiredText(worker.gitExecutable, 'OpenCode review git executable')
-  const git = args => runCommand(gitExecutable, ['-C', invocation.cwd, ...args], {
-    env: environment,
+  return prepareAgentReviewInput({
+    checkout: invocation.cwd,
+    taskId: invocation.taskId,
+    gitExecutable,
+    runCommand,
+    environment,
     timeoutMs: invocation.timeoutMs,
     signal: invocation.signal,
+    directoryPrefix: 'dsh-opencode-review-',
   })
-  const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--find-renames', `${base}...${head}`])
-  const tree = await git(['ls-tree', '-r', '--name-only', base])
-  const guidancePaths = tree.stdout.split(/\r?\n/)
-    .filter(candidate => candidate === 'AGENTS.md' || candidate.endsWith('/AGENTS.md'))
-  const guidance = {}
-  for (const guidancePath of guidancePaths) {
-    const value = await git(['show', `${base}:${guidancePath}`])
-    guidance[guidancePath] = value.stdout
-  }
-  const projectDirectory = await mkdtemp(path.join(tmpdir(), 'dsh-opencode-review-'))
-  try {
-    await writeFile(path.join(projectDirectory, 'review-input.json'), JSON.stringify({
-      version: 1,
-      base,
-      head,
-      diff: diff.stdout,
-      guidance,
-    }, null, 2), 'utf8')
-    return { projectDirectory, base, head }
-  } catch (error) {
-    await rm(projectDirectory, { recursive: true, force: true })
-    throw error
-  }
 }
 
 function reviewConfiguration(checkout) {

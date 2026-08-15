@@ -40,6 +40,21 @@
       "model": "openai/gpt-5",
       "variant": "medium"
     },
+    "claude-change": {
+      "adapter": "claude-code-cli",
+      "executable": "claude.exe",
+      "mode": "change",
+      "model": "opus",
+      "effort": "max"
+    },
+    "claude-review": {
+      "adapter": "claude-code-cli",
+      "executable": "claude.exe",
+      "gitExecutable": "git.exe",
+      "mode": "review",
+      "model": "sonnet",
+      "effort": "high"
+    },
     "another-agent": {
       "adapter": "command-json",
       "executable": "X:\\agents\\another-agent.exe",

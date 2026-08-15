@@ -116,6 +116,7 @@ export async function loadConfig() {
   }
   validateDshWorkerConfig(config)
   validateOpenCodeWorkerConfig(config)
+  validateClaudeCodeWorkerConfig(config)
   githubLogin(config)
   return config
 }
@@ -235,6 +236,30 @@ export function validateOpenCodeWorkerConfig(config) {
     }
     if (worker.agent !== undefined && (typeof worker.agent !== 'string' || !worker.agent.trim())) {
       throw new Error(`workers.${workerId} agent must be a non-empty string`)
+    }
+    if (worker.mode === 'review'
+      && (typeof worker.gitExecutable !== 'string' || !worker.gitExecutable.trim())) {
+      throw new Error(`workers.${workerId} gitExecutable must be a non-empty string for review`)
+    }
+  }
+}
+
+const CLAUDE_CODE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'])
+
+/** Validate every Claude Code CLI worker before any task can reach the executable. */
+export function validateClaudeCodeWorkerConfig(config) {
+  for (const [workerId, worker] of Object.entries(config?.workers || {})) {
+    if (worker?.adapter !== 'claude-code-cli') continue
+    for (const field of ['executable', 'model', 'effort']) {
+      if (typeof worker[field] !== 'string' || !worker[field].trim()) {
+        throw new Error(`workers.${workerId} ${field} must be a non-empty string`)
+      }
+    }
+    if (!CLAUDE_CODE_EFFORTS.has(worker.effort)) {
+      throw new Error(`workers.${workerId} effort must be a supported Claude Code effort`)
+    }
+    if (!['change', 'review'].includes(worker.mode)) {
+      throw new Error(`workers.${workerId} mode must be change or review`)
     }
     if (worker.mode === 'review'
       && (typeof worker.gitExecutable !== 'string' || !worker.gitExecutable.trim())) {
