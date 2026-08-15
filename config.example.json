@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Ornn8/dsh-agent-automation/master/ops/config.schema.json",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "repositories": ["Ornn8/deepseek-harness"],
   "ghExecutable": "gh.exe",
   "gitExecutable": "git.exe",
@@ -15,7 +15,11 @@
       "permissionPreset": "danger-full-access",
       "provider": "opencode-go",
       "model": "deepseek-v4-flash",
-      "reasoningEffort": "max"
+      "reasoningEffort": "max",
+      "capabilities": {
+        "skills": ["github-issue-work", "github-pr-repair", "github-pr-review", "agent-readiness-canary"],
+        "hardReadOnlyReview": false
+      }
     },
     "codex": {
       "adapter": "codex-app",
@@ -25,14 +29,22 @@
       "projectCwd": "X:\\path\\to\\visible-project",
       "model": "gpt-5.6-sol",
       "effort": "medium",
-      "keep": 6
+      "keep": 6,
+      "capabilities": {
+        "skills": ["github-pr-review", "github-repository-supervision", "agent-readiness-canary"],
+        "hardReadOnlyReview": true
+      }
     },
     "opencode-change": {
       "adapter": "opencode-cli",
       "executable": "opencode.exe",
       "mode": "change",
       "model": "opencode-go/deepseek-v4-flash",
-      "variant": "max"
+      "variant": "max",
+      "capabilities": {
+        "skills": ["github-issue-work", "github-pr-repair", "agent-readiness-canary"],
+        "hardReadOnlyReview": false
+      }
     },
     "opencode-review": {
       "adapter": "opencode-cli",
@@ -40,14 +52,22 @@
       "gitExecutable": "git.exe",
       "mode": "review",
       "model": "openai/gpt-5",
-      "variant": "medium"
+      "variant": "medium",
+      "capabilities": {
+        "skills": ["github-pr-review", "github-repository-supervision", "agent-readiness-canary"],
+        "hardReadOnlyReview": true
+      }
     },
     "claude-change": {
       "adapter": "claude-code-cli",
       "executable": "claude.exe",
       "mode": "change",
       "model": "opus",
-      "effort": "max"
+      "effort": "max",
+      "capabilities": {
+        "skills": ["github-issue-work", "github-pr-repair", "agent-readiness-canary"],
+        "hardReadOnlyReview": false
+      }
     },
     "claude-review": {
       "adapter": "claude-code-cli",
@@ -55,17 +75,26 @@
       "gitExecutable": "git.exe",
       "mode": "review",
       "model": "sonnet",
-      "effort": "high"
+      "effort": "high",
+      "capabilities": {
+        "skills": ["github-pr-review", "github-repository-supervision", "agent-readiness-canary"],
+        "hardReadOnlyReview": true
+      }
     },
     "another-agent": {
       "adapter": "command-json",
       "executable": "X:\\agents\\another-agent.exe",
       "args": ["run-json"],
-      "healthArgs": ["health"]
+      "healthArgs": ["health"],
+      "mode": "change",
+      "capabilities": {
+        "skills": ["github-issue-work", "github-pr-repair", "agent-readiness-canary"],
+        "hardReadOnlyReview": false
+      }
     }
   },
   "operations": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "installRoot": "F:\\dsh-agent-automation-runtime",
     "stateRoot": "F:\\dsh-agent-automation-state",
     "logsRoot": "F:\\dsh-agent-automation-state\\logs",
@@ -83,8 +112,8 @@
         "repository": "Ornn8/deepseek-harness",
         "changeWorker": "dsh",
         "reviewWorker": "codex",
-        "ciWorkflowName": "CI",
-        "ciRequiredCheckName": "all checks passed"
+        "ciWorkflows": ["CI"],
+        "requiredChecks": ["all checks passed"]
       }
     ],
     "roles": {

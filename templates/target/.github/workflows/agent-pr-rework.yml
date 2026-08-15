@@ -1,6 +1,6 @@
 name: Agent PR Rework
 
-# Configure DSH_AUTOMATION_CI_WORKFLOW to "{{CI_WORKFLOW_NAME}}" before enabling CI repair requests.
+# Configure DSH_AUTOMATION_CI_WORKFLOWS before enabling CI repair requests.
 
 on:
   issue_comment:
@@ -39,4 +39,4 @@ jobs:
       pull_request_number: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.subject.number || github.event.client_payload.pr_number }}
       head_sha: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.revision.head || github.event.client_payload.head_sha }}
       request_id: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.requestId || github.event.client_payload.request_id }}
-      ci_workflow_name: ${{ vars.DSH_AUTOMATION_CI_WORKFLOW }}
+      ci_workflow_name: ${{ github.event.client_payload.ci_workflow_name || '' }}

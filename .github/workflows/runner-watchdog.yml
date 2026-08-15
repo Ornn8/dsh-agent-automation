@@ -1,0 +1,27 @@
+name: Agent Runner Queue Watchdog
+
+on:
+  workflow_call:
+
+jobs:
+  watchdog:
+    name: pipeline/hosted-watchdog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out the immutable automation controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Fail when Agent jobs remain queued too long
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node controller/src/runner-watchdog.mjs

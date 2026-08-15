@@ -12,8 +12,45 @@ function Write-OperationLog {
   Write-Host $line
   if ($LogFile) {
     $directory = Split-Path -Parent $LogFile
-    if (Test-Path -LiteralPath $directory) { Add-Content -LiteralPath $LogFile -Value $line -Encoding utf8 }
+    if (Test-Path -LiteralPath $directory) {
+      if ((Test-Path -LiteralPath $LogFile -PathType Leaf) -and (Get-Item -LiteralPath $LogFile).Length -ge 10MB) {
+        $oldest = "$LogFile.5"
+        if (Test-Path -LiteralPath $oldest -PathType Leaf) { Remove-Item -LiteralPath $oldest -Force }
+        for ($index = 4; $index -ge 1; $index--) {
+          $source = "$LogFile.$index"
+          if (Test-Path -LiteralPath $source -PathType Leaf) { Move-Item -LiteralPath $source -Destination "$LogFile.$($index + 1)" -Force }
+        }
+        Move-Item -LiteralPath $LogFile -Destination "$LogFile.1" -Force
+      }
+      Add-Content -LiteralPath $LogFile -Value $line -Encoding utf8
+    }
   }
+}
+
+function Write-OperationHeartbeat {
+  param([Parameter(Mandatory)]$Operations, [Parameter(Mandatory)][string]$InstanceId, [Parameter(Mandatory)][int]$RootPid)
+  $directory = Join-Path $Operations.stateRoot 'heartbeats'
+  [IO.Directory]::CreateDirectory($directory) | Out-Null
+  $path = Join-Path $directory "$InstanceId.json"
+  $temporary = "$path.$([Guid]::NewGuid().ToString('N')).tmp"
+  [IO.File]::WriteAllText($temporary, ([pscustomobject]@{
+    instanceId = $InstanceId
+    rootPid = $RootPid
+    observedAtUtc = [DateTime]::UtcNow.ToString('O')
+  } | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $temporary -Destination $path -Force
+}
+
+function Test-OperationHeartbeat {
+  param([Parameter(Mandatory)]$Operations, [Parameter(Mandatory)][string]$InstanceId, [int]$MaximumAgeSeconds = 30)
+  $path = Join-Path (Join-Path $Operations.stateRoot 'heartbeats') "$InstanceId.json"
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [pscustomobject]@{ Ok = $false; Detail = 'missing' } }
+  try {
+    $value = Get-Content -LiteralPath $path -Raw -Encoding utf8 | ConvertFrom-Json
+    $age = [DateTime]::UtcNow - [DateTime]::Parse($value.observedAtUtc).ToUniversalTime()
+    $ok = $value.instanceId -ceq $InstanceId -and [int64]$value.rootPid -gt 0 -and $age.TotalSeconds -le $MaximumAgeSeconds
+    return [pscustomobject]@{ Ok = $ok; Detail = if ($ok) { 'fresh' } else { 'stale or invalid' } }
+  } catch { return [pscustomobject]@{ Ok = $false; Detail = 'invalid JSON or timestamp' } }
 }
 
 function Resolve-OperationPath {
@@ -61,6 +98,33 @@ function Assert-AgentWorkerConfiguration {
   param([Parameter(Mandatory)]$Workers)
   foreach ($property in @($Workers.psobject.Properties)) {
     $worker = $property.Value
+    $capabilities = $worker.capabilities
+    if (-not $capabilities -or @($capabilities.skills).Count -eq 0 -or @($capabilities.skills | Select-Object -Unique).Count -ne @($capabilities.skills).Count -or @($capabilities.skills | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -or $capabilities.hardReadOnlyReview -isnot [bool]) {
+      throw "workers.$($property.Name).capabilities must declare unique skills and hardReadOnlyReview"
+    }
+    $implementedSkills = @()
+    $implementedReadOnly = $false
+    if ($worker.adapter -eq 'codex-app') {
+      $implementedSkills = @('github-pr-review', 'github-repository-supervision', 'agent-readiness-canary')
+      $implementedReadOnly = $true
+    } elseif ($worker.adapter -eq 'dsh-web') {
+      $implementedSkills = @('github-issue-work', 'github-pr-repair', 'github-pr-review', 'agent-readiness-canary')
+    } elseif ($worker.adapter -in @('opencode-cli', 'claude-code-cli')) {
+      if ($worker.mode -eq 'review') {
+        $implementedSkills = @('github-pr-review', 'github-repository-supervision', 'agent-readiness-canary')
+        $implementedReadOnly = $true
+      } else {
+        $implementedSkills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary')
+      }
+    } elseif ($worker.adapter -eq 'command-json') {
+      $implementedSkills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary')
+    }
+    foreach ($skill in @($capabilities.skills)) {
+      if ($skill -notin $implementedSkills) { throw "workers.$($property.Name) Adapter does not implement declared skill $skill" }
+    }
+    if ([bool]$capabilities.hardReadOnlyReview -ne $implementedReadOnly) {
+      throw "workers.$($property.Name).hardReadOnlyReview does not match Adapter isolation"
+    }
     if ($worker.adapter -eq 'dsh-web') {
       foreach ($field in 'agentPreset', 'permissionPreset', 'provider', 'model', 'reasoningEffort') {
         if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
@@ -84,6 +148,11 @@ function Assert-AgentWorkerConfiguration {
       }
       continue
     }
+    if ($worker.adapter -eq 'command-json') {
+      if ($worker.executable -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.executable)) { throw "workers.$($property.Name).executable is required for a command-json worker" }
+      if ($worker.mode -notin @('change', 'review')) { throw "workers.$($property.Name).mode must be change or review" }
+      continue
+    }
     if ($worker.adapter -ne 'opencode-cli') { continue }
     foreach ($field in 'executable', 'model', 'variant') {
       if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
@@ -103,7 +172,7 @@ function Read-OperationsConfig {
   $configurationPath = [IO.Path]::GetFullPath($Configuration)
   if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) { throw "Configuration file does not exist: $configurationPath" }
   try { $config = Get-Content -LiteralPath $configurationPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 32 } catch { throw "Configuration is not valid JSON: $($_.Exception.Message)" }
-  if ($config.schemaVersion -ne 2 -or $config.operations.schemaVersion -ne 2) { throw 'Configuration schemaVersion must be 2' }
+  if ($config.schemaVersion -ne 3 -or $config.operations.schemaVersion -ne 3) { throw 'Configuration schemaVersion must be 3' }
   if (-not @($config.repositories).Count) { throw 'repositories must not be empty' }
   if (@($config.repositories).Count -gt 32) { throw 'repositories is limited to 32 entries per host' }
   foreach ($repository in @($config.repositories)) { if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid repository mapping: $repository" } }
@@ -146,11 +215,26 @@ function Read-OperationsConfig {
   if (@($mapped | Select-Object -Unique).Count -ne $mapped.Count -or @($mapped | Where-Object { $_ -notin @($config.repositories) }).Count) { throw 'repositoryMappings must map each allowed repository exactly once' }
   if ($mapped.Count -ne @($config.repositories).Count) { throw 'repositoryMappings must map every allowed repository' }
   foreach ($mapping in $mappings) {
-    foreach ($field in 'changeWorker', 'reviewWorker', 'ciWorkflowName', 'ciRequiredCheckName') { if ([string]::IsNullOrWhiteSpace($mapping.$field)) { throw "repositoryMappings.$field is required" } }
-    if ($mapping.ciWorkflowName.Length -gt 128 -or $mapping.ciWorkflowName -match '[\r\n]') { throw "repositoryMappings.ciWorkflowName is invalid for $($mapping.repository)" }
-    if ($mapping.ciRequiredCheckName.Length -gt 128 -or $mapping.ciRequiredCheckName -match '[\r\n]' -or $mapping.ciRequiredCheckName -eq $script:ReviewRequiredCheckName) { throw "repositoryMappings.ciRequiredCheckName is invalid for $($mapping.repository)" }
+    foreach ($field in 'changeWorker', 'reviewWorker') { if ([string]::IsNullOrWhiteSpace($mapping.$field)) { throw "repositoryMappings.$field is required" } }
+    foreach ($field in 'ciWorkflows', 'requiredChecks') {
+      $values = @($mapping.$field)
+      if (-not $values.Count -or @($values | Select-Object -Unique).Count -ne $values.Count -or @($values | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) -or $_.Length -gt 128 -or $_ -match '[\r\n]' }).Count) {
+        throw "repositoryMappings.$field must contain unique nonempty one-line names for $($mapping.repository)"
+      }
+    }
+    if ($script:ReviewRequiredCheckName -in @($mapping.requiredChecks)) { throw "repositoryMappings.requiredChecks must not contain $script:ReviewRequiredCheckName" }
     if (-not $config.workers.($mapping.changeWorker)) { throw "repositoryMappings changeWorker is unknown: $($mapping.changeWorker)" }
     if (-not $config.workers.($mapping.reviewWorker)) { throw "repositoryMappings reviewWorker is unknown: $($mapping.reviewWorker)" }
+    foreach ($skill in @('github-issue-work', 'github-pr-repair')) {
+      if ($skill -notin @($config.workers.($mapping.changeWorker).capabilities.skills)) { throw "repositoryMappings changeWorker lacks $skill" }
+    }
+    foreach ($skill in @('github-pr-review', 'github-repository-supervision')) {
+      if ($skill -notin @($config.workers.($mapping.reviewWorker).capabilities.skills)) { throw "repositoryMappings reviewWorker lacks $skill" }
+    }
+    if (-not [bool]$config.workers.($mapping.reviewWorker).capabilities.hardReadOnlyReview) { throw 'repositoryMappings reviewWorker lacks hard read-only isolation' }
+    foreach ($workerId in @($mapping.changeWorker, $mapping.reviewWorker)) {
+      if ('agent-readiness-canary' -notin @($config.workers.($workerId).capabilities.skills)) { throw "repositoryMappings worker lacks agent-readiness-canary: $workerId" }
+    }
   }
 
   if ($ops.dshWebHost.enabled) {
@@ -311,7 +395,7 @@ function Test-HostGitHubLogin {
 
 function Get-RequiredCheckNames {
   param([Parameter(Mandatory)]$Mapping)
-  return @([string]$Mapping.ciRequiredCheckName, $script:ReviewRequiredCheckName)
+  return @(@($Mapping.requiredChecks | ForEach-Object { [string]$_ }), $script:ReviewRequiredCheckName)
 }
 
 function Merge-RequiredStatusChecks {
@@ -1017,25 +1101,27 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'target repository endpoint'; Passed = ((Get-RegistrationEndpoint -Instance $repoInstance) -eq 'repos/owner/repo/actions/runners/registration-token') }
   $results += [pscustomobject]@{ Name = 'repository keys are stable'; Passed = ((Get-RepositoryKey 'owner/repo') -eq (Get-RepositoryKey 'owner/repo')) }
   $results += [pscustomobject]@{ Name = 'repository keys avoid normalized collision'; Passed = ((Get-RepositoryKey 'owner/a.b') -ne (Get-RepositoryKey 'owner/a-b')) }
-  $validDshWorker = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; permissionPreset = 'danger-full-access'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max' }
+  $changeCapabilities = [pscustomobject]@{ skills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary'); hardReadOnlyReview = $false }
+  $reviewCapabilities = [pscustomobject]@{ skills = @('github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'); hardReadOnlyReview = $true }
+  $validDshWorker = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; permissionPreset = 'danger-full-access'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max'; capabilities = $changeCapabilities }
   $results += [pscustomobject]@{ Name = 'DSH worker requires explicit session presets and model selection'; Passed = $false }
   try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = $validDshWorker }); $results[-1].Passed = $true } catch {}
   $results += [pscustomobject]@{ Name = 'DSH worker rejects incomplete model selection'; Passed = $false }
-  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; permissionPreset = 'danger-full-access'; provider = 'opencode-go'; model = 'deepseek-v4-flash' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'reasoningEffort' }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; permissionPreset = 'danger-full-access'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; capabilities = $changeCapabilities } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'reasoningEffort' }
   $results += [pscustomobject]@{ Name = 'DSH worker rejects a missing permission preset'; Passed = $false }
-  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'permissionPreset' }
-  $validOpenCodeReview = [pscustomobject]@{ adapter = 'opencode-cli'; executable = 'opencode.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'openai/gpt-5'; variant = 'medium' }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max'; capabilities = $changeCapabilities } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'permissionPreset' }
+  $validOpenCodeReview = [pscustomobject]@{ adapter = 'opencode-cli'; executable = 'opencode.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'openai/gpt-5'; variant = 'medium'; capabilities = $reviewCapabilities }
   $results += [pscustomobject]@{ Name = 'OpenCode review worker requires a complete CLI selection'; Passed = $false }
   try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = $validOpenCodeReview }); $results[-1].Passed = $true } catch {}
   $results += [pscustomobject]@{ Name = 'OpenCode review worker rejects a missing Git executable'; Passed = $false }
-  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'opencode-cli'; executable = 'opencode.exe'; mode = 'review'; model = 'openai/gpt-5'; variant = 'medium' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'gitExecutable' }
-  $validClaudeReview = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'sonnet'; effort = 'high' }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'opencode-cli'; executable = 'opencode.exe'; mode = 'review'; model = 'openai/gpt-5'; variant = 'medium'; capabilities = $reviewCapabilities } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'gitExecutable' }
+  $validClaudeReview = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'sonnet'; effort = 'high'; capabilities = $reviewCapabilities }
   $results += [pscustomobject]@{ Name = 'Claude Code review worker requires a complete CLI selection'; Passed = $false }
   try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = $validClaudeReview }); $results[-1].Passed = $true } catch {}
   $results += [pscustomobject]@{ Name = 'Claude Code review worker rejects a missing Git executable'; Passed = $false }
-  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; mode = 'review'; model = 'sonnet'; effort = 'high' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'gitExecutable' }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; mode = 'review'; model = 'sonnet'; effort = 'high'; capabilities = $reviewCapabilities } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'gitExecutable' }
   $results += [pscustomobject]@{ Name = 'Claude Code worker rejects an unsupported effort'; Passed = $false }
-  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'sonnet'; effort = 'impossible' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'effort' }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'claude-code-cli'; executable = 'claude.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'sonnet'; effort = 'impossible'; capabilities = $reviewCapabilities } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'effort' }
   $fakeOps = [pscustomobject]@{
     installRoot = $selfTestInstallRoot
     stateRoot = $selfTestStateRoot
@@ -1143,7 +1229,7 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'organization mode creates configured shared role replicas'; Passed = ($organizationInstances.Count -eq 5) }
   $scopeState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
   $results += [pscustomobject]@{ Name = 'manifest reconciliation detects scope migration'; Passed = ($scopeState.ScopeChanged -and $scopeState.StaleEntries.Count -eq 10 -and $scopeState.MissingEntries.Count -eq 5) }
-  $requiredMapping = [pscustomobject]@{ ciRequiredCheckName = 'all checks passed' }
+  $requiredMapping = [pscustomobject]@{ requiredChecks = @('all checks passed', 'lint') }
   $requiredNames = Get-RequiredCheckNames -Mapping $requiredMapping
   $currentProtection = [pscustomobject]@{
     strict = $false
@@ -1220,7 +1306,7 @@ function Invoke-OperationsSelfTest {
 }
 
 Export-ModuleMember -Function @(
-  'Write-OperationLog', 'Resolve-OperationPath', 'Assert-PathInside', 'Get-RepositoryKey',
+  'Write-OperationLog', 'Write-OperationHeartbeat', 'Test-OperationHeartbeat', 'Resolve-OperationPath', 'Assert-PathInside', 'Get-RepositoryKey',
   'Read-OperationsConfig', 'Get-RunnerInstances', 'Get-RunnerInstance',
   'Initialize-PrivateDirectory', 'Test-PrivateDirectoryAcl', 'Assert-ManagedDirectoryForRemoval',
   'Get-RegistrationEndpoint', 'Get-RegistrationUrl', 'Get-RunnerToken', 'Test-HostGitHubLogin',

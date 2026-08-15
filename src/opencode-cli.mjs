@@ -3,6 +3,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import {
   AGENT_REVIEW_SKILL,
+  AGENT_SUPERVISION_SKILL,
+  AGENT_READINESS_SKILL,
   agentSkillDefinition,
   parseAgentAutomationResult,
 } from './agent-work-result.mjs'
@@ -54,7 +56,7 @@ async function prepareReview({ worker, invocation, runCommand, environment }) {
   })
 }
 
-function reviewConfiguration(checkout) {
+function reviewConfiguration(checkout, requiredSkill) {
   return JSON.stringify({
     agent: {
       'controller-review': {
@@ -68,7 +70,7 @@ function reviewConfiguration(checkout) {
           websearch: 'deny',
           lsp: 'deny',
           question: 'deny',
-          skill: { '*': 'deny', [AGENT_REVIEW_SKILL]: 'allow' },
+          skill: { '*': 'deny', [requiredSkill]: 'allow' },
           external_directory: { '*': 'deny', [path.join(checkout, '**')]: 'allow' },
         },
       },
@@ -133,8 +135,8 @@ export async function runOpenCodeCli({ worker, invocation, runCommand, environme
   if (worker.mode === 'change' && !invocation.prompt.startsWith(`${marker} `)) {
     throw new Error(`OpenCode change prompt must invoke ${marker}`)
   }
-  if (worker.mode === 'review' && requiredSkill !== AGENT_REVIEW_SKILL) {
-    throw new Error(`OpenCode review must use ${AGENT_REVIEW_SKILL}`)
+  if (worker.mode === 'review' && ![AGENT_REVIEW_SKILL, AGENT_SUPERVISION_SKILL, AGENT_READINESS_SKILL].includes(requiredSkill)) {
+    throw new Error(`OpenCode review does not implement ${requiredSkill}`)
   }
   const args = [
     ...(worker.mode === 'review' ? ['--pure'] : []),
@@ -146,7 +148,7 @@ export async function runOpenCodeCli({ worker, invocation, runCommand, environme
   const configDirectory = await materializeSkill(requiredSkill)
   let review
   try {
-    if (worker.mode === 'review') {
+    if (worker.mode === 'review' && requiredSkill === AGENT_REVIEW_SKILL) {
       review = await prepareReview({ worker, invocation, runCommand, environment })
     }
     const sessionObserver = observeOpenCodeSession(invocation.onStarted)
@@ -156,7 +158,7 @@ export async function runOpenCodeCli({ worker, invocation, runCommand, environme
         ...environment,
         OPENCODE_CONFIG_DIR: configDirectory,
         ...(review ? {
-          OPENCODE_CONFIG_CONTENT: reviewConfiguration(invocation.cwd),
+          OPENCODE_CONFIG_CONTENT: reviewConfiguration(invocation.cwd, requiredSkill),
           OPENCODE_AUTO_SHARE: 'false',
           OPENCODE_DISABLE_CLAUDE_CODE: 'true',
           OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true',
@@ -164,7 +166,7 @@ export async function runOpenCodeCli({ worker, invocation, runCommand, environme
         } : {}),
       },
       input: worker.mode === 'review'
-        ? `Use the ${requiredSkill} skill. The trusted review input is review-input.json. The exact head checkout is ${invocation.cwd}.\n\nController review request:\n${invocation.prompt}`
+        ? `Use the ${requiredSkill} skill.${review ? ` The trusted review input is review-input.json. The exact head checkout is ${invocation.cwd}.` : ''}\n\nController read-only request:\n${invocation.prompt}`
         : `Use the ${requiredSkill} skill for this controller request.\n\nController request:\n${invocation.prompt.slice(marker.length + 1)}`,
       timeoutMs: invocation.timeoutMs,
       signal: invocation.signal,

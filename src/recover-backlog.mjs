@@ -1,6 +1,7 @@
 import { actionsCredentialEnvironment, authenticatedMarker, parseJson, requiredEnv, run, trustedAssociation } from './common.mjs'
-import { recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
+import { recordedCiWorkflow, recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
+import { recordedFailureClass } from './failure-classification.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('RECOVERY_SOURCE_RUN_ID')
@@ -44,6 +45,16 @@ function attemptRecords(comments, subject) {
     const attempt = Number.parseInt(/^- Attempt: (\d+)$/m.exec(comment.body)?.[1] || '', 10)
     return Number.isSafeInteger(attempt) ? [{ attempt }] : []
   })
+}
+
+function workflowFailureClass(run, sourceComment) {
+  return recordedFailureClass(sourceComment?.body)
+    || (['cancelled', 'timed_out', 'startup_failure', 'stale'].includes(run.conclusion) ? 'transport' : 'task')
+}
+
+async function waitForRetry(decision) {
+  if (decision.action !== 'retry' || !decision.delaySeconds) return
+  await new Promise(resolvePromise => setTimeout(resolvePromise, decision.delaySeconds * 1000))
 }
 
 async function upsertRecovery(subject, comments, attempt, status) {
@@ -154,6 +165,7 @@ if (role === 'review') {
     subject,
     current,
     attempts: attemptRecords(comments, subject),
+    failureClass: workflowFailureClass(workflowRun),
   })
   if (decision.action === 'ignore') {
     process.stdout.write(`Recovery left review run ${sourceRunId} without another model review.\n`)
@@ -163,6 +175,7 @@ if (role === 'review') {
   if (decision.action === 'dead-letter') {
     await markReviewDeadLetter(subject.number)
   } else {
+    await waitForRetry(decision)
     await wakeExactReview(subject)
   }
   process.stdout.write(`Recovery processed review pair #${subject.number} at ${subject.base}..${subject.head}.\n`)
@@ -188,6 +201,7 @@ for (const current of subjects) {
   const decision = recoveryDecision({
     run: workflowRun, repository, trust, subject, current,
     attempts: attemptRecords(comments, subject),
+    failureClass: workflowFailureClass(workflowRun, sourceComment || sourceComments[0]),
   })
   if (decision.action === 'ignore') continue
   await upsertRecovery(subject, comments, decision.attempt, decision.action === 'retry' ? 'retrying' : 'dead-letter')
@@ -198,6 +212,7 @@ for (const current of subjects) {
     continue
   }
   if (subject.type === 'issue') {
+    await waitForRetry(decision)
     for (const label of ['agent/dsh', 'agent/dsh-failed']) {
       await run(githubExecutable, ['issue', 'edit', String(subject.number), '--repo', repository,
         '--remove-label', label], { env: environment }).catch(() => undefined)
@@ -209,13 +224,19 @@ for (const current of subjects) {
       '-F', `client_payload[issue_number]=${subject.number}`,
       '-f', `client_payload[request_id]=recovery-${sourceRunId}-${decision.attempt}`], { env: environment })
   } else {
+    await waitForRetry(decision)
     const originalRequestId = repairRequestId(sourceComment.body, subject.head)
     const recoveryRequestId = originalRequestId.startsWith('ci-run-')
       ? `${originalRequestId}.recovery-${decision.attempt}`
       : decision.requestId
+    const ciWorkflow = originalRequestId.startsWith('ci-run-') ? recordedCiWorkflow(sourceComment.body) : ''
+    if (originalRequestId.startsWith('ci-run-') && !ciWorkflow) {
+      throw new Error(`CI recovery for pull request #${subject.number} has no recorded workflow name`)
+    }
     await run(githubExecutable, ['api', '--method', 'POST', `repos/${repository}/dispatches`,
       '-f', 'event_type=dsh-repair', '-F', `client_payload[pr_number]=${subject.number}`,
-      '-F', `client_payload[head_sha]=${subject.head}`, '-F', `client_payload[request_id]=${recoveryRequestId}`], { env: environment })
+      '-F', `client_payload[head_sha]=${subject.head}`, '-F', `client_payload[request_id]=${recoveryRequestId}`,
+      ...(ciWorkflow ? ['-f', `client_payload[ci_workflow_name]=${ciWorkflow}`] : [])], { env: environment })
   }
   recovered += 1
 }

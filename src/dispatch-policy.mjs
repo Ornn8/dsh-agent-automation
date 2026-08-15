@@ -34,16 +34,17 @@ export function ciRepairRequest(value) {
   return null
 }
 
-/** Return whether a completed workflow run is the exact failed CI evidence for a PR head. */
+/** Return whether a completed workflow run is exact failed CI evidence for a commit head. */
 export function trustedCiFailure({ run, pullRequestNumber, expectedHead, workflowName }) {
   return typeof workflowName === 'string'
     && workflowName.length > 0
     && run?.name === workflowName
-    && run.event === 'pull_request'
     && run.status === 'completed'
     && run.conclusion === 'failure'
     && run.head_sha === expectedHead
-    && run.pull_requests?.some(pullRequest => pullRequest.number === pullRequestNumber)
+    && (!Array.isArray(run.pull_requests)
+      || run.pull_requests.length === 0
+      || run.pull_requests.some(pullRequest => pullRequest.number === pullRequestNumber))
 }
 
 /** Return whether a failed review CheckRun authorizes a repair for its exact PR pair. */
@@ -110,6 +111,7 @@ export function selectBacklogWork({ repository, pullRequests, issues, trustedBlo
   for (const candidate of candidates) {
     if (labelNames(candidate).has('agent/dsh-failed')
       || labelNames(candidate).has('agent/dsh-blocked')
+      || labelNames(candidate).has('agent/dsh')
       || pullRequests.some(pullRequest => closesIssue(pullRequest, candidate.number))) continue
     const dispatch = issueDispatch(candidate)
     if (dispatch && dispatch.dependencies.every(number => !openIssueNumbers.has(number))) {

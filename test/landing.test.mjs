@@ -32,6 +32,24 @@ test('landing accepts only a current exact-pair PASS with every required check g
   assert.deepEqual(decision, { ready: true, reason: 'exact review and required checks passed' })
 })
 
+test('landing requires every configured CI check rather than one aggregate name', () => {
+  const base = 'a'.repeat(40)
+  const head = 'b'.repeat(40)
+  const decision = evaluateLanding({
+    pullRequest: pullRequest(base, head),
+    expectedHead: head,
+    requiredChecks: ['lint', 'unit', 'security'],
+    checkRuns: [
+      { name: 'lint', status: 'completed', conclusion: 'success' },
+      { name: 'unit', status: 'completed', conclusion: 'success' },
+      { name: 'security', status: 'completed', conclusion: 'failure' },
+    ],
+    reviewProof: proof(base, head),
+    trustedReview,
+  })
+  assert.deepEqual(decision, { ready: false, reason: 'required check security has not passed' })
+})
+
 test('landing rejects a pull_request_target run whose head_sha is the base commit', () => {
   const base = 'a'.repeat(40)
   const head = 'b'.repeat(40)

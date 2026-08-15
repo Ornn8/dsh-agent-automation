@@ -11,7 +11,7 @@ const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const githubEnvironment = actionsCredentialEnvironment()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
-const requiredCiCheckName = requiredEnv('REQUIRED_CI_CHECK_NAME')
+const requiredCheckNames = parseJson(requiredEnv('REQUIRED_CHECKS_JSON'), 'required check names')
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
@@ -21,8 +21,10 @@ const trustedReview = {
 if (!/^[0-9a-f]{40}$/i.test(expectedHead)) throw new Error('HEAD_SHA must be a full commit SHA')
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
 if (!Number.isSafeInteger(requestedNumber) || requestedNumber < 0) throw new Error('Invalid PR_NUMBER')
-if (requiredCiCheckName.length > 100 || requiredCiCheckName === 'codex/review') {
-  throw new Error('REQUIRED_CI_CHECK_NAME must name one independent CI aggregate')
+if (!Array.isArray(requiredCheckNames) || requiredCheckNames.length < 1 || requiredCheckNames.length > 32
+  || new Set(requiredCheckNames).size !== requiredCheckNames.length
+  || requiredCheckNames.some(name => typeof name !== 'string' || !name.trim() || name.length > 100 || name === 'codex/review')) {
+  throw new Error('REQUIRED_CHECKS_JSON must name unique independent CI checks')
 }
 
 async function ghJson(args, description) {
@@ -78,7 +80,7 @@ if (pullRequest.baseRefName !== defaultBranch) {
   process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: base branch is not ${defaultBranch}.\n`)
   process.exit(0)
 }
-const requiredChecks = [{ context: requiredCiCheckName, app_id: 15368 }]
+const requiredChecks = requiredCheckNames.map(context => ({ context, app_id: 15368 }))
 
 const checkRuns = await readCheckRuns()
 const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)

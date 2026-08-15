@@ -175,7 +175,11 @@ function titleTokens(title) {
 export function issueTitleSimilarity(left, right) {
   const a = titleTokens(left)
   const b = titleTokens(right)
-  if (a.size === 0 || b.size === 0) return normalizeTitle(left) === normalizeTitle(right) ? 1 : 0
+  if (a.size === 0 || b.size === 0) {
+    const rawLeft = String(left || '').trim().toLowerCase()
+    const rawRight = String(right || '').trim().toLowerCase()
+    return rawLeft && rawLeft === rawRight ? 1 : 0
+  }
   let intersection = 0
   for (const token of a) if (b.has(token)) intersection += 1
   return intersection / (a.size + b.size - intersection)
@@ -249,10 +253,10 @@ export function agentDshEligibility(issue, snapshot, repository = snapshot?.repo
 
 function validatedAction(value, index) {
   objectValue(value, `actions[${index}]`)
+  if (!Object.hasOwn(value, 'fingerprint')) value = { ...value, fingerprint: 'controller-derived' }
   if (!ACTION_TYPES.has(value.type)) throw new Error(`actions[${index}].type is unsupported`)
   const common = {
     type: value.type,
-    fingerprint: fingerprint(value.fingerprint, `actions[${index}].fingerprint`),
     evidence: evidenceList(value.evidence, `actions[${index}].evidence`),
   }
   if (value.type === 'create_issue') {
@@ -328,7 +332,10 @@ export function validateSupervisionProposal(value) {
   if (!Array.isArray(value.actions) || value.actions.length > 5) {
     throw new Error('Repository supervision result must contain at most five actions')
   }
-  const actions = value.actions.map(validatedAction)
+  const actions = value.actions.map(validatedAction).map(action => ({
+    ...action,
+    fingerprint: controllerActionFingerprint(action),
+  }))
   if (actions.filter(action => action.type === 'create_issue').length > 1) {
     throw new Error('Repository supervision may create at most one Issue per run')
   }
@@ -337,6 +344,49 @@ export function validateSupervisionProposal(value) {
     throw new Error('Repository supervision action fingerprints must be unique')
   }
   return { version: RESULT_VERSION, summary, actions }
+}
+
+/** Return deterministic cleanup actions for unsafe or partially cleaned Agent Issue triggers. */
+export function mandatoryBlockedCorrections(snapshot, repository = snapshot?.repository) {
+  const actions = []
+  for (const issue of snapshot.issues) {
+    const safety = agentDshTriggerSafety(issue, snapshot, repository)
+    if (safety.safe) continue
+    const reasonHash = createHash('sha256').update(safety.reasons.join('\n')).digest('hex').slice(0, 12)
+    const details = safety.reasons.join('; ').replace(/[\r\n]/g, ' ').slice(0, 500)
+    const blockedText = `BLOCKED: Issue #${issue.number} cannot execute now because ${details}. The assigned change agent must stop, create no commit, push no branch, open no pull request, and discard temporary work.`
+    const alreadyCommented = (issue.comments || []).some(comment => String(comment.body || '').includes(blockedText))
+    if (issue.labels.includes('agent/dsh')) {
+      actions.push({
+        type: 'remove_label', number: issue.number, label: 'agent/dsh',
+        fingerprint: `blocked-agent-dsh-${issue.number}-${reasonHash}`,
+        evidence: [{ source: 'issue_state', reference: `#${issue.number}`, detail: details }],
+      })
+    } else if (!alreadyCommented) {
+      actions.push({
+        type: 'comment_issue', number: issue.number,
+        fingerprint: `blocked-agent-dsh-comment-${issue.number}-${reasonHash}`,
+        body: blockedText,
+        evidence: [{ source: 'issue_state', reference: `#${issue.number}`, detail: details }],
+      })
+    }
+  }
+  return actions
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+/** Return the controller-owned idempotency key for one validated action. */
+export function controllerActionFingerprint(action) {
+  const normalized = Object.fromEntries(Object.entries(action).filter(([key]) => key !== 'fingerprint'))
+  const digest = createHash('sha256').update(canonicalJson(normalized)).digest('hex').slice(0, 20)
+  return `${String(action.type).replace(/_/g, '-')}-${digest}`
 }
 
 export function parseSupervisionMessage(message) {
@@ -481,3 +531,4 @@ export function planSupervisionActions(proposal, snapshot, {
 export function supervisionMarker(fingerprintValue) {
   return `<!-- repository-supervision:${fingerprint(fingerprintValue)} -->`
 }
+import { createHash } from 'node:crypto'

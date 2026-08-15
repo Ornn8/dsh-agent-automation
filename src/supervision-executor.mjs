@@ -2,6 +2,7 @@ import { appendFile } from 'node:fs/promises'
 import { githubJson, githubPages } from './supervision-github.mjs'
 import { issueTitleSimilarity } from './supervision-protocol.mjs'
 import { run } from './common.mjs'
+import { assertChangedLineExcerpt, assertLineExcerpt } from './line-evidence.mjs'
 
 function safeRepositoryPath(value) {
   return Boolean(value) && !value.startsWith('/') && !value.includes('\\')
@@ -18,43 +19,12 @@ function evidenceSourcesFor(action) {
   return new Set(['issue_state'])
 }
 
-function referencedLine(content, line, reference) {
-  const lines = String(content).split(/\r?\n/)
-  if (line < 1 || line > lines.length) throw new Error(`Evidence line is outside ${reference}`)
-  return lines[line - 1]
-}
-
 function assertEvidenceExcerpt(item, content, line) {
-  if (!referencedLine(content, line, item.reference).includes(item.excerpt)) {
-    throw new Error(`Evidence excerpt does not match line ${line} of ${item.reference}`)
-  }
+  assertLineExcerpt({ content, line, excerpt: item.excerpt, reference: item.reference })
 }
 
-function addedPatchLine(patch, line) {
-  let newLine
-  for (const text of String(patch || '').split(/\r?\n/)) {
-    const hunk = text.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
-    if (hunk) {
-      newLine = Number.parseInt(hunk[1], 10)
-      continue
-    }
-    if (newLine === undefined || text.startsWith('\\')) continue
-    if (text.startsWith('+') && !text.startsWith('+++')) {
-      if (newLine === line) return text.slice(1)
-      newLine += 1
-      continue
-    }
-    if (text.startsWith('-') && !text.startsWith('---')) continue
-    if (text.startsWith(' ')) newLine += 1
-  }
-  return undefined
-}
-
-function assertChangedEvidenceExcerpt(item, patch, line) {
-  const changedLine = addedPatchLine(patch, line)
-  if (changedLine === undefined || !changedLine.includes(item.excerpt)) {
-    throw new Error(`Evidence excerpt does not match a changed line ${line} of ${item.reference}`)
-  }
+function assertChangedEvidenceExcerpt(item, content, patch, line) {
+  assertChangedLineExcerpt({ content, patch, line, excerpt: item.excerpt, reference: item.reference })
 }
 
 function encodedRepositoryPath(path) {
@@ -116,11 +86,10 @@ export async function validateSupervisionEvidence(action, snapshot, {
         '-C', targetCheckout, 'show', `${commit}:${match[2]}`,
       ])).stdout
       const line = Number.parseInt(match[3], 10)
-      assertEvidenceExcerpt(item, content, line)
       const patch = (await runCommand(config.gitExecutable, [
         '-C', targetCheckout, 'show', '--format=', '--unified=0', '--no-ext-diff', commit, '--', match[2],
       ])).stdout
-      assertChangedEvidenceExcerpt(item, patch, line)
+      assertChangedEvidenceExcerpt(item, content, patch, line)
       continue
     }
 
@@ -145,8 +114,8 @@ export async function validateSupervisionEvidence(action, snapshot, {
         throw new Error(`Pull request evidence file is not a base64 GitHub file: ${item.reference}`)
       }
       const line = Number.parseInt(match[3], 10)
-      assertEvidenceExcerpt(item, Buffer.from(file.content.replace(/\s/g, ''), 'base64').toString('utf8'), line)
-      assertChangedEvidenceExcerpt(item, changedFile.patch, line)
+      const content = Buffer.from(file.content.replace(/\s/g, ''), 'base64').toString('utf8')
+      assertChangedEvidenceExcerpt(item, content, changedFile.patch, line)
       continue
     }
 
@@ -336,6 +305,22 @@ async function executeAction(action, { repository, config, environment, githubRe
       method: 'POST',
       input: { labels: [action.label] },
     })
+    if (action.label === 'agent/dsh') {
+      await githubRequest({
+        config,
+        environment,
+        path: `repos/${repository}/dispatches`,
+        description: `dispatched Issue #${action.number} work`,
+        method: 'POST',
+        input: {
+          event_type: 'dsh-issue',
+          client_payload: {
+            issue_number: action.number,
+            request_id: `supervision-${action.fingerprint}`,
+          },
+        },
+      })
+    }
     return
   }
 
@@ -368,6 +353,24 @@ async function executeAction(action, { repository, config, environment, githubRe
   }
 }
 
+function mutationTarget(action) {
+  if (action.type === 'create_issue') return ''
+  return `${action.type === 'comment_pr' ? 'pull' : 'issue'}:${action.number}`
+}
+
+async function refreshMutationTarget(action, snapshot, { repository, config, environment, githubRequest }) {
+  const pullRequest = action.type === 'comment_pr'
+  const collection = pullRequest ? snapshot.pullRequests : snapshot.issues
+  const current = await githubRequest({
+    config,
+    environment,
+    path: `repos/${repository}/${pullRequest ? 'pulls' : 'issues'}/${action.number}`,
+    description: `${pullRequest ? 'pull request' : 'Issue'} #${action.number} post-mutation state`,
+  })
+  const index = collection.findIndex(item => item.number === action.number)
+  if (index >= 0) collection[index] = current
+}
+
 /** Validate every action before applying the first mutation, then execute sequentially. */
 export async function applySupervisionPlan({
   plan,
@@ -386,13 +389,17 @@ export async function applySupervisionPlan({
     })
   }
   if (!applyChanges) return
-  for (const action of plan.actions) {
+  for (const [index, action] of plan.actions.entries()) {
     await assertMutationTargetCurrent(action, snapshot, {
       repository, config, environment, githubRequest,
     })
     await executeAction(action, {
       repository, config, environment, githubRequest, snapshot,
     })
+    const target = mutationTarget(action)
+    if (target && plan.actions.slice(index + 1).some(candidate => mutationTarget(candidate) === target)) {
+      await refreshMutationTarget(action, snapshot, { repository, config, environment, githubRequest })
+    }
   }
 }
 

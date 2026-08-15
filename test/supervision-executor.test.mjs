@@ -234,3 +234,78 @@ test('revalidates a blocked Issue between label removal and its comment', async 
     'POST repos/example/project/issues/4/comments',
   ])
 })
+
+test('dispatches deterministic Issue work after adding the agent label', async () => {
+  const issue = {
+    number: 8, state: 'open', stateReason: null, updatedAt: '2026-01-01T00:00:00Z',
+    title: 'Ready work', body: 'Branch: `agent/ready-work`', labels: [],
+  }
+  const writes = []
+  const githubRequest = async (request) => {
+    if (!request.method) {
+      return { ...issue, state_reason: null, updated_at: issue.updatedAt, labels: [] }
+    }
+    writes.push(request)
+    return {}
+  }
+  await applySupervisionPlan({
+    plan: {
+      mutationCount: 1,
+      actions: [{
+        type: 'add_label', number: 8, label: 'agent/dsh', fingerprint: 'ready-work',
+        marker: '<!-- repository-supervision:ready-work -->',
+        evidence: [{ source: 'issue_state', reference: '#8', detail: 'The Issue is ready.' }],
+      }],
+    },
+    snapshot: { issues: [issue], pullRequests: [] },
+    repository: 'example/project', config: {}, environment: {}, targetCheckout: '.', applyChanges: true, githubRequest,
+  })
+  assert.deepEqual(writes.map(request => ({ path: request.path, method: request.method, input: request.input })), [
+    {
+      path: 'repos/example/project/issues/8/labels', method: 'POST', input: { labels: ['agent/dsh'] },
+    },
+    {
+      path: 'repos/example/project/dispatches', method: 'POST',
+      input: { event_type: 'dsh-issue', client_payload: { issue_number: 8, request_id: 'supervision-ready-work' } },
+    },
+  ])
+})
+
+test('refreshes a target after one mutation before validating a second mutation on it', async () => {
+  const calls = []
+  let comments = 0
+  const githubRequest = async ({ path, method }) => {
+    calls.push(`${method || 'GET'} ${path}`)
+    if (method === 'POST') {
+      comments += 1
+      return {}
+    }
+    return {
+      number: 3, state: 'open', state_reason: null,
+      updated_at: comments ? '2026-01-01T00:01:00Z' : '2026-01-01T00:00:00Z',
+      title: 'One Issue', body: 'Body', labels: [],
+    }
+  }
+  const issue = {
+    number: 3, state: 'open', stateReason: null, updatedAt: '2026-01-01T00:00:00Z',
+    title: 'One Issue', body: 'Body', labels: [],
+  }
+  await applySupervisionPlan({
+    plan: {
+      mutationCount: 2,
+      actions: [
+        { type: 'comment_issue', number: 3, marker: '<!-- one -->', body: 'First.', evidence: [{ source: 'issue_state', reference: '#3', detail: 'Open.' }] },
+        { type: 'comment_issue', number: 3, marker: '<!-- two -->', body: 'Second.', evidence: [{ source: 'issue_state', reference: '#3', detail: 'Still open.' }] },
+      ],
+    },
+    snapshot: { issues: [issue], pullRequests: [], runs: [] },
+    repository: 'example/project', config: {}, environment: {}, targetCheckout: '.', applyChanges: true, githubRequest,
+  })
+  assert.deepEqual(calls, [
+    'GET repos/example/project/issues/3',
+    'POST repos/example/project/issues/3/comments',
+    'GET repos/example/project/issues/3',
+    'GET repos/example/project/issues/3',
+    'POST repos/example/project/issues/3/comments',
+  ])
+})

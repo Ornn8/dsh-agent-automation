@@ -11,8 +11,10 @@ if (-not $hostConfig.enabled) { exit 0 }
 $logFile = Join-Path $ops.logsRoot 'dsh-web-host.log'
 $faultFile = Join-Path $ops.stateRoot (Join-Path 'faults' 'dsh-web.restart')
 $failures = 0
+$restartAttempt = 0
 
 while ($true) {
+  $startedAt = [DateTime]::UtcNow
   Write-OperationLog -Message 'Starting managed DSH Web Host' -LogFile $logFile
   $startInfo = [Diagnostics.ProcessStartInfo]::new()
   $startInfo.FileName = $hostConfig.executable
@@ -30,6 +32,7 @@ while ($true) {
   }
   try {
     while (-not $process.HasExited) {
+      Write-OperationHeartbeat -Operations $ops -InstanceId 'dsh-web' -RootPid $process.Id
       Start-Sleep -Seconds 10
       $restart = Test-Path -LiteralPath $faultFile
       if ($restart) { Remove-Item -LiteralPath $faultFile -Force; Write-OperationLog -Message 'DSH Web Host fault marker consumed' -Level WARN -LogFile $logFile }
@@ -44,7 +47,9 @@ while ($true) {
     try { $process.Refresh() } catch { }
     if ($process.HasExited) { Remove-OwnedProcessRecord -Operations $ops -InstanceId 'dsh-web' -RootPid $process.Id }
   }
-  Write-OperationLog -Message "DSH Web Host exited with code $($process.ExitCode); retrying in 5 seconds" -Level WARN -LogFile $logFile
+  $restartAttempt = if (([DateTime]::UtcNow - $startedAt).TotalMinutes -ge 5) { 1 } else { $restartAttempt + 1 }
+  $delaySeconds = [Math]::Min(300, 5 * [Math]::Pow(2, [Math]::Min(6, $restartAttempt - 1)))
+  Write-OperationLog -Message "DSH Web Host exited with code $($process.ExitCode); retrying in $delaySeconds seconds" -Level WARN -LogFile $logFile
   $failures = 0
-  Start-Sleep -Seconds 5
+  Start-Sleep -Seconds $delaySeconds
 }

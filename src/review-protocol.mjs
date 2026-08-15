@@ -42,7 +42,9 @@ export function validateReview(value) {
       || typeof finding.path !== 'string'
       || !repositoryPath(finding.path)
       || !Number.isInteger(finding.line)
-      || finding.line < 1) {
+      || finding.line < 1
+      || typeof finding.excerpt !== 'string'
+      || !englishLine(finding.excerpt, 500)) {
       throw new Error('Codex returned an invalid blocking finding')
     }
   }

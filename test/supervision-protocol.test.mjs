@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   agentDshEligibility,
   issueTitleSimilarity,
+  mandatoryBlockedCorrections,
   parseIssueDependencies,
   parseSupervisionMessage,
   planSupervisionActions,
@@ -208,14 +209,6 @@ test('rejects duplicate or substantially overlapping Issue creation', () => {
 })
 
 test('makes repeated marker-bearing audits idempotent', () => {
-  const state = snapshot({ issues: [{
-    number: 3,
-    title: '[GUI-02] Standalone shell',
-    body: issueBody(),
-    state: 'open',
-    labels: [],
-    comments: [{ body: '<!-- repository-supervision:status-gui-02 -->\nCurrent state is recorded.' }],
-  }] })
   const proposal = validateSupervisionProposal({
     version: 1,
     summary: 'Record current state.',
@@ -227,7 +220,41 @@ test('makes repeated marker-bearing audits idempotent', () => {
       evidence: [{ source: 'issue_state', reference: '#3', detail: 'The Issue remains open.' }],
     }],
   })
+  const state = snapshot({ issues: [{
+    number: 3,
+    title: '[GUI-02] Standalone shell',
+    body: issueBody(),
+    state: 'open',
+    labels: [],
+    comments: [{ body: `<!-- repository-supervision:${proposal.actions[0].fingerprint} -->\nCurrent state is recorded.` }],
+  }] })
   assert.deepEqual(planSupervisionActions(proposal, state), { actions: [], mutationCount: 0 })
+})
+
+test('controller derives action fingerprints and distinct Chinese titles do not collide', () => {
+  const action = {
+    type: 'comment_issue', number: 3, body: 'Current state is recorded.',
+    evidence: [{ source: 'issue_state', reference: '#3', detail: 'The Issue remains open.' }],
+  }
+  const first = validateSupervisionProposal({ version: 1, summary: 'One.', actions: [{ ...action, fingerprint: 'model-one' }] })
+  const second = validateSupervisionProposal({ version: 1, summary: 'Two.', actions: [{ ...action, fingerprint: 'model-two' }] })
+  assert.equal(first.actions[0].fingerprint, second.actions[0].fingerprint)
+  assert.match(first.actions[0].fingerprint, /^comment-issue-[0-9a-f]{20}$/)
+  assert.equal(issueTitleSimilarity('修复登录错误', '完善支付页面'), 0)
+  assert.equal(issueTitleSimilarity('修复登录错误', '修复登录错误'), 1)
+})
+
+test('a failed blocked comment is repaired after the agent label was already removed', () => {
+  const state = snapshot({ issues: [
+    { number: 2, title: 'Dependency', body: issueBody({ branch: 'agent/dependency' }), state: 'open', labels: [], comments: [] },
+    { number: 3, title: 'Blocked work', body: issueBody({ dependency: 'Depends on #2.' }), state: 'open', labels: [], comments: [] },
+  ] })
+  const correction = mandatoryBlockedCorrections(state)
+  assert.equal(correction.length, 1)
+  assert.equal(correction[0].type, 'comment_issue')
+  assert.match(correction[0].body, /^BLOCKED:/)
+  state.issues[1].comments.push({ body: correction[0].body })
+  assert.deepEqual(mandatoryBlockedCorrections(state), [])
 })
 
 test('fails closed when implicit blocked correction exceeds the mutation cap', () => {
