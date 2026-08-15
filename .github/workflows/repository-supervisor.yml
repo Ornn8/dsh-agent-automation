@@ -1,0 +1,65 @@
+name: Repository Supervision
+
+on:
+  workflow_call:
+    inputs:
+      upstream_repository:
+        description: Upstream repository in owner/name form.
+        required: true
+        type: string
+      apply_changes:
+        description: Apply validated GitHub mutations instead of producing a dry run.
+        required: false
+        default: false
+        type: boolean
+      max_mutations:
+        description: Maximum GitHub mutations permitted in one run.
+        required: false
+        default: 5
+        type: number
+
+concurrency:
+  group: repository-supervision-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  supervise:
+    name: repository supervision
+    runs-on: [self-hosted, agent-reviewer]
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out the target default branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          path: target
+          persist-credentials: false
+
+      - name: Check out the immutable automation controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Audit repository and apply guarded Issue management
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+          UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository }}
+          TARGET_CHECKOUT: ${{ github.workspace }}/target
+          APPLY_CHANGES: ${{ inputs.apply_changes }}
+          MAX_MUTATIONS: ${{ inputs.max_mutations }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROLLER_SHA: ${{ job.workflow_sha }}
+          AGENT_ROLE: review
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node controller/src/repository-supervisor.mjs
