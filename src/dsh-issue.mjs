@@ -19,7 +19,7 @@ import {
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import { baselineIssueWorkItem } from './baseline-issue.mjs'
-import { DSH_ISSUE_SKILL, dshWorkPrompt } from './dsh-work.mjs'
+import { AGENT_ISSUE_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { openAgentWorkDependencies, resolveAgentWorkDispatch } from './agent-work.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
@@ -157,7 +157,7 @@ try {
     ], { tee: true })
   }
 
-  const prompt = dshWorkPrompt(DSH_ISSUE_SKILL, {
+  const prompt = agentWorkPrompt(AGENT_ISSUE_SKILL, {
     kind: 'issue',
     repository,
     issueNumber,
@@ -174,7 +174,7 @@ try {
       cwd: checkoutPath,
       title: `[Agent: ${workerId}] 执行 Issue #${issueNumber}`,
       prompt,
-      requiredSkill: DSH_ISSUE_SKILL,
+      requiredSkill: AGENT_ISSUE_SKILL,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
       onStarted: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible ${workerId} session: ${sessionId}.`)),

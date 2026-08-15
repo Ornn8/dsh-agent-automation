@@ -25,6 +25,21 @@
       "effort": "medium",
       "keep": 6
     },
+    "opencode-change": {
+      "adapter": "opencode-cli",
+      "executable": "opencode.exe",
+      "mode": "change",
+      "model": "opencode-go/deepseek-v4-flash",
+      "variant": "max"
+    },
+    "opencode-review": {
+      "adapter": "opencode-cli",
+      "executable": "opencode.exe",
+      "gitExecutable": "git.exe",
+      "mode": "review",
+      "model": "openai/gpt-5",
+      "variant": "medium"
+    },
     "another-agent": {
       "adapter": "command-json",
       "executable": "X:\\agents\\another-agent.exe",

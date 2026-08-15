@@ -44,15 +44,28 @@ function Get-RepositoryKey {
   return "$slug-$hash"
 }
 
-function Assert-DshWorkerModelSelection {
+function Assert-AgentWorkerConfiguration {
   param([Parameter(Mandatory)]$Workers)
   foreach ($property in @($Workers.psobject.Properties)) {
     $worker = $property.Value
-    if ($worker.adapter -ne 'dsh-web') { continue }
-    foreach ($field in 'provider', 'model', 'reasoningEffort') {
-      if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
-        throw "workers.$($property.Name).$field is required for a dsh-web worker"
+    if ($worker.adapter -eq 'dsh-web') {
+      foreach ($field in 'provider', 'model', 'reasoningEffort') {
+        if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
+          throw "workers.$($property.Name).$field is required for a dsh-web worker"
+        }
       }
+      continue
+    }
+    if ($worker.adapter -ne 'opencode-cli') { continue }
+    foreach ($field in 'executable', 'model', 'variant') {
+      if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
+        throw "workers.$($property.Name).$field is required for an opencode-cli worker"
+      }
+    }
+    if ($worker.model -notmatch '^[^/\s]+/[^/\s]+$') { throw "workers.$($property.Name).model must be provider/model" }
+    if ($worker.mode -notin @('change', 'review')) { throw "workers.$($property.Name).mode must be change or review" }
+    if ($worker.mode -eq 'review' -and ($worker.gitExecutable -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.gitExecutable))) {
+      throw "workers.$($property.Name).gitExecutable is required for review"
     }
   }
 }
@@ -67,7 +80,7 @@ function Read-OperationsConfig {
   if (@($config.repositories).Count -gt 32) { throw 'repositories is limited to 32 entries per host' }
   foreach ($repository in @($config.repositories)) { if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid repository mapping: $repository" } }
   if (-not $config.workers -or @($config.workers.psobject.Properties).Count -eq 0) { throw 'workers must not be empty' }
-  Assert-DshWorkerModelSelection -Workers $config.workers
+  Assert-AgentWorkerConfiguration -Workers $config.workers
   foreach ($field in 'ghExecutable', 'gitExecutable') { if ([string]::IsNullOrWhiteSpace($config.$field)) { throw "$field is required" } }
   if ($config.github.login -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$') { throw 'github.login must be a GitHub login name' }
   if ($config.github.login -like 'REPLACE-*' -and -not $AllowExamplePlaceholders) { throw 'github.login must name the expected host GitHub principal' }
@@ -960,9 +973,14 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'repository keys avoid normalized collision'; Passed = ((Get-RepositoryKey 'owner/a.b') -ne (Get-RepositoryKey 'owner/a-b')) }
   $validDshWorker = [pscustomobject]@{ adapter = 'dsh-web'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max' }
   $results += [pscustomobject]@{ Name = 'DSH worker requires an explicit complete model selection'; Passed = $false }
-  try { Assert-DshWorkerModelSelection -Workers ([pscustomobject]@{ dsh = $validDshWorker }); $results[-1].Passed = $true } catch {}
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = $validDshWorker }); $results[-1].Passed = $true } catch {}
   $results += [pscustomobject]@{ Name = 'DSH worker rejects incomplete model selection'; Passed = $false }
-  try { Assert-DshWorkerModelSelection -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; provider = 'opencode-go'; model = 'deepseek-v4-flash' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'reasoningEffort' }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = [pscustomobject]@{ adapter = 'dsh-web'; provider = 'opencode-go'; model = 'deepseek-v4-flash' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'reasoningEffort' }
+  $validOpenCodeReview = [pscustomobject]@{ adapter = 'opencode-cli'; executable = 'opencode.exe'; gitExecutable = 'git.exe'; mode = 'review'; model = 'openai/gpt-5'; variant = 'medium' }
+  $results += [pscustomobject]@{ Name = 'OpenCode review worker requires a complete CLI selection'; Passed = $false }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = $validOpenCodeReview }); $results[-1].Passed = $true } catch {}
+  $results += [pscustomobject]@{ Name = 'OpenCode review worker rejects a missing Git executable'; Passed = $false }
+  try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ reviewer = [pscustomobject]@{ adapter = 'opencode-cli'; executable = 'opencode.exe'; mode = 'review'; model = 'openai/gpt-5'; variant = 'medium' } }) } catch { $results[-1].Passed = $_.Exception.Message -match 'gitExecutable' }
   $fakeOps = [pscustomobject]@{
     installRoot = $selfTestInstallRoot
     stateRoot = $selfTestStateRoot

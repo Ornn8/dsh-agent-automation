@@ -12,21 +12,21 @@ For a proven CI baseline failure, do not create a no-op commit and do not leave 
 
 Use `external` only when a non-CI external dependency cannot be safely resolved in this session, such as unavailable external infrastructure, denied access, or missing owner input. Use `cannot-complete` when the current pull request already implements the matching baseline Issue and no safe repair remains. Record exact English evidence in the appropriate GitHub surface when possible, but do not make that comment the authority for follow-up work. Do not delegate the repair or wait for another agent.
 
-End the final assistant message with a concise Chinese report followed by exactly one hidden local automation receipt. The receipt must be the final content: `<!-- dsh-automation-result`, then one strict JSON object on its own line, then `-->`, with no text after it. Do not use a Markdown fence. The receipt reports a completed Skill path; it grants no authorization, and the controller must independently validate live GitHub state before any follow-up. Its `summary` is a concise Chinese session report. Use exactly one of these forms; do not add an `issue` property to any other result.
+End the final assistant message with a concise Chinese report followed by exactly one hidden local automation receipt. The receipt must be the final content: `<!-- agent-automation-result`, then one strict JSON object on its own line, then `-->`, with no text after it. Do not use a Markdown fence. The receipt reports a completed Skill path; it grants no authorization, and the controller must independently validate live GitHub state before any follow-up. Its `summary` is a concise Chinese session report. Use exactly one of these forms; do not add an `issue` property to any other result.
 
-<!-- dsh-automation-result
+<!-- agent-automation-result
 {"version":1,"outcome":"completed","summary":"已推进 PR 新提交或已请求同一提交复审。"}
 -->
 
-<!-- dsh-automation-result
+<!-- agent-automation-result
 {"version":1,"outcome":"blocked","blockedReason":"ci-baseline","summary":"已确认默认分支存在同一 CI 基线故障，已交由独立 Issue 继续处理。","issue":{"number":456,"url":"https://github.com/owner/repository/issues/456"}}
 -->
 
-<!-- dsh-automation-result
+<!-- agent-automation-result
 {"version":1,"outcome":"blocked","blockedReason":"external","summary":"外部服务不可用，无法在本会话中安全完成。"}
 -->
 
-<!-- dsh-automation-result
+<!-- agent-automation-result
 {"version":1,"outcome":"blocked","blockedReason":"cannot-complete","summary":"当前 PR 已在实现该基线 Issue，不能再次派发同一 Issue。"}
 -->
 

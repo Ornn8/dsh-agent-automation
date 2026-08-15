@@ -34,7 +34,7 @@ import {
   trustedBaselineIssue,
 } from './baseline-issue.mjs'
 import { isReviewRepairRequestId } from './work-request.mjs'
-import { DSH_REPAIR_SKILL, dshWorkPrompt } from './dsh-work.mjs'
+import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -232,7 +232,7 @@ try {
   ])).stdout.trim()
   if (checkedOutHead !== expectedHead) throw new Error(`Repair checkout is ${checkedOutHead}, expected ${expectedHead}`)
 
-  const prompt = dshWorkPrompt(DSH_REPAIR_SKILL, {
+  const prompt = agentWorkPrompt(AGENT_REPAIR_SKILL, {
     kind: 'pull-request-repair',
     repository,
     pullRequestNumber,
@@ -252,7 +252,7 @@ try {
       cwd: checkoutPath,
       title: `[Agent: ${workerId}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
       prompt,
-      requiredSkill: DSH_REPAIR_SKILL,
+      requiredSkill: AGENT_REPAIR_SKILL,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
       onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible ${workerId} session: ${sessionId}.`),

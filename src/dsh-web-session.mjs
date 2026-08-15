@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { parseDshAutomationResult } from './dsh-work.mjs'
+import { parseAgentAutomationResult } from './agent-work-result.mjs'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 const TRANSIENT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_SOCKET'])
@@ -116,6 +116,7 @@ export async function runDshWebSession({
   signal,
   modelSelection,
   requiredSkill,
+  requiresAutomationResult = true,
 }) {
   const endpoint = localDshWebBaseUrl(baseUrl)
   const rpc = (method, payload) => dshRpc(endpoint, method, payload, fetchImpl, {
@@ -185,9 +186,16 @@ export async function runDshWebSession({
             .map(block => block.text)
             .join('')
           if (!finalMessage) throw new Error(`Visible DSH session ${sessionId} completed without a final assistant message`)
-          const automationResult = parseDshAutomationResult(finalMessage)
+          const automationResult = requiresAutomationResult
+            ? parseAgentAutomationResult(finalMessage)
+            : undefined
           process.stdout.write(`Visible DSH session ${sessionId} completed.\n`)
-          return { sessionId, reason, finalMessage, automationResult }
+          return {
+            sessionId,
+            reason,
+            finalMessage,
+            ...(automationResult === undefined ? {} : { automationResult }),
+          }
         }
       }
       await sleep(Math.min(pollMs, Math.max(1, deadline - now())))

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { checkAgentWorker, normalizeWorkerConfig, runAgentWorker } from '../src/agent-worker.mjs'
 import { createAgentAdapters } from '../src/agent-adapters.mjs'
+import { parseOpenCodeRunOutput } from '../src/opencode-cli.mjs'
 
 test('a controller invokes any configured worker through one interface', async () => {
   const invocations = []
@@ -95,6 +96,153 @@ test('a command-json adapter lets a new agent join without controller changes', 
   assert.equal(receipt.output, 'result')
 })
 
+test('the OpenCode CLI adapter runs change work through the shared worker interface', async () => {
+  const calls = []
+  const started = []
+  let mountedSkill
+  let mountedConfigDirectory
+  const finalMessage = '完成。\n<!-- agent-automation-result\n{"version":1,"outcome":"completed","summary":"已提交 PR。"}\n-->'
+  const adapters = createAgentAdapters({
+    runCommand: async (command, args, options) => {
+      calls.push({ command, args, options })
+      mountedConfigDirectory = options.env.OPENCODE_CONFIG_DIR
+      mountedSkill = await readFile(path.join(
+        mountedConfigDirectory, 'skills', 'github-issue-work', 'SKILL.md',
+      ), 'utf8')
+      const firstEvent = JSON.stringify({ type: 'step_start', sessionID: 'ses_change', part: { type: 'step-start' } })
+      options.onStdout(`${firstEvent}\n`)
+      assert.deepEqual(started, [{ sessionId: 'ses_change' }])
+      return {
+        stdout: [
+          firstEvent,
+          JSON.stringify({ type: 'text', sessionID: 'ses_change', part: { type: 'text', messageID: 'msg_final', text: finalMessage } }),
+          JSON.stringify({ type: 'step_finish', sessionID: 'ses_change', part: { type: 'step-finish' } }),
+        ].join('\n'),
+        stderr: '',
+      }
+    },
+  })
+
+  const receipt = await runAgentWorker({
+    config: { workers: { opencode: {
+      adapter: 'opencode-cli', executable: 'F:\\agents\\opencode.exe', mode: 'change',
+      model: 'opencode/deepseek-v4', variant: 'max',
+    } } },
+    workerId: 'opencode',
+    invocation: {
+      taskId: 'issue-repo-42-request', cwd: 'F:\\checkout', title: 'Issue 42',
+      prompt: '/github-issue-work {"repository":"owner/repo","issueNumber":42}',
+      requiredSkill: 'github-issue-work', timeoutMs: 90_000,
+      onStarted: value => started.push(value),
+    },
+    adapters,
+  })
+
+  assert.equal(calls[0].command, 'F:\\agents\\opencode.exe')
+  assert.deepEqual(calls[0].args.slice(0, 5), ['run', '--format', 'json', '--auto', '--model'])
+  assert.equal(calls[0].args.includes('opencode/deepseek-v4'), true)
+  assert.equal(calls[0].args.includes('max'), true)
+  assert.equal(calls[0].options.cwd, 'F:\\checkout')
+  assert.match(calls[0].options.input, /Use the github-issue-work skill/)
+  assert.match(mountedSkill, /^---\nname: github-issue-work\n/)
+  await assert.rejects(access(mountedConfigDirectory))
+  assert.deepEqual(started, [{ sessionId: 'ses_change' }])
+  assert.equal(receipt.sessionId, 'ses_change')
+  assert.equal(receipt.outcome, 'completed')
+  assert.equal(receipt.detail, '已提交 PR。')
+  assert.equal(receipt.output, finalMessage)
+})
+
+test('the OpenCode CLI adapter isolates untrusted review work from credentials and writes', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-opencode-review-test-'))
+  const checkout = path.join(root, 'checkout')
+  await mkdir(checkout)
+  const base = '1'.repeat(40)
+  const head = '2'.repeat(40)
+  let opencodeCall
+  let reviewBundle
+  let reviewConfig
+  let mountedSkill
+  const adapters = createAgentAdapters({
+    runCommand: async (command, args, options) => {
+      if (command === 'git.exe') {
+        if (args.includes('diff')) return { stdout: 'diff --git a/src/a.js b/src/a.js\n+new behavior\n', stderr: '' }
+        if (args.includes('ls-tree')) return { stdout: 'AGENTS.md\nsrc/AGENTS.md\nsrc/a.js\n', stderr: '' }
+        if (args.includes('show')) return { stdout: `trusted guidance for ${args.at(-1)}\n`, stderr: '' }
+        throw new Error(`Unexpected git invocation: ${args.join(' ')}`)
+      }
+      opencodeCall = { command, args, options }
+      reviewBundle = JSON.parse(await readFile(path.join(options.cwd, 'review-input.json'), 'utf8'))
+      reviewConfig = JSON.parse(options.env.OPENCODE_CONFIG_CONTENT)
+      mountedSkill = await readFile(path.join(
+        options.env.OPENCODE_CONFIG_DIR, 'skills', 'github-pr-review', 'SKILL.md',
+      ), 'utf8')
+      return {
+        stdout: JSON.stringify({
+          type: 'text', sessionID: 'ses_review',
+          part: { type: 'text', messageID: 'msg_review', text: 'VERDICT: PASS' },
+        }),
+        stderr: '',
+      }
+    },
+  })
+  try {
+    const receipt = await runAgentWorker({
+      config: { workers: { reviewer: {
+        adapter: 'opencode-cli', executable: 'opencode.exe', gitExecutable: 'git.exe',
+        mode: 'review', model: 'openai/gpt-5', variant: 'medium',
+      } } },
+      workerId: 'reviewer',
+      invocation: {
+        taskId: `review-${base}-${head}`, cwd: checkout, title: 'Review PR #42',
+        prompt: 'Review this exact pull request pair.', requiredSkill: 'github-pr-review',
+        timeoutMs: 60_000,
+      },
+      adapters,
+    })
+
+    assert.equal(opencodeCall.command, 'opencode.exe')
+    assert.deepEqual(opencodeCall.args.slice(0, 2), ['--pure', 'run'])
+    assert.notEqual(opencodeCall.options.cwd, checkout)
+    assert.equal(opencodeCall.options.env.GH_TOKEN, undefined)
+    assert.equal(opencodeCall.options.env.GITHUB_TOKEN, undefined)
+    assert.equal(opencodeCall.options.env.DEEPSEEK_API_KEY, undefined)
+    assert.equal(opencodeCall.options.env.OPENCODE_DISABLE_DEFAULT_PLUGINS, 'true')
+    assert.equal(reviewConfig.agent['controller-review'].permission.edit, 'deny')
+    assert.equal(reviewConfig.agent['controller-review'].permission.bash, 'deny')
+    assert.equal(reviewConfig.agent['controller-review'].permission.external_directory['*'], 'deny')
+    assert.equal(reviewConfig.agent['controller-review'].permission.external_directory[path.join(checkout, '**')], 'allow')
+    assert.deepEqual(reviewBundle, {
+      version: 1,
+      base,
+      head,
+      diff: 'diff --git a/src/a.js b/src/a.js\n+new behavior\n',
+      guidance: {
+        'AGENTS.md': `trusted guidance for ${base}:AGENTS.md\n`,
+        'src/AGENTS.md': `trusted guidance for ${base}:src/AGENTS.md\n`,
+      },
+    })
+    assert.match(mountedSkill, /^---\nname: github-pr-review\n/)
+    assert.equal(receipt.sessionId, 'ses_review')
+    assert.equal(receipt.output, 'VERDICT: PASS')
+    await assert.rejects(access(opencodeCall.options.cwd))
+    await assert.rejects(access(opencodeCall.options.env.OPENCODE_CONFIG_DIR))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('OpenCode JSON output fails closed on malformed, failed, or mixed sessions', () => {
+  assert.throws(() => parseOpenCodeRunOutput('not-json'), /not valid JSON/)
+  assert.throws(() => parseOpenCodeRunOutput([
+    JSON.stringify({ type: 'text', sessionID: 'one', part: { messageID: 'm1', text: 'one' } }),
+    JSON.stringify({ type: 'text', sessionID: 'two', part: { messageID: 'm2', text: 'two' } }),
+  ].join('\n')), /exactly one sessionID/)
+  assert.throws(() => parseOpenCodeRunOutput([
+    JSON.stringify({ type: 'error', sessionID: 'one', error: { name: 'ProviderError' } }),
+  ].join('\n')), /session failed/)
+})
+
 test('the DSH Web adapter satisfies the same worker interface', async () => {
   const calls = []
   const started = []
@@ -105,7 +253,7 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
       return {
         sessionId: 'dsh-visible',
         reason: 'completed',
-        finalMessage: '完成。\n<!-- dsh-automation-result\n{"version":1,"outcome":"completed","summary":"完成"}\n-->',
+        finalMessage: '完成。\n<!-- agent-automation-result\n{"version":1,"outcome":"completed","summary":"完成"}\n-->',
         automationResult: { version: 1, outcome: 'completed', summary: '完成' },
       }
     },
@@ -133,6 +281,34 @@ test('the DSH Web adapter satisfies the same worker interface', async () => {
   assert.equal(receipt.outcome, 'completed')
   assert.equal(receipt.detail, '完成')
   assert.equal(receipt.automationResult.outcome, 'completed')
+})
+
+test('the DSH Web adapter can perform review without a change-work receipt', async () => {
+  const calls = []
+  const adapters = createAgentAdapters({
+    runDshSession: async input => {
+      calls.push(input)
+      return { sessionId: 'dsh-review', reason: 'completed', finalMessage: 'VERDICT: PASS' }
+    },
+  })
+  const receipt = await runAgentWorker({
+    config: { workers: { reviewer: {
+      adapter: 'dsh-web', baseUrl: 'http://localhost:3080', provider: 'opencode-go',
+      model: 'deepseek-v4-flash', reasoningEffort: 'max',
+    } } },
+    workerId: 'reviewer',
+    invocation: {
+      taskId: `review-${'1'.repeat(40)}-${'2'.repeat(40)}`,
+      cwd: 'F:\\checkout', title: 'Review PR #42', prompt: 'Review it.',
+      requiredSkill: 'github-pr-review', timeoutMs: 60_000,
+    },
+    adapters,
+  })
+
+  assert.equal(calls[0].requiresAutomationResult, false)
+  assert.equal(receipt.outcome, 'completed')
+  assert.equal(receipt.output, 'VERDICT: PASS')
+  assert.equal(receipt.automationResult, undefined)
 })
 
 test('the Codex adapter satisfies the worker interface without GitHub credentials', async () => {
