@@ -473,7 +473,7 @@ test('DSH Web session timeout cancels the controller-owned turn', async () => {
 test('Codex retention archives automated review tasks beyond six', () => {
   const threads = Array.from({ length: 8 }, (_, index) => ({
     id: `review-${index}`,
-    title: `[DSH GitHub 审查] PR #12 @head-${index}`,
+    title: `[Agent GitHub 审查] PR #12 @head-${index}`,
   }))
   threads.push({ id: 'manual-lookalike', title: '[GitHub 审查] PR #12 @manual' })
   threads.push({ id: 'control', title: '设置 PR 自动审核合并' })
@@ -688,7 +688,7 @@ test('Codex starts the first turn without racing durable task metadata', async (
     if (method === 'turn/start') return { turn: { id: 'review-turn' } }
     return {}
   }, {
-    title: '[DSH GitHub 审查] PR #32 @a01eadc',
+    title: '[Agent GitHub 审查] PR #32 @a01eadc',
     prompt: 'Review the exact pair.',
     projectCwd: 'F:\\dsh-gui',
     taskCwd: 'F:\\isolated-task',
@@ -711,14 +711,14 @@ test('Codex review results do not depend on task metadata housekeeping', async (
     calls.push({ method, params })
     if (method === 'thread/name/set') throw new Error('rollout is empty')
     if (method === 'thread/list') return {
-      data: [{ id: 'old-review', name: '[DSH GitHub 审查] PR #1 @old' }],
+      data: [{ id: 'old-review', name: '[Agent GitHub 审查] PR #1 @old' }],
       nextCursor: null,
     }
     if (method === 'thread/archive') throw new Error('thread has an active writer')
     return {}
   }, {
     threadId: 'fresh-review',
-    title: '[DSH GitHub 审查] PR #32 @head',
+    title: '[Agent GitHub 审查] PR #32 @head',
     projectCwd: 'F:\\dsh-gui',
     keep: 1,
   }, warning => warnings.push(warning))

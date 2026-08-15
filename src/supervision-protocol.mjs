@@ -82,13 +82,23 @@ function labelName(value, name = 'label') {
 
 function evidenceItem(value, index) {
   objectValue(value, `evidence[${index}]`)
-  if (!exactKeys(value, ['source', 'reference', 'detail'])) {
-    throw new Error(`evidence[${index}] has unexpected fields`)
-  }
   if (!EVIDENCE_SOURCES.has(value.source)) throw new Error(`evidence[${index}].source is unsupported`)
+  const sourceEvidence = ['master', 'upstream', 'pull_request'].includes(value.source)
+  const expected = sourceEvidence
+    ? ['source', 'reference', 'excerpt', 'detail']
+    : ['source', 'reference', 'detail']
+  if (!exactKeys(value, expected)) {
+    throw new Error(`evidence[${index}] has unexpected fields or is missing its source excerpt`)
+  }
   englishText(value.reference, `evidence[${index}].reference`, 500, { multiline: false })
   englishText(value.detail, `evidence[${index}].detail`, 500, { multiline: false })
-  return { source: value.source, reference: value.reference, detail: value.detail }
+  if (sourceEvidence && (typeof value.excerpt !== 'string' || value.excerpt.length < 8
+    || value.excerpt.length > 500 || /[\r\n\x00]/.test(value.excerpt))) {
+    throw new Error(`evidence[${index}].excerpt must be an exact single-line source excerpt of 8 to 500 characters`)
+  }
+  return sourceEvidence
+    ? { source: value.source, reference: value.reference, excerpt: value.excerpt, detail: value.detail }
+    : { source: value.source, reference: value.reference, detail: value.detail }
 }
 
 function evidenceList(value, name = 'evidence') {
@@ -199,17 +209,7 @@ function activeOwnershipReasons(issue, snapshot, branch) {
   return reasons
 }
 
-function guiSequenceReasons(issue, snapshot, repository) {
-  if (repository !== 'Ornn8/deepseek-harness' || issue.number < 3 || issue.number > 9) return []
-  const issues = issueIndex(snapshot)
-  const predecessor = issues.get(issue.number - 1)
-  if (!predecessor || predecessor.state !== 'closed') {
-    return [`GUI Issue #${issue.number - 1} must be closed first`]
-  }
-  return []
-}
-
-function agentDshSafetyAssessment(issue, snapshot, repository) {
+function agentDshSafetyAssessment(issue, snapshot) {
   const reasons = nonExecutableIssueReasons(issue)
   if (issue?.state !== 'open') reasons.push('the Issue is not open')
 
@@ -228,19 +228,18 @@ function agentDshSafetyAssessment(issue, snapshot, repository) {
       else if (dependencyIssue.state !== 'closed') reasons.push(`dependency #${dependency.number} is still open`)
     }
   }
-  reasons.push(...guiSequenceReasons(issue, snapshot, repository))
   return { specification, reasons: [...new Set(reasons)] }
 }
 
 /** Decide whether an existing trigger is structurally safe, ignoring work that it already started. */
 export function agentDshTriggerSafety(issue, snapshot, repository = snapshot?.repository) {
-  const assessment = agentDshSafetyAssessment(issue, snapshot, repository)
+  const assessment = agentDshSafetyAssessment(issue, snapshot)
   return { safe: assessment.reasons.length === 0, reasons: assessment.reasons }
 }
 
 /** Decide whether the controller may add a new immediate execution trigger now. */
 export function agentDshEligibility(issue, snapshot, repository = snapshot?.repository) {
-  const assessment = agentDshSafetyAssessment(issue, snapshot, repository)
+  const assessment = agentDshSafetyAssessment(issue, snapshot)
   const reasons = [...assessment.reasons]
   if (assessment.specification) {
     reasons.push(...activeOwnershipReasons(issue, snapshot, assessment.specification.branch))
