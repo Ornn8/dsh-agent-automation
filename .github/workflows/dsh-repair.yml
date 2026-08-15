@@ -37,7 +37,7 @@ jobs:
           path: controller
           persist-credentials: false
 
-      - name: Address Codex review with DSH
+      - name: Address pull request repair with the configured change agent
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
