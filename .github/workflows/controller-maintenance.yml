@@ -14,8 +14,24 @@ permissions:
   contents: read
 
 jobs:
+  routing:
+    name: maintenance/routing
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Validate the trusted maintenance replica route
+        env:
+          AGENT_REPLICA_ID: ${{ vars.AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID }}
+        shell: bash
+        run: |
+          if [[ ! "$AGENT_REPLICA_ID" =~ ^controller-[A-Za-z0-9_.-]+-maintenance$ ]]; then
+            echo 'AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID is missing or invalid.' >&2
+            exit 1
+          fi
+
   recover:
     name: maintenance/recover
+    needs: routing
     runs-on: [self-hosted, "${{ vars.AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID }}"]
     timeout-minutes: 120
     steps:

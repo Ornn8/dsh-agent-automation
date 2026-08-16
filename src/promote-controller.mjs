@@ -1,4 +1,5 @@
-import { readFile, rename, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { rolloutDecision } from './governor-policy.mjs'
 import { parseFaultRecord } from './fault-record.mjs'
@@ -74,7 +75,14 @@ const next = decision.action === 'defer'
   : decision.action === 'promote'
     ? { version: 1, stableRevision: decision.stableRevision, pendingRevisions: [] }
     : record
-const temporaryPath = `${recordPath}.tmp`
-await writeFile(temporaryPath, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
-await rename(temporaryPath, recordPath)
+const temporaryPath = `${recordPath}.${randomUUID()}.tmp`
+try {
+  await writeFile(temporaryPath, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+  await rename(temporaryPath, recordPath)
+} finally {
+  await rm(temporaryPath, { force: true })
+}
+if (decision.supersededRevisions?.length) {
+  process.stdout.write(`superseded pending controller revisions: ${decision.supersededRevisions.join(', ')}\n`)
+}
 process.stdout.write(`${decision.action}: stable controller revision ${next.stableRevision}\n`)

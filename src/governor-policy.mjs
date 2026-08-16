@@ -327,6 +327,7 @@ export function rolloutDecision({ stableRevision, proposedRevisions, activeProdu
       action: 'defer',
       stableRevision,
       pendingRevision,
+      supersededRevisions: unique.slice(0, -1),
       reason: 'product-critical-section',
     }
   }

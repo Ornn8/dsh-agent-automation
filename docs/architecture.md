@@ -38,10 +38,6 @@ This Module owns `FaultRecord v1`, the Controller Maintenance Profile, determini
 
 The Maintenance Profile is editable Controller data. The kernel still fixes exact Controller provenance, separate credentials, path postvalidation, independent hard-read-only review, one repair pull request, one release per epoch, three epochs per rolling day, and meaningful-state-only circuit reopening. GitHub Issues and comments are observable projections; a transition is trusted only after its exact Controller Maintenance workflow run completes successfully.
 
-### Windows Role Process Host
-
-Operations passes a fixed executable specification to one WinExe host. The host creates a private desktop, starts the root process suspended, attaches it to a kill-on-close Job Object before resuming it, redirects output to bounded rotating logs, and owns timeout and cancellation. Runner supervisors and the DSH Web Host inherit this process boundary, so individual Adapters do not implement Windows window suppression or descendant cleanup.
-
 On Windows, every role and Web Host Scheduled Task starts through one Agent-neutral Role Process Host. Its Interface is an executable, a JSON string-array of arguments, and a working directory. The Implementation creates a private desktop and a kill-on-close Job Object before resuming the target supervisor, so console or GUI descendants remain off the user's default desktop and share one termination unit. Adapters do not receive Windows launch options, and the process host does not inspect the selected Adapter. The private desktop prevents unwanted interactive windows; it does not isolate files, credentials, network access, or process privileges.
 
 Change and review Workers installed under the same Windows principal are one security trust domain. `hardReadOnlyReview` constrains the review Adapter's own execution; it does not protect that reviewer from a full-access change Worker on the same account or host. An adversarial separation requires distinct hosts or independently administered operating-system principals and credentials.

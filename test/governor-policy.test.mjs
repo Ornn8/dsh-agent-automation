@@ -210,6 +210,7 @@ test('stable controller rollout freezes during product critical work and batches
     action: 'defer',
     stableRevision: 'a'.repeat(40),
     pendingRevision: 'c'.repeat(40),
+    supersededRevisions: ['b'.repeat(40)],
     reason: 'product-critical-section',
   })
   assert.deepEqual(rolloutDecision({
@@ -244,13 +245,15 @@ test('controller promotion keeps targets on stable revision until the critical s
   const deferred = 'c'.repeat(40)
   const promoted = 'd'.repeat(40)
   await writeFile(recordPath, `${JSON.stringify({ version: 1, stableRevision: stable, pendingRevisions: [pending] })}\n`)
+  await writeFile(`${recordPath}.tmp`, 'interrupted legacy promotion')
   await writeFile(snapshotPath, `${JSON.stringify({ activeProductPullRequests: [{ number: 7, phase: 'review' }] })}\n`)
-  execFileSync(process.execPath, [
+  const deferredOutput = execFileSync(process.execPath, [
     fileURLToPath(new URL('../src/promote-controller.mjs', import.meta.url)),
     '--record', recordPath,
     '--snapshot', snapshotPath,
     '--candidate', deferred,
-  ])
+  ], { encoding: 'utf8' })
+  assert.match(deferredOutput, new RegExp(`superseded pending controller revisions: ${pending}`))
   assert.deepEqual(JSON.parse(await readFile(recordPath, 'utf8')), {
     version: 1,
     stableRevision: stable,
