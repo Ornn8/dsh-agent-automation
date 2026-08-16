@@ -78,7 +78,8 @@ $controller = 'D:\src\dsh-agent-automation'
 $target = 'D:\src\target-repository'
 $config = 'F:\dsh-agent-automation-state\agent-config.json'
 
-Copy-Item "$controller\config.example.json" $config
+New-Item -ItemType Directory -Force (Split-Path -Parent $config) | Out-Null
+Copy-Item "$controller\config.minimal.json" $config
 
 pwsh -NoProfile -File "$controller\scripts\bootstrap-repository.ps1" `
   -TargetCheckout $target `
@@ -88,7 +89,7 @@ pwsh -NoProfile -File "$controller\scripts\bootstrap-repository.ps1" `
   -UpstreamRepository upstream-owner/upstream-repository `
   -DryRun
 
-pwsh -NoProfile -File "$controller\scripts\doctor.ps1" -Configuration $config -DryRun
+pwsh -NoProfile -File "$controller\scripts\doctor.ps1" -Configuration $config -Explain -DryRun
 pwsh -NoProfile -File "$controller\scripts\install.ps1" -Configuration $config -DryRun
 ```
 
@@ -158,7 +159,7 @@ A watchdog detects Agent jobs that remain queued too long. Local replicas record
 
 ## Choosing an Agent
 
-Repository mappings are the only Agent-selection point. Assign compatible named Workers to `changeWorker` and `reviewWorker`; target workflows and the GitHub protocol do not change.
+`operations.roles` is the only Agent-selection table. Assign one named Worker to `change` and one independently isolated Worker to `review`. Repository mappings contain repository CI data only. Target workflows and the GitHub protocol do not change when a role changes Worker.
 
 Bundled Adapters:
 
@@ -172,7 +173,7 @@ A review Worker must declare `github-pr-review`, `github-repository-supervision`
 
 The example DSH Worker uses full change permissions and is therefore change-only. Codex, OpenCode, and Claude Code use dedicated reviewer isolation.
 
-Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.json](config.example.json). Each Worker declares its own provider/model settings.
+Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.minimal.json](config.minimal.json). The [configuration reference](docs/configuration-reference.md) lists every optional field and built-in default. Each Worker declares only its Adapter settings; its role and capabilities are derived from the one role table.
 
 Review comments render that controller-owned Worker metadata instead of hardcoding a model in presentation code.
 

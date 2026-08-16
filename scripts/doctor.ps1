@@ -4,6 +4,7 @@ param(
   [switch]$DryRun,
   [string]$TargetPlatform,
   [switch]$Online,
+  [switch]$Explain,
   [switch]$SelfTest
 )
 
@@ -21,8 +22,29 @@ if ($SelfTest) {
 if ([string]::IsNullOrWhiteSpace($Configuration)) { throw 'Configuration is required unless -SelfTest is used' }
 $loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun -TargetPlatform $TargetPlatform
 $ops = $loaded.Operations
-$runtimeSnapshot = Get-OperationsRuntimeSnapshotDefinition -SourceRoot (Join-Path $repoRoot 'ops') -InstallRoot $ops.installRoot
 $instances = @(Get-RunnerInstances -Loaded $loaded)
+if ($Explain) {
+  if (-not $DryRun) {
+    $activeLogin = & $loaded.Config.ghExecutable api user --jq '.login' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $activeLogin.Trim().Equals($loaded.Config.github.login, [StringComparison]::OrdinalIgnoreCase)) {
+      throw 'Active GitHub CLI identity does not match github.login'
+    }
+  }
+  $resolver = if ($DryRun) { $null } else {
+    {
+      param($Repository, $Name)
+      $value = & $loaded.Config.ghExecutable variable get $Name --repo $Repository --json value --jq '.value' 2>$null
+      if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ Found = $false; Value = $null } }
+      return [pscustomobject]@{ Found = $true; Value = $value.Trim() }
+    }
+  }
+  $explanation = @(Get-ConfigurationExplanation -Loaded $loaded -RepositoryVariableResolver $resolver)
+  $explanation | Format-Table Path, Value, SourceType, Source, Line, Override, Status -Wrap
+  Write-Output "AUTOMATION_CONFIGURATION_EXPLAIN_JSON=$(ConvertTo-Json -InputObject $explanation -Depth 8 -Compress)"
+  if (-not $DryRun -and @($explanation | Where-Object Status -in @('missing', 'invalid', 'mismatch')).Count) { exit 1 }
+  exit 0
+}
+$runtimeSnapshot = Get-OperationsRuntimeSnapshotDefinition -SourceRoot (Join-Path $repoRoot 'ops') -InstallRoot $ops.installRoot
 if ($DryRun) {
   $plan = New-InstallationPlan -Loaded $loaded -Platform $TargetPlatform -RuntimeSnapshot $runtimeSnapshot
   Write-Output "Configuration dry-run passed: $($ops.controller.registrationScope) topology with $(@($loaded.Config.repositories).Count) repository mapping(s) and $(@($plan.runnerInstances).Count) runner instance(s)."
