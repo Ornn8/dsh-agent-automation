@@ -121,6 +121,13 @@ Describe 'Installer and uninstaller fail-closed guards' {
 }
 
 Describe 'Effective configuration explanation' {
+  It 'resolves maintenance workers from the role binding used by online doctor' {
+    $configuration = Join-Path $script:RepositoryRoot 'config.minimal.json'
+    $loaded = Read-OperationsConfig -Configuration $configuration -AllowExamplePlaceholders
+
+    @(Get-RoleWorkerIds -Config $loaded.Config -Role maintenance) | Should -BeExactly @('maintenance')
+  }
+
   It 'emits one structured offline explanation through doctor' {
     $configuration = Join-Path $script:RepositoryRoot 'config.minimal.json'
     (Get-Content -LiteralPath $configuration -Raw | Test-Json -SchemaFile (Join-Path $script:RepositoryRoot 'ops\config.schema.json')) | Should -BeTrue
