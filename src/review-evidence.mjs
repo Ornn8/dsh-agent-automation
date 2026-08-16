@@ -12,7 +12,7 @@ export async function validateReviewFindings(review, {
   for (const finding of review.findings) {
     const reference = `${finding.path}:${finding.line}`
     const content = (await runCommand(gitExecutable, [
-      '-C', reviewCheckout, 'show', `${head}:${finding.path}`,
+      '-C', reviewCheckout, 'cat-file', 'blob', `${head}:${finding.path}`,
     ])).stdout
     const patch = (await runCommand(gitExecutable, [
       '-C', reviewCheckout, 'diff', '--find-renames', '--unified=0', '--no-ext-diff',

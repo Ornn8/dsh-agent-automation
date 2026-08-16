@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
@@ -795,6 +795,9 @@ test('unattended health combines a hosted queue watchdog, replica heartbeats, an
   const operations = await readFile(new URL('../ops/Automation.Operations.psm1', import.meta.url), 'utf8')
   assert.match(target, /runner-watchdog\.yml/)
   assert.match(target, /29 3 \* \* \*/)
+  assert.match(target, /AGENT_AUTOMATION_REPLICA_HEALTH/)
+  assert.match(target, /replica_id: \$\{\{ matrix\.label \}\}/)
+  assert.match(target, /fromJSON\(needs\.replica_routing\.outputs\.matrix\)/)
   assert.match(pipeline, /runAgentWorker/)
   assert.match(pipeline, /AGENT_READINESS_SKILL/)
   assert.match(watchdog, /20 \* 60 \* 1000/)
@@ -1489,19 +1492,52 @@ test('blocking review findings bind an excerpt to an added exact-head line', asy
   const calls = []
   const runCommand = async (_command, args) => {
     calls.push(args)
-    if (args.includes('show')) return { stdout: 'const safe = true\nconst unsafe = true\n' }
+    if (args.includes('cat-file')) return { stdout: 'const safe = true\nconst unsafe = true\n' }
     return { stdout: '@@ -2 +2 @@\n-const unsafe = false\n+const unsafe = true\n' }
   }
   await validateReviewFindings(review, {
     gitExecutable: 'git', reviewCheckout: '.', base, head, runCommand,
   })
   assert.equal(calls.length, 2)
+  assert.deepEqual(calls[0], ['-C', '.', 'cat-file', 'blob', `${head}:src/config.mjs`])
   await assert.rejects(validateReviewFindings({
     ...review,
     findings: [{ ...review.findings[0], line: 1, excerpt: 'safe = true' }],
   }, {
     gitExecutable: 'git', reviewCheckout: '.', base, head, runCommand,
   }), /changed line/)
+})
+
+test('review evidence reads an exact-head blob from a long checkout path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-review-evidence-'))
+  const checkout = join(root, 'checkout-segment-'.repeat(5), 'nested-segment-'.repeat(5))
+  const findingPath = `src/${'long-directory-'.repeat(5)}/config.mjs`
+  try {
+    await mkdir(checkout, { recursive: true })
+    await run('git', ['-C', checkout, 'init'])
+    await run('git', ['-C', checkout, 'config', 'core.longpaths', 'true'])
+    await run('git', ['-C', checkout, 'config', 'user.email', 'automation@example.invalid'])
+    await run('git', ['-C', checkout, 'config', 'user.name', 'Automation Test'])
+    await writeFile(join(checkout, 'README.md'), 'base\n')
+    await run('git', ['-C', checkout, 'add', 'README.md'])
+    await run('git', ['-C', checkout, 'commit', '-m', 'base'])
+    const base = (await run('git', ['-C', checkout, 'rev-parse', 'HEAD'])).stdout.trim()
+    await mkdir(join(checkout, findingPath, '..'), { recursive: true })
+    await writeFile(join(checkout, findingPath), 'export const enabled = true\n')
+    await run('git', ['-C', checkout, 'add', findingPath])
+    await run('git', ['-C', checkout, 'commit', '-m', 'head'])
+    const head = (await run('git', ['-C', checkout, 'rev-parse', 'HEAD'])).stdout.trim()
+    await validateReviewFindings({
+      verdict: 'block',
+      summary: 'The enabled value is unsafe.',
+      findings: [{
+        priority: 'P1', title: 'Unsafe enablement', body: 'The new value enables unsafe behavior.',
+        path: findingPath, line: 1, excerpt: 'export const enabled = true',
+      }],
+    }, { gitExecutable: 'git', reviewCheckout: checkout, base, head })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('review and supervision reject non-completed worker receipts before parsing output', async () => {

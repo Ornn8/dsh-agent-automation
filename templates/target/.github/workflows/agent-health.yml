@@ -11,21 +11,62 @@ permissions:
   contents: read
 
 jobs:
-  review-worker:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '29 3 * * *'
-    name: review worker
-    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/pipeline-health.yml@{{CONTROLLER_SHA}}
-    with:
-      role: review
-      readiness_canary: ${{ github.event.schedule == '29 3 * * *' }}
+  replica_routing:
+    name: validate replica routing
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.routing.outputs.matrix }}
+    steps:
+      - id: routing
+        name: Validate exact replica routing
+        shell: pwsh
+        env:
+          REPLICA_HEALTH: ${{ vars.AGENT_AUTOMATION_REPLICA_HEALTH }}
+        run: |
+          try {
+            $matrix = $env:REPLICA_HEALTH | ConvertFrom-Json -Depth 8
+          } catch {
+            Write-Error 'AGENT_AUTOMATION_REPLICA_HEALTH must be valid JSON.'
+            exit 1
+          }
+          $entries = @($matrix.include)
+          if ($entries.Count -eq 0) {
+            Write-Error 'AGENT_AUTOMATION_REPLICA_HEALTH must declare at least one exact replica.'
+            exit 1
+          }
+          foreach ($entry in $entries) {
+            if ($entry.role -notin @('change', 'review') -or
+                $entry.label -notmatch '^[A-Za-z0-9_.-]{1,100}$' -or
+                $entry.primary -isnot [bool]) {
+              Write-Error 'Every replica health entry must contain a change/review role, bounded label, and boolean primary flag.'
+              exit 1
+            }
+          }
+          if (@($entries.label | Select-Object -Unique).Count -ne $entries.Count -or
+              @($entries | Where-Object role -eq 'change').Count -eq 0 -or
+              @($entries | Where-Object role -eq 'review').Count -eq 0 -or
+              @($entries | Where-Object { $_.role -eq 'change' -and $_.primary }).Count -ne 1 -or
+              @($entries | Where-Object { $_.role -eq 'review' -and $_.primary }).Count -ne 1) {
+            Write-Error 'Replica health routing must contain unique labels, both product roles, and one primary per role.'
+            exit 1
+          }
+          $canonical = [ordered]@{ include = @($entries | ForEach-Object {
+            [ordered]@{ role = $_.role; label = $_.label; primary = $_.primary }
+          }) } | ConvertTo-Json -Depth 4 -Compress
+          "matrix=$canonical" >> $env:GITHUB_OUTPUT
 
-  change-worker:
+  worker:
+    needs: replica_routing
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '29 3 * * *'
-    name: change worker
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.replica_routing.outputs.matrix) }}
+    name: ${{ matrix.role }} / ${{ matrix.label }}
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/pipeline-health.yml@{{CONTROLLER_SHA}}
     with:
-      role: change
-      readiness_canary: ${{ github.event.schedule == '29 3 * * *' }}
+      role: ${{ matrix.role }}
+      replica_id: ${{ matrix.label }}
+      readiness_canary: ${{ github.event.schedule == '29 3 * * *' && matrix.primary }}
 
   hosted-watchdog:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

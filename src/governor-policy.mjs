@@ -89,6 +89,20 @@ function candidateRecord({ transition, subject, stateVersion, observationId }) {
   }
 }
 
+/** Return the first matching candidate whose exact transition and subject state have not been applied. */
+export function unappliedGovernorCandidate(records, predicate = () => true) {
+  if (!Array.isArray(records) || typeof predicate !== 'function') {
+    throw new Error('Governor candidate selection requires records and a predicate')
+  }
+  return records.find(candidate => candidate?.status === 'candidate'
+    && predicate(candidate)
+    && !records.some(record => record?.status === 'applied'
+      && record.transition === candidate.transition
+      && record.stateVersion === candidate.stateVersion
+      && record.subject?.type === candidate.subject?.type
+      && record.subject?.number === candidate.subject?.number))
+}
+
 function activeGovernorEpoch(records, subject) {
   const subjectRecords = records.filter(record => record?.version === 1
     && record.subject?.type === subject.type

@@ -27,6 +27,14 @@ test('maintenance workflows route one exact replica without granting hosted muta
   assert.match(resume, /issues: write/)
 })
 
+test('maintenance readiness reports the exact failing Worker stage', async () => {
+  const source = await readFile(new URL('../src/maintenance-readiness.mjs', import.meta.url), 'utf8')
+  assert.match(source, /let stage = 'CLI health'/)
+  assert.match(source, /stage = 'GitHub identity'/)
+  assert.match(source, /stage = 'Controller repository access'/)
+  assert.match(source, /unavailable\.join\('; '\)/)
+})
+
 test('maintenance Workers have an independent role and GitHub credential store', () => {
   const credentialIsolationDir = join(tmpdir(), 'agent-maintenance-credentials')
   const maintenanceCapabilities = {

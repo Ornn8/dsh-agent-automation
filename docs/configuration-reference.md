@@ -32,7 +32,7 @@ Every Worker requires `adapter`. The Adapter determines the remaining fields. Ro
 | `claude-code-cli` | `model`, `effort` | `executable`, `credentialIsolationDir`, `healthArgs` |
 | `command-json` | `executable` | `args`, `healthArgs`, `credentialIsolationDir` |
 
-`executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. A review Worker also derives `gitExecutable`. A maintenance Worker derives `credentialIsolationDir` under `operations.stateRoot` unless it is explicitly configured. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. `projectCwd` selects the Codex Desktop project directory. `keep` limits visible Codex review tasks. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
+`executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. Windows deployments must override it with a native executable when the discovered command is a `.cmd`, `.bat`, or `.ps1` shim because Agent processes start without a command shell. A review Worker also derives `gitExecutable`. A maintenance Worker derives `credentialIsolationDir` under `operations.stateRoot` unless it is explicitly configured. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. `projectCwd` selects the Codex Desktop project directory. `keep` limits visible Codex review tasks. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
 
 ## Operations fields
 
