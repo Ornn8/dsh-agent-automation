@@ -3,10 +3,14 @@ name: Reconcile Reviewed Pull Requests
 on:
   workflow_call:
     inputs:
-      required_checks_json:
+      profile_id:
         required: false
         type: string
-        default: '["all checks passed"]'
+        default: github-pr-cycle
+      workflow_id:
+        required: false
+        type: string
+        default: default
 
 concurrency:
   group: dsh-landing-reconcile-${{ github.repository }}
@@ -36,7 +40,8 @@ jobs:
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          REQUIRED_CHECKS_JSON: ${{ inputs.required_checks_json }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          WORKFLOW_ID: ${{ inputs.workflow_id }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml

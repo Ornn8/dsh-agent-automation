@@ -11,7 +11,7 @@ export function hasExactReviewVerdict(comments, head, authorLogin = 'github-acti
   return comments.some(comment => comment.user?.login === authorLogin && comment.body?.includes(marker))
 }
 
-/** Parse the hidden machine payload from a human-readable review final answer. */
+/** Parse the hidden machine payload from a human-readable review result. */
 export function parseReviewMessage(message) {
   const match = message.match(/<details>\r?\n<summary>Automation result<\/summary>\r?\n\r?\n```json\r?\n([\s\S]*?)\r?\n```\r?\n<\/details>\s*$/)
     || message.match(/<!-- dsh-review-result\r?\n([\s\S]*?)\r?\n-->\s*$/)
@@ -33,7 +33,8 @@ export function validateReview(value) {
     throw new Error('Review Worker returned an invalid review object')
   }
   for (const finding of value.findings) {
-    if (!['P0', 'P1'].includes(finding.priority)
+    if (!['product-pr', 'default-branch-baseline', 'controller-infrastructure', 'transient-environment', 'uncertain'].includes(finding.class)
+      || !['P0', 'P1'].includes(finding.priority)
       || typeof finding.title !== 'string'
       || !englishLine(finding.title, 200)
       || typeof finding.body !== 'string'
@@ -68,11 +69,7 @@ function repositoryPath(value) {
 }
 
 /** Render the English GitHub review body for one exact commit. */
-export function githubReviewBody(review, { marker, base, head, reviewer }) {
-  if (typeof reviewer?.displayName !== 'string' || !reviewer.displayName.trim()
-    || reviewer.displayName.length > 200 || /[\r\n`]/.test(reviewer.displayName)) {
-    throw new Error('Review Worker attribution is invalid')
-  }
+export function githubReviewBody(review, { marker, base, head }) {
   const lines = [
     marker,
     `## Agent review: ${review.verdict === 'pass' ? 'PASS' : 'BLOCK'}`,
@@ -82,9 +79,30 @@ export function githubReviewBody(review, { marker, base, head, reviewer }) {
   if (review.findings.length > 0) {
     lines.push('', '### Blocking findings', '')
     for (const finding of review.findings) {
-      lines.push(`- **[${finding.priority}] ${finding.title}** — \`${finding.path}:${finding.line}\`: ${finding.body}`)
+      lines.push(`- **[${finding.priority}] ${finding.title}** (${finding.class}) — \`${finding.path}:${finding.line}\`: ${finding.body}`)
     }
   }
-  lines.push('', `_Reviewed exact head \`${head}\` against base \`${base}\` with ${reviewer.displayName}._`)
+  lines.push('', `_Reviewed exact head \`${head}\` against base \`${base}\` with the configured review Worker._`)
   return lines.join('\n')
+}
+const REVIEW_CLASSES = new Set([
+  'product-pr',
+  'default-branch-baseline',
+  'controller-infrastructure',
+  'transient-environment',
+  'uncertain',
+])
+
+/** Route one GitHub PR review result within the github-pr-review procedure. */
+export function reviewFindingRoute(findings) {
+  if (!Array.isArray(findings) || findings.length < 1
+    || findings.some(finding => !REVIEW_CLASSES.has(finding?.class))) {
+    throw new Error('Review findings require known controller routing classes')
+  }
+  const classes = new Set(findings.map(finding => finding.class))
+  if (classes.size === 1 && classes.has('product-pr')) return 'repair'
+  if (classes.size === 1 && classes.has('transient-environment')) return 'retry'
+  if (classes.size === 1 && classes.has('default-branch-baseline')) return 'baseline'
+  if (classes.size === 1 && classes.has('controller-infrastructure')) return 'infrastructure'
+  return 'pause'
 }
