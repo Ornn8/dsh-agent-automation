@@ -174,6 +174,12 @@ if ($Online) {
       $actualChecks = & $loaded.Config.ghExecutable variable get DSH_AUTOMATION_REQUIRED_CHECKS --repo $mapping.repository --json value --jq '.value' 2>$null
       $checkMatches = $LASTEXITCODE -eq 0 -and $actualChecks.Trim().Equals((ConvertTo-Json -InputObject @($mapping.requiredChecks) -Compress), [StringComparison]::Ordinal)
       Add-Finding "$($mapping.repository) required checks variable" $checkMatches $(if ($checkMatches) { 'matches requiredChecks' } else { 'missing or mismatched' })
+      $expectedReplicaHealth = ConvertTo-Json -InputObject ([ordered]@{ include = @($instances | Where-Object {
+        $_.Role -in @('change', 'review') -and ($null -eq $_.Repository -or $_.Repository -eq $mapping.repository)
+      } | ForEach-Object { [ordered]@{ role = $_.Role; label = $_.Id; primary = ($_.Replica -eq 1) } }) }) -Compress -Depth 4
+      $actualReplicaHealth = & $loaded.Config.ghExecutable variable get AGENT_AUTOMATION_REPLICA_HEALTH --repo $mapping.repository --json value --jq '.value' 2>$null
+      $replicaHealthMatches = $LASTEXITCODE -eq 0 -and $actualReplicaHealth.Trim().Equals($expectedReplicaHealth, [StringComparison]::Ordinal)
+      Add-Finding "$($mapping.repository) replica health variable" $replicaHealthMatches $(if ($replicaHealthMatches) { 'matches exact installed replicas' } else { 'missing or mismatched' })
     } catch { Add-Finding "$($mapping.repository) CI workflow variable" $false 'query failed' }
     try {
       $protection = Get-RepositoryRequiredStatusChecks -Mapping $mapping -GhExecutable $loaded.Config.ghExecutable

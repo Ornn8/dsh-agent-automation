@@ -6,20 +6,23 @@ on:
       role:
         required: true
         type: string
+      replica_id:
+        required: true
+        type: string
       readiness_canary:
         required: false
         type: boolean
         default: false
 
 concurrency:
-  group: agent-health-${{ github.repository }}-${{ inputs.role }}
+  group: agent-health-${{ github.repository }}-${{ inputs.replica_id }}
   cancel-in-progress: true
 
 jobs:
-  review:
-    if: inputs.role == 'review'
-    name: pipeline/review-health
-    runs-on: [self-hosted, agent-reviewer]
+  worker:
+    if: inputs.role == 'review' || inputs.role == 'change'
+    name: pipeline/${{ inputs.replica_id }}
+    runs-on: [self-hosted, "${{ inputs.replica_id }}"]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -31,36 +34,13 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: controller
           persist-credentials: false
-      - name: Verify the review worker without a model call
+      - name: Verify the exact replica and Worker
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           CONTROLLER_SHA: ${{ job.workflow_sha }}
-          AGENT_ROLE: review
-          READINESS_CANARY: ${{ inputs.readiness_canary }}
-        run: node controller/src/pipeline-health.mjs
-
-  change:
-    if: inputs.role == 'change'
-    name: pipeline/change-health
-    runs-on: [self-hosted, agent-change]
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Check out the immutable automation controller
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: controller
-          persist-credentials: false
-      - name: Verify the change worker without a model call
-        env:
-          TARGET_REPOSITORY: ${{ github.repository }}
-          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
-          CONTROLLER_SHA: ${{ job.workflow_sha }}
-          AGENT_ROLE: change
+          AGENT_ROLE: ${{ inputs.role }}
+          AGENT_REPLICA_ID: ${{ inputs.replica_id }}
           READINESS_CANARY: ${{ inputs.readiness_canary }}
         run: node controller/src/pipeline-health.mjs
 

@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, rm } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -16,9 +16,18 @@ const repository = requiredEnv('TARGET_REPOSITORY')
 const controllerSha = requiredEnv('CONTROLLER_SHA')
 const config = await loadConfig()
 const workerId = resolveRepositoryWorker(config, repository, requiredEnv('AGENT_ROLE'))
+const replicaId = requiredEnv('AGENT_REPLICA_ID')
 const readinessCanary = process.env.READINESS_CANARY?.toLowerCase() === 'true'
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!/^[0-9a-f]{40}$/i.test(controllerSha)) throw new Error('CONTROLLER_SHA must be a full commit SHA')
+if (!/^(?:target-[A-Za-z0-9_.-]+-(?:change|review)|organization-(?:change|review))(?:-r[2-8])?$/.test(replicaId)) {
+  throw new Error('AGENT_REPLICA_ID must identify one exact product replica')
+}
+const heartbeat = JSON.parse(await readFile(join(config.operations.stateRoot, 'heartbeats', `${replicaId}.json`), 'utf8'))
+const heartbeatAge = Date.now() - Date.parse(heartbeat.observedAtUtc)
+if (heartbeat.instanceId !== replicaId || !Number.isFinite(heartbeatAge) || heartbeatAge < 0 || heartbeatAge > 20 * 60 * 1000) {
+  throw new Error(`Replica ${replicaId} does not have a fresh exact heartbeat`)
+}
 
 const worker = await checkAgentWorker({
   config,
@@ -59,6 +68,7 @@ const lines = [
   `- Repository: \`${repository}\``,
   `- Controller: \`${controllerSha}\``,
   `- Worker: \`${worker.workerId}\``,
+  `- Replica: \`${replicaId}\` (fresh heartbeat)`,
   `- Adapter: ${worker.detail}`,
   '- GitHub host credential: repository access verified',
   `- Provider readiness canary: ${canaryDetail}`,

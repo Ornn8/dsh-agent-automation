@@ -2,3 +2,4 @@ node_modules/
 .evidence/
 *.log
 config.local.json
+/ops/RoleProcessHost.exe

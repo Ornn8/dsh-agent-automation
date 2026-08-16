@@ -218,6 +218,8 @@ Stopping either role leaves the other operational. On Windows, every managed tas
 
 A private desktop prevents descendant command-line windows from appearing on the user's desktop. A Job Object provides process-tree termination.
 
+The Windows installer compiles the reviewed C# host source with the local .NET Framework compiler. The immutable runtime identity binds the source hashes and compiler hash, while the install manifest separately verifies the generated executable hash; no generated executable is committed.
+
 This is lifecycle containment only. The roles still share the host filesystem, network, kernel, account privileges, and GitHub identity.
 
 For a real security boundary, put review and change Workers on separate machines or separately administered operating-system identities and credentials.
