@@ -48,6 +48,6 @@ jobs:
           REQUIRED_CHECKS_JSON: ${{ inputs.required_checks_json }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
-          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/codex-review.yml
+          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/land-pr.mjs

@@ -1,4 +1,4 @@
-name: Codex Review
+name: Agent Review
 
 on:
   workflow_call:
@@ -13,12 +13,12 @@ on:
         required: true
         type: string
 concurrency:
-  group: codex-review-${{ github.repository }}-${{ inputs.pull_request_number }}
+  group: agent-review-${{ github.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: true
 
 jobs:
   review:
-    name: codex/review
+    name: agent/review
     runs-on: [self-hosted, agent-reviewer]
     timeout-minutes: 255
     permissions:
@@ -44,7 +44,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Review exact PR head with Codex
+      - name: Review exact PR head with Agent
         id: review
         continue-on-error: true
         env:
@@ -58,7 +58,7 @@ jobs:
           CONTROLLER_SHA: ${{ job.workflow_sha }}
           AGENT_ROLE: review
           GITHUB_TOKEN: ${{ github.token }}
-        run: node controller/src/codex-review.mjs
+        run: node controller/src/agent-review.mjs
 
       - name: Publish an independent change work request
         id: work_request
@@ -84,8 +84,10 @@ jobs:
 
       - name: Preserve the blocking review conclusion
         if: steps.review.outputs.verdict == 'block'
-        run: throw 'Codex returned a BLOCK verdict'
+        shell: pwsh
+        run: throw 'Agent returned a BLOCK verdict'
 
       - name: Preserve reviewer infrastructure failure
         if: steps.review.outcome == 'failure'
-        run: throw 'Codex review infrastructure did not return a verdict'
+        shell: pwsh
+        run: throw 'Agent review infrastructure did not return a verdict'

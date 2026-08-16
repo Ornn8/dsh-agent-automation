@@ -1,6 +1,7 @@
 import { parseJson, run } from './common.mjs'
+import { REVIEW_CHECK_NAME } from './review-authority.mjs'
 
-export const REVIEW_CHECK_NAME = 'codex/review'
+export { REVIEW_CHECK_NAME } from './review-authority.mjs'
 const GITHUB_ACTIONS_APP_ID = 15368
 
 function checkArguments(method, repository, checkId, fields) {
@@ -48,9 +49,9 @@ export function hasNewReviewCheck(before, after) {
 export async function startReviewCheck({ ghExecutable, repository, head, runUrl, env, execute = run }) {
   const result = await execute(ghExecutable, checkArguments('POST', repository, undefined, [
     ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'in_progress'], ['details_url', runUrl], ['external_id', runUrl],
-    ['output[title]', 'Codex review in progress'], ['output[summary]', 'Reviewing this exact pull request head.'],
+    ['output[title]', 'Agent review in progress'], ['output[summary]', 'Reviewing this exact pull request head.'],
   ]), { env })
-  const check = parseJson(result.stdout, 'created Codex review CheckRun')
+  const check = parseJson(result.stdout, 'created Agent review CheckRun')
   if (!Number.isSafeInteger(check?.id) || check.id < 1) throw new Error('GitHub did not return a review CheckRun id')
   return check.id
 }
@@ -61,7 +62,7 @@ export async function completeReviewCheck({ ghExecutable, repository, checkId, r
   if (!['success', 'failure'].includes(conclusion)) throw new Error(`Invalid review CheckRun conclusion: ${conclusion}`)
   await execute(ghExecutable, checkArguments('PATCH', repository, checkId, [
     ['status', 'completed'], ['conclusion', conclusion], ['details_url', runUrl],
-    ['output[title]', `Codex review ${conclusion}`], ['output[summary]', summary],
+    ['output[title]', `Agent review ${conclusion}`], ['output[summary]', summary],
   ]), { env })
 }
 
@@ -69,6 +70,6 @@ export async function completeReviewCheck({ ghExecutable, repository, checkId, r
 export async function failReviewCheck({ ghExecutable, repository, head, runUrl, summary, env, execute = run }) {
   await execute(ghExecutable, checkArguments('POST', repository, undefined, [
     ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'completed'], ['conclusion', 'failure'], ['details_url', runUrl], ['external_id', runUrl],
-    ['output[title]', 'Codex review failure'], ['output[summary]', summary],
+    ['output[title]', 'Agent review failure'], ['output[summary]', summary],
   ]), { env })
 }

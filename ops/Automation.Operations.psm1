@@ -3,8 +3,10 @@ $ErrorActionPreference = 'Stop'
 
 $script:RoleNames = @('change', 'review')
 $script:GitHubActionsAppId = 15368
-$script:ReviewRequiredCheckName = 'codex/review'
-$script:OperationsRuntimeFiles = @('Automation.Operations.psm1', 'runner-supervisor.ps1', 'dsh-web-host-supervisor.ps1')
+$script:ReviewRequiredCheckName = 'agent/review'
+$script:LegacyReviewRequiredCheckName = 'codex/review'
+$script:MinimumRunnerVersion = [Version]'2.334.0'
+$script:OperationsRuntimeFiles = @('Automation.Operations.psm1', 'runner-supervisor.ps1', 'dsh-web-host-supervisor.ps1', 'windows-role-process-host.ps1')
 
 function Write-OperationLog {
   param([string]$Message, [string]$Level = 'INFO', [string]$LogFile)
@@ -61,19 +63,22 @@ function Test-OperationHeartbeat {
 function Resolve-OperationPath {
   param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
   if ([string]::IsNullOrWhiteSpace($Path) -or $Path.IndexOfAny([char[]]'*?') -ge 0) { throw "$Name must be a literal path" }
-  if ($Path.StartsWith('\\')) { throw "$Name must be a local volume path, not a UNC path" }
+  $isWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
+  if ($isWindows -and $Path.StartsWith('\\')) { throw "$Name must be a local volume path, not a UNC path" }
   $full = [IO.Path]::GetFullPath($Path)
   $root = [IO.Path]::GetPathRoot($full)
   if ($root -eq $full) { throw "$Name must not be a volume root" }
-  if ($root.TrimEnd('\').Equals('C:', [StringComparison]::OrdinalIgnoreCase)) { throw "$Name must not use C:; choose a data volume" }
-  return $full.TrimEnd('\')
+  if ($isWindows -and $root.TrimEnd('\').Equals('C:', [StringComparison]::OrdinalIgnoreCase)) { throw "$Name must not use C:; choose a data volume" }
+  return $full.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
 }
 
 function Assert-PathInside {
   param([Parameter(Mandatory)][string]$Child, [Parameter(Mandatory)][string]$Parent, [Parameter(Mandatory)][string]$Name)
-  $childPath = [IO.Path]::GetFullPath($Child).TrimEnd('\')
-  $parentPath = [IO.Path]::GetFullPath($Parent).TrimEnd('\')
-  if (-not $childPath.StartsWith($parentPath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw "$Name must be inside $parentPath" }
+  $separator = [IO.Path]::DirectorySeparatorChar
+  $childPath = [IO.Path]::GetFullPath($Child).TrimEnd($separator, [IO.Path]::AltDirectorySeparatorChar)
+  $parentPath = [IO.Path]::GetFullPath($Parent).TrimEnd($separator, [IO.Path]::AltDirectorySeparatorChar)
+  $comparison = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+  if (-not $childPath.StartsWith($parentPath + $separator, $comparison)) { throw "$Name must be inside $parentPath" }
 }
 
 function Get-RepositoryKey {
@@ -92,7 +97,10 @@ function Get-RunnerName {
     [Parameter(Mandatory)][string]$RepositoryKey,
     [Parameter(Mandatory)][ValidateRange(1, 8)][int]$Replica
   )
-  $machine = ([string]$env:COMPUTERNAME).Substring(0, [Math]::Min(12, ([string]$env:COMPUTERNAME).Length))
+  $hostName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } elseif ($env:HOSTNAME) { $env:HOSTNAME } else { [Net.Dns]::GetHostName() }
+  $machine = (([string]$hostName -replace '[^A-Za-z0-9_.-]+', '-').Trim('-'))
+  if ([string]::IsNullOrWhiteSpace($machine)) { throw 'The host name must contain a runner-name character' }
+  $machine = $machine.Substring(0, [Math]::Min(12, $machine.Length))
   $base = "$Prefix-$RepositoryKey-$machine"
   if ($Replica -eq 1) { return $base }
   $suffix = "-r$Replica"
@@ -138,6 +146,17 @@ function Assert-AgentWorkerConfiguration {
       }
       continue
     }
+    if ($worker.adapter -eq 'codex-app') {
+      foreach ($field in 'node', 'script', 'home', 'model', 'effort') {
+        if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field) -or $worker.$field -match '[\r\n`]') {
+          throw "workers.$($property.Name).$field is required as explicit one-line text for a codex-app worker"
+        }
+      }
+      if (($worker.keep -isnot [int] -and $worker.keep -isnot [long]) -or [int]$worker.keep -lt 1 -or [int]$worker.keep -gt 100) {
+        throw "workers.$($property.Name).keep must be an integer from 1 through 100"
+      }
+      continue
+    }
     if ($worker.adapter -eq 'claude-code-cli') {
       foreach ($field in 'executable', 'model', 'effort') {
         if ($worker.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.$field)) {
@@ -173,11 +192,15 @@ function Assert-AgentWorkerConfiguration {
 }
 
 function Read-OperationsConfig {
-  param([Parameter(Mandatory)][string]$Configuration, [switch]$AllowExamplePlaceholders)
+  param(
+    [Parameter(Mandatory)][string]$Configuration,
+    [switch]$AllowExamplePlaceholders,
+    [string]$TargetPlatform
+  )
   $configurationPath = [IO.Path]::GetFullPath($Configuration)
   if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) { throw "Configuration file does not exist: $configurationPath" }
   try { $config = Get-Content -LiteralPath $configurationPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 32 } catch { throw "Configuration is not valid JSON: $($_.Exception.Message)" }
-  if ($config.schemaVersion -ne 3 -or $config.operations.schemaVersion -ne 3) { throw 'Configuration schemaVersion must be 3' }
+  if ($config.schemaVersion -ne 4 -or $config.operations.schemaVersion -ne 4) { throw 'Configuration schemaVersion must be 4' }
   if (-not @($config.repositories).Count) { throw 'repositories must not be empty' }
   if (@($config.repositories).Count -gt 32) { throw 'repositories is limited to 32 entries per host' }
   foreach ($repository in @($config.repositories)) { if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid repository mapping: $repository" } }
@@ -197,8 +220,24 @@ function Read-OperationsConfig {
   if ($ops.controller.registrationScope -eq 'organization' -and $ops.controller.organization -notmatch '^[A-Za-z0-9_.-]+$') { throw 'organization registration requires operations.controller.organization' }
 
   if ([string]::IsNullOrWhiteSpace($ops.runner.version) -or ($ops.runner.version -like 'REPLACE-*' -and -not $AllowExamplePlaceholders)) { throw 'runner.version must be a pinned release version' }
-  if ($ops.runner.downloadUri -notmatch '^https://' -or ($ops.runner.downloadUri -match 'REPLACE_' -and -not $AllowExamplePlaceholders)) { throw 'runner.downloadUri must be a pinned HTTPS release URL' }
-  if ($ops.runner.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -and -not $AllowExamplePlaceholders) { throw 'runner.sha256 must be an official 64-character SHA-256 value' }
+  if ($ops.runner.version -notlike 'REPLACE-*') {
+    try { $runnerVersion = [Version]$ops.runner.version } catch { throw 'runner.version must be a semantic release version' }
+    if ($runnerVersion -lt $script:MinimumRunnerVersion) { throw "runner.version must be at least $($script:MinimumRunnerVersion) for job.workflow_* support" }
+  }
+  $artifactProperties = @($ops.runner.artifacts.psobject.Properties)
+  if (-not $artifactProperties.Count) { throw 'runner.artifacts must contain at least one platform package' }
+  foreach ($artifactProperty in $artifactProperties) {
+    Resolve-InstallationPlatform -Platform $artifactProperty.Name | Out-Null
+    $artifact = $artifactProperty.Value
+    if ($artifact.downloadUri -notmatch '^https://' -or ($artifact.downloadUri -match 'REPLACE_' -and -not $AllowExamplePlaceholders)) { throw "runner.artifacts.$($artifactProperty.Name).downloadUri must be a pinned HTTPS release URL" }
+    if ($artifact.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -and -not ($AllowExamplePlaceholders -and $artifact.sha256 -eq 'REPLACE_WITH_THE_OFFICIAL_64_CHARACTER_SHA256')) { throw "runner.artifacts.$($artifactProperty.Name).sha256 must be an official 64-character SHA-256 value" }
+  }
+  $selectedPlatform = Resolve-InstallationPlatform -Platform $TargetPlatform
+  $selectedArtifactProperty = $ops.runner.artifacts.psobject.Properties[$selectedPlatform.id]
+  if (-not $selectedArtifactProperty) { throw "runner.artifacts must contain the selected platform $($selectedPlatform.id)" }
+  $ops.runner | Add-Member -NotePropertyName platform -NotePropertyValue $selectedPlatform.id -Force
+  $ops.runner | Add-Member -NotePropertyName downloadUri -NotePropertyValue $selectedArtifactProperty.Value.downloadUri -Force
+  $ops.runner | Add-Member -NotePropertyName sha256 -NotePropertyValue $selectedArtifactProperty.Value.sha256 -Force
   foreach ($roleName in $script:RoleNames) {
     $role = $ops.roles.$roleName
     if (-not $role) { throw "operations.roles.$roleName is required" }
@@ -227,7 +266,7 @@ function Read-OperationsConfig {
         throw "repositoryMappings.$field must contain unique nonempty one-line names for $($mapping.repository)"
       }
     }
-    if ($script:ReviewRequiredCheckName -in @($mapping.requiredChecks)) { throw "repositoryMappings.requiredChecks must not contain $script:ReviewRequiredCheckName" }
+    if (@($mapping.requiredChecks | Where-Object { $_ -in @($script:ReviewRequiredCheckName, $script:LegacyReviewRequiredCheckName) }).Count) { throw 'repositoryMappings.requiredChecks must not contain a controller review authority' }
     if (-not $config.workers.($mapping.changeWorker)) { throw "repositoryMappings changeWorker is unknown: $($mapping.changeWorker)" }
     if (-not $config.workers.($mapping.reviewWorker)) { throw "repositoryMappings reviewWorker is unknown: $($mapping.reviewWorker)" }
     foreach ($skill in @('github-issue-work', 'github-pr-repair')) {
@@ -260,6 +299,7 @@ function Get-RunnerInstances {
     [string[]]$Repositories
   )
   $ops = $Loaded.Operations
+  $hostPlatform = Resolve-InstallationPlatform
   $roleSet = @($Roles | Select-Object -Unique)
   $repositorySet = @($Repositories | Where-Object { $_ } | Select-Object -Unique)
   if ($repositorySet.Count) {
@@ -283,7 +323,7 @@ function Get-RunnerInstances {
           RegistrationKind = 'organization'
           RegistrationOwner = $ops.controller.organization
           RunnerName = $runnerName
-          Labels = @($ops.roles.$roleName.labels)
+          Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.$roleName.labels) -Platform $hostPlatform)
           RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
           WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
           TaskName = "DSH-Agent-Automation-$id"
@@ -309,7 +349,7 @@ function Get-RunnerInstances {
             RegistrationKind = 'repository'
             RegistrationOwner = $mapping.repository
             RunnerName = $runnerName
-            Labels = @($ops.roles.$roleName.labels)
+            Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.$roleName.labels) -Platform $hostPlatform)
             RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
             WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
             TaskName = "DSH-Agent-Automation-$id"
@@ -332,6 +372,191 @@ function Get-RunnerInstance {
   $matches = @(Get-RunnerInstances -Loaded $Loaded | Where-Object { $_.Id -eq $InstanceId })
   if ($matches.Count -ne 1) { throw "Unknown or ambiguous runner instance: $InstanceId" }
   return $matches[0]
+}
+
+function Resolve-InstallationPlatform {
+  param([string]$Platform)
+  if ([string]::IsNullOrWhiteSpace($Platform)) {
+    $os = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+      'windows'
+    } elseif ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) {
+      'linux'
+    } elseif ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
+      'macos'
+    } else {
+      throw 'The current operating system is not supported for installation planning'
+    }
+    $architecture = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()) {
+      'x64' { 'x64' }
+      'arm64' { 'arm64' }
+      default { throw 'The current architecture is not supported for installation planning' }
+    }
+    $Platform = "$os-$architecture"
+  }
+  $profiles = @{
+    'windows-x64' = [ordered]@{ id = 'windows-x64'; os = 'windows'; architecture = 'x64'; osLabel = 'Windows'; architectureLabel = 'X64'; serviceManager = 'scheduled-task' }
+    'windows-arm64' = [ordered]@{ id = 'windows-arm64'; os = 'windows'; architecture = 'arm64'; osLabel = 'Windows'; architectureLabel = 'ARM64'; serviceManager = 'scheduled-task' }
+    'linux-x64' = [ordered]@{ id = 'linux-x64'; os = 'linux'; architecture = 'x64'; osLabel = 'Linux'; architectureLabel = 'X64'; serviceManager = 'systemd-user' }
+    'linux-arm64' = [ordered]@{ id = 'linux-arm64'; os = 'linux'; architecture = 'arm64'; osLabel = 'Linux'; architectureLabel = 'ARM64'; serviceManager = 'systemd-user' }
+    'macos-x64' = [ordered]@{ id = 'macos-x64'; os = 'macos'; architecture = 'x64'; osLabel = 'macOS'; architectureLabel = 'X64'; serviceManager = 'launchd-user' }
+    'macos-arm64' = [ordered]@{ id = 'macos-arm64'; os = 'macos'; architecture = 'arm64'; osLabel = 'macOS'; architectureLabel = 'ARM64'; serviceManager = 'launchd-user' }
+  }
+  if (-not $profiles.ContainsKey($Platform)) { throw "Unsupported installation platform: $Platform" }
+  return [pscustomobject]$profiles[$Platform]
+}
+
+function Join-InstallationPlanPath {
+  param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Child, [Parameter(Mandatory)]$Platform)
+  if ($Platform.os -eq 'windows') { return $Root.TrimEnd('\', '/') + '\' + $Child.Replace('/', '\') }
+  return $Root.TrimEnd('/', '\') + '/' + $Child.Replace('\', '/')
+}
+
+function Get-InstallationPlanRunnerName {
+  param(
+    [Parameter(Mandatory)][string]$Prefix,
+    [Parameter(Mandatory)][string]$RepositoryKey,
+    [Parameter(Mandatory)][string]$HostName,
+    [Parameter(Mandatory)][ValidateRange(1, 8)][int]$Replica
+  )
+  $hostPart = ($HostName -replace '[^A-Za-z0-9_.-]+', '-').Trim('-')
+  if ([string]::IsNullOrWhiteSpace($hostPart)) { throw 'HostName must contain a runner-name character' }
+  $hostPart = $hostPart.Substring(0, [Math]::Min(12, $hostPart.Length))
+  $base = "$Prefix-$RepositoryKey-$hostPart"
+  if ($Replica -eq 1) { return $base.Substring(0, [Math]::Min(64, $base.Length)) }
+  $suffix = "-r$Replica"
+  return "$($base.Substring(0, [Math]::Min(64 - $suffix.Length, $base.Length)))$suffix"
+}
+
+function Get-InstallationPlanLabels {
+  param([Parameter(Mandatory)][string[]]$ConfiguredLabels, [Parameter(Mandatory)]$Platform)
+  $reserved = @('self-hosted', 'Windows', 'Linux', 'macOS', 'X64', 'ARM64')
+  $custom = @($ConfiguredLabels | Where-Object { $_ -notin $reserved } | Sort-Object -Unique)
+  return @('self-hosted', $Platform.osLabel, $Platform.architectureLabel) + $custom
+}
+
+function New-InstallationPlan {
+  param(
+    [Parameter(Mandatory)]$Loaded,
+    [string]$Platform,
+    [string]$HostName,
+    [ValidateSet('change', 'review')][string[]]$Roles = @('change', 'review'),
+    [string[]]$Repositories,
+    [switch]$NoStart,
+    $RuntimeSnapshot
+  )
+  $profile = Resolve-InstallationPlatform -Platform $Platform
+  if ([string]::IsNullOrWhiteSpace($HostName)) {
+    $HostName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } elseif ($env:HOSTNAME) { $env:HOSTNAME } else { [Net.Dns]::GetHostName() }
+  }
+  $ops = $Loaded.Operations
+  $roleSet = @($Roles | Select-Object -Unique | Sort-Object)
+  $repositorySet = @($Repositories | Where-Object { $_ } | Select-Object -Unique | Sort-Object)
+  if ($repositorySet.Count) {
+    $unknown = @($repositorySet | Where-Object { $_ -notin @($Loaded.Config.repositories) })
+    if ($unknown.Count) { throw "Unknown repository selection: $($unknown -join ', ')" }
+  }
+  if ($ops.controller.registrationScope -eq 'organization' -and $repositorySet.Count) {
+    throw '-Repositories is not valid in organization mode because each role runner is shared by every allowlisted target'
+  }
+
+  $instances = [Collections.Generic.List[object]]::new()
+  $targets = if ($ops.controller.registrationScope -eq 'organization') {
+    @([pscustomobject]@{ key = (Get-RepositoryKey -Repository "$($ops.controller.organization)/organization"); repository = $null; registrationKind = 'organization'; registrationOwner = $ops.controller.organization; idPrefix = 'organization' })
+  } else {
+    @($ops.repositoryMappings |
+      Where-Object { -not $repositorySet.Count -or $_.repository -in $repositorySet } |
+      Sort-Object repository |
+      ForEach-Object { [pscustomobject]@{ key = (Get-RepositoryKey -Repository $_.repository); repository = $_.repository; registrationKind = 'repository'; registrationOwner = $_.repository; idPrefix = "target-$(Get-RepositoryKey -Repository $_.repository)" } })
+  }
+  foreach ($target in $targets) {
+    foreach ($roleName in $roleSet) {
+      $role = $ops.roles.$roleName
+      for ($replica = 1; $replica -le [int]$role.replicas; $replica += 1) {
+        $suffix = if ($replica -eq 1) { '' } else { "-r$replica" }
+        $id = "$($target.idPrefix)-$roleName$suffix"
+        $runnerRoot = Join-InstallationPlanPath -Root $ops.installRoot -Child "runners/$id" -Platform $profile
+        $workDirectory = Join-InstallationPlanPath -Root $ops.stateRoot -Child "work/$id" -Platform $profile
+        $serviceName = if ($profile.serviceManager -eq 'scheduled-task') { "DSH-Agent-Automation-$id" } else { "dsh-agent-automation-$id".ToLowerInvariant() }
+        $instances.Add([pscustomobject][ordered]@{
+          id = $id
+          role = $roleName
+          replica = $replica
+          repository = $target.repository
+          registrationKind = $target.registrationKind
+          registrationOwner = $target.registrationOwner
+          runnerName = Get-InstallationPlanRunnerName -Prefix $role.runnerNamePrefix -RepositoryKey $target.key -HostName $HostName -Replica $replica
+          labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($role.labels) -Platform $profile)
+          runnerRoot = $runnerRoot
+          workDirectory = $workDirectory
+          serviceManager = $profile.serviceManager
+          serviceName = $serviceName
+          taskName = $serviceName
+          logFile = Join-InstallationPlanPath -Root $ops.logsRoot -Child "$id-supervisor.log" -Platform $profile
+          faultFile = Join-InstallationPlanPath -Root $ops.stateRoot -Child "faults/$id.restart" -Platform $profile
+        })
+      }
+    }
+  }
+
+  $selectedRepositories = if ($ops.controller.registrationScope -eq 'organization') {
+    @($Loaded.Config.repositories | Sort-Object)
+  } else {
+    @($instances | ForEach-Object { $_.repository } | Where-Object { $_ } | Sort-Object -Unique)
+  }
+  $repositoryPlans = @($ops.repositoryMappings |
+    Where-Object { $_.repository -in $selectedRepositories } |
+    Sort-Object repository |
+    ForEach-Object {
+      [pscustomobject][ordered]@{
+        repository = $_.repository
+        variables = [pscustomobject][ordered]@{
+          DSH_AUTOMATION_CI_WORKFLOWS = ConvertTo-Json -InputObject @($_.ciWorkflows) -Compress
+          DSH_AUTOMATION_REQUIRED_CHECKS = ConvertTo-Json -InputObject @($_.requiredChecks) -Compress
+        }
+        branchProtection = [pscustomobject][ordered]@{
+          strict = $true
+          appId = $script:GitHubActionsAppId
+          requiredChecks = @($script:ReviewRequiredCheckName) + @($_.requiredChecks | Sort-Object -Unique) | ForEach-Object { [pscustomobject][ordered]@{ name = $_; appId = $script:GitHubActionsAppId } }
+          removeLegacyCheck = $script:LegacyReviewRequiredCheckName
+        }
+      }
+    })
+  $paths = @(
+    [pscustomobject][ordered]@{ id = 'install-root'; path = $ops.installRoot },
+    [pscustomobject][ordered]@{ id = 'state-root'; path = $ops.stateRoot },
+    [pscustomobject][ordered]@{ id = 'logs-root'; path = $ops.logsRoot },
+    [pscustomobject][ordered]@{ id = 'faults-root'; path = (Join-InstallationPlanPath -Root $ops.stateRoot -Child 'faults' -Platform $profile) }
+  )
+  $services = @($instances | ForEach-Object { [pscustomobject][ordered]@{ id = $_.id; kind = 'github-runner'; manager = $_.serviceManager; name = $_.serviceName; start = -not [bool]$NoStart } })
+  if ([bool]$ops.dshWebHost.enabled) {
+    $dshServiceName = if ($profile.serviceManager -eq 'scheduled-task') { Get-DshWebTaskName } else { 'dsh-agent-automation-dsh-web' }
+    $services += [pscustomobject][ordered]@{ id = 'dsh-web'; kind = 'dsh-web-host'; manager = $profile.serviceManager; name = $dshServiceName; start = -not [bool]$NoStart }
+  }
+  $artifactsProperty = $ops.runner.PSObject.Properties['artifacts']
+  $artifactProperty = if ($artifactsProperty) { $artifactsProperty.Value.PSObject.Properties[$profile.id] } else { $null }
+  if (-not $artifactProperty) { throw "operations.runner.artifacts must contain a runner artifact for $($profile.id)" }
+  $artifact = $artifactProperty.Value
+  if ($artifact.downloadUri -notmatch '^https://' -or ($artifact.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -and $artifact.sha256 -ne 'REPLACE_WITH_THE_OFFICIAL_64_CHARACTER_SHA256')) {
+    throw "The runner artifact for $($profile.id) must contain an HTTPS downloadUri and 64-character SHA-256"
+  }
+  return [pscustomobject][ordered]@{
+    schemaVersion = 1
+    kind = 'agent-automation-installation'
+    platform = $profile
+    hostName = $HostName
+    selection = [pscustomobject][ordered]@{ roles = $roleSet; repositories = $repositorySet; startServices = -not [bool]$NoStart }
+    paths = $paths
+    runnerPackage = [pscustomobject][ordered]@{ platform = $profile.id; version = $ops.runner.version; downloadUri = $artifact.downloadUri; sha256 = $artifact.sha256 }
+    runtimeSnapshot = $RuntimeSnapshot
+    repositories = $repositoryPlans
+    runnerInstances = @($instances)
+    services = $services
+  }
+}
+
+function ConvertTo-InstallationPlanJson {
+  param([Parameter(Mandatory)]$Plan)
+  return ConvertTo-Json -InputObject $Plan -Depth 32 -Compress
 }
 
 function Initialize-PrivateDirectory {
@@ -408,10 +633,10 @@ function Merge-RequiredStatusChecks {
   $currentChecks = if ($Current.psobject.Properties.Name -contains 'checks') { @($Current.checks) } else { @() }
   $checkNames = @($currentChecks | ForEach-Object { [string]$_.context })
   $contexts = if ($Current.psobject.Properties.Name -contains 'contexts') { @($Current.contexts) } else { @() }
-  $retainedContexts = @($contexts | Where-Object { $_ -notin $checkNames -and $_ -notin $RequiredNames } | Select-Object -Unique)
+  $retainedContexts = @($contexts | Where-Object { $_ -notin $checkNames -and $_ -notin $RequiredNames -and $_ -cne $script:LegacyReviewRequiredCheckName } | Select-Object -Unique)
   $mergedChecks = [Collections.Generic.List[object]]::new()
   foreach ($check in $currentChecks) {
-    if ([string]::IsNullOrWhiteSpace($check.context) -or $check.context -in $RequiredNames) { continue }
+    if ([string]::IsNullOrWhiteSpace($check.context) -or $check.context -in $RequiredNames -or $check.context -ceq $script:LegacyReviewRequiredCheckName) { continue }
     $appId = if ($check.psobject.Properties.Name -notcontains 'app_id' -or $null -eq $check.app_id) { -1 } else { [int64]$check.app_id }
     $mergedChecks.Add([pscustomobject][ordered]@{ context = [string]$check.context; app_id = $appId })
   }
@@ -431,6 +656,11 @@ function Test-RequiredStatusChecks {
     if ($matches.Count -ne 1 -or $matches[0].psobject.Properties.Name -notcontains 'app_id' -or [int64]$matches[0].app_id -ne $script:GitHubActionsAppId) {
       return [pscustomobject]@{ Ok = $false; Detail = 'required checks are missing or not bound to GitHub Actions' }
     }
+  }
+  $legacyContexts = if ($Current.psobject.Properties.Name -contains 'contexts') { @($Current.contexts) } else { @() }
+  $legacyChecks = @($Current.checks | Where-Object { $_.context -ceq $script:LegacyReviewRequiredCheckName })
+  if ($legacyChecks.Count -or @($legacyContexts | Where-Object { $_ -ceq $script:LegacyReviewRequiredCheckName }).Count) {
+    return [pscustomobject]@{ Ok = $false; Detail = 'legacy review authority is still required' }
   }
   return [pscustomobject]@{ Ok = $true; Detail = 'strict with both checks bound to GitHub Actions app id 15368' }
 }
@@ -727,12 +957,12 @@ function Start-ManagedComponent {
   throw "Managed component $InstanceId did not start with a verified owned process within $TimeoutSeconds seconds"
 }
 
-function New-OperationsRuntimeSnapshotDefinition {
+function New-RecordedOperationsRuntimeSnapshotDefinition {
   param([Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)]$Files)
   $records = @($Files | Sort-Object name)
-  $recordNames = @($records.name | Sort-Object) -join ','
-  $requiredNames = @($script:OperationsRuntimeFiles | Sort-Object) -join ','
-  if ($records.Count -ne $script:OperationsRuntimeFiles.Count -or $recordNames -cne $requiredNames) { throw 'Operations runtime snapshot must contain the exact supervisor runtime file set' }
+  if (-not $records.Count) { throw 'Recorded operations runtime snapshot must contain files' }
+  $names = @($records.name)
+  if (@($names | Select-Object -Unique).Count -ne $names.Count -or @($names | Where-Object { $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$' }).Count) { throw 'Recorded operations runtime snapshot contains an invalid or duplicate file name' }
   foreach ($record in $records) {
     if ($record.sha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw "Invalid operations runtime file hash: $($record.name)" }
   }
@@ -741,6 +971,15 @@ function New-OperationsRuntimeSnapshotDefinition {
   $root = Join-Path $InstallRoot (Join-Path 'operations-runtime' $id)
   Assert-PathInside -Child $root -Parent $InstallRoot -Name 'operations runtime snapshot root'
   return [pscustomobject][ordered]@{ id = $id; root = $root; files = @($records | ForEach-Object { [pscustomobject][ordered]@{ name = [string]$_.name; sha256 = ([string]$_.sha256).ToLowerInvariant() } }) }
+}
+
+function New-OperationsRuntimeSnapshotDefinition {
+  param([Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)]$Files)
+  $definition = New-RecordedOperationsRuntimeSnapshotDefinition -InstallRoot $InstallRoot -Files $Files
+  $recordNames = @($definition.files.name | Sort-Object) -join ','
+  $requiredNames = @($script:OperationsRuntimeFiles | Sort-Object) -join ','
+  if (@($definition.files).Count -ne $script:OperationsRuntimeFiles.Count -or $recordNames -cne $requiredNames) { throw 'Operations runtime snapshot must contain the exact current runtime file set' }
+  return $definition
 }
 
 function Get-OperationsRuntimeSnapshotDefinition {
@@ -821,9 +1060,27 @@ function Test-ScheduledTaskRuntimePath {
   param([Parameter(Mandatory)]$Task, [Parameter(Mandatory)][string]$ExpectedScript)
   $actions = @($Task.Actions)
   if ($actions.Count -ne 1 -or [string]$actions[0].Execute -notmatch '(?i)(^|\\)pwsh\.exe$') { return [pscustomobject]@{ Ok = $false; Detail = 'task action is not the expected PowerShell host' } }
-  $match = [regex]::Match([string]$actions[0].Arguments, '(?i)(?:^|\s)-File\s+"([^"]+)"')
-  if (-not $match.Success) { return [pscustomobject]@{ Ok = $false; Detail = 'task action has no quoted runtime script path' } }
-  $ok = ([IO.Path]::GetFullPath($match.Groups[1].Value)).Equals([IO.Path]::GetFullPath($ExpectedScript), [StringComparison]::OrdinalIgnoreCase)
+  $arguments = [string]$actions[0].Arguments
+  $hostMatches = [regex]::Matches($arguments, '(?i)(?:^|\s)-File\s+"([^"]+)"')
+  $executableMatches = [regex]::Matches($arguments, '(?i)(?:^|\s)-TargetExecutable\s+"([^"]+)"')
+  $payloadMatches = [regex]::Matches($arguments, '(?i)(?:^|\s)-TargetArgumentsBase64\s+(\S+)')
+  $workingMatches = [regex]::Matches($arguments, '(?i)(?:^|\s)-WorkingDirectory\s+"([^"]+)"')
+  if ($hostMatches.Count -ne 1 -or $executableMatches.Count -ne 1 -or $payloadMatches.Count -ne 1 -or $workingMatches.Count -ne 1) { return [pscustomobject]@{ Ok = $false; Detail = 'task action has no unique process host specification' } }
+  $hostMatch = $hostMatches[0]
+  $executableMatch = $executableMatches[0]
+  $payloadMatch = $payloadMatches[0]
+  $workingMatch = $workingMatches[0]
+  $expectedHost = Join-Path (Split-Path -Parent $ExpectedScript) 'windows-role-process-host.ps1'
+  $hostOk = ([IO.Path]::GetFullPath($hostMatch.Groups[1].Value)).Equals([IO.Path]::GetFullPath($expectedHost), [StringComparison]::OrdinalIgnoreCase)
+  $targetExecutableOk = ([IO.Path]::GetFullPath($executableMatch.Groups[1].Value)).Equals([IO.Path]::GetFullPath([string]$actions[0].Execute), [StringComparison]::OrdinalIgnoreCase)
+  $workingOk = ([IO.Path]::GetFullPath($workingMatch.Groups[1].Value)).Equals([IO.Path]::GetFullPath((Split-Path -Parent $ExpectedScript)), [StringComparison]::OrdinalIgnoreCase)
+  try {
+    $targetArguments = @(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payloadMatch.Groups[1].Value)) | ConvertFrom-Json))
+    $fileIndexes = @(for ($index = 0; $index -lt $targetArguments.Count; $index++) { if ($targetArguments[$index] -ceq '-File') { $index } })
+    $targetOk = -not @($targetArguments | Where-Object { $_ -isnot [string] }).Count -and $fileIndexes.Count -eq 1 -and $fileIndexes[0] + 1 -lt $targetArguments.Count -and ([IO.Path]::GetFullPath([string]$targetArguments[$fileIndexes[0] + 1])).Equals([IO.Path]::GetFullPath($ExpectedScript), [StringComparison]::OrdinalIgnoreCase)
+  } catch { $targetOk = $false }
+  $hidden = $arguments -match '(?i)(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)'
+  $ok = $hostOk -and $targetExecutableOk -and $targetOk -and $workingOk -and $hidden
   return [pscustomobject]@{ Ok = $ok; Detail = if ($ok) { 'task uses the managed runtime snapshot' } else { 'task references a different runtime path' } }
 }
 
@@ -890,7 +1147,7 @@ function Read-InstallManifest {
     if ($runtime.id -notmatch '^[a-f0-9]{64}$') { throw 'Install manifest operations runtime id is invalid' }
     $expectedRuntimeRoot = Join-Path $manifestInstallRoot (Join-Path 'operations-runtime' $runtime.id)
     if (-not ([IO.Path]::GetFullPath($runtime.root)).Equals([IO.Path]::GetFullPath($expectedRuntimeRoot), [StringComparison]::OrdinalIgnoreCase)) { throw 'Install manifest operations runtime path does not match its content id' }
-    $runtimeDefinition = New-OperationsRuntimeSnapshotDefinition -InstallRoot $manifestInstallRoot -Files $runtime.files
+    $runtimeDefinition = New-RecordedOperationsRuntimeSnapshotDefinition -InstallRoot $manifestInstallRoot -Files $runtime.files
     if ($runtimeDefinition.id -cne $runtime.id) { throw 'Install manifest operations runtime id does not match its file hashes' }
   }
   $ids = @()
@@ -1204,16 +1461,22 @@ function Invoke-OperationsSelfTest {
   $runtimeFilesA = @(
     [pscustomobject]@{ name = 'Automation.Operations.psm1'; sha256 = ('1' * 64) },
     [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('2' * 64) },
-    [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) }
+    [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) },
+    [pscustomobject]@{ name = 'windows-role-process-host.ps1'; sha256 = ('4' * 64) }
   )
   $runtimeFilesB = @(
     [pscustomobject]@{ name = 'Automation.Operations.psm1'; sha256 = ('1' * 64) },
-    [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('4' * 64) },
-    [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) }
+    [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('5' * 64) },
+    [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) },
+    [pscustomobject]@{ name = 'windows-role-process-host.ps1'; sha256 = ('4' * 64) }
   )
   $runtimeA = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files $runtimeFilesA
   $runtimeARepeat = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files @($runtimeFilesA | Sort-Object name -Descending)
   $runtimeB = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files $runtimeFilesB
+  $legacyRuntime = New-RecordedOperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files @($runtimeFilesA | Where-Object { $_.name -ne 'windows-role-process-host.ps1' })
+  $currentBuilderRejectedLegacy = $false
+  try { New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files $legacyRuntime.files | Out-Null } catch { $currentBuilderRejectedLegacy = $true }
+  $results += [pscustomobject]@{ Name = 'runtime reader accepts a content-verified prior snapshot only for migration'; Passed = ($legacyRuntime.id -match '^[a-f0-9]{64}$' -and $currentBuilderRejectedLegacy) }
   $results += [pscustomobject]@{ Name = 'operations runtime snapshot identity is deterministic'; Passed = ($runtimeA.id -ceq $runtimeARepeat.id -and $runtimeA.root -ceq $runtimeARepeat.root) }
   $results += [pscustomobject]@{ Name = 'operations runtime content change creates a new snapshot'; Passed = ($runtimeA.id -cne $runtimeB.id -and $runtimeA.root -cne $runtimeB.root) }
   $runtimeManifest = $manifest | ConvertTo-Json -Depth 12 | ConvertFrom-Json -Depth 12
@@ -1228,10 +1491,14 @@ function Invoke-OperationsSelfTest {
   $runtimeOrphanState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $runtimeManifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DiscoveredProcessRecordIds @() -DiscoveredRuntimeSnapshotIds @($runtimeA.id, $orphanRuntimeId) -DshWebTaskPresent $false -DshWebProcessRecordPresent $false -RuntimeSnapshot $runtimeA -RuntimeSnapshotValid $true
   $results += [pscustomobject]@{ Name = 'runtime reconciliation detects an orphan snapshot'; Passed = ($runtimeOrphanState.UnexpectedRuntimeSnapshotIds -contains $orphanRuntimeId) }
   $expectedRuntimeScript = Join-Path $runtimeA.root 'runner-supervisor.ps1'
-  $snapshotTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'C:\Program Files\PowerShell\7\pwsh.exe'; Arguments = "-NoProfile -File `"$expectedRuntimeScript`" -Configuration `"$selfTestConfigPath`"" }) }
+  $expectedProcessHost = Join-Path $runtimeA.root 'windows-role-process-host.ps1'
+  $selfTestTargetArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject @('-NoProfile', '-File', $expectedRuntimeScript, '-Configuration', $selfTestConfigPath))))
+  $snapshotTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'C:\Program Files\PowerShell\7\pwsh.exe'; Arguments = "-WindowStyle Hidden -NoProfile -File `"$expectedProcessHost`" -TargetExecutable `"C:\Program Files\PowerShell\7\pwsh.exe`" -TargetArgumentsBase64 $selfTestTargetArguments -WorkingDirectory `"$($runtimeA.root)`"" }) }
   $checkoutScript = Join-Path $selfTestRoot 'checkout\ops\runner-supervisor.ps1'
   $checkoutTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'pwsh.exe'; Arguments = "-NoProfile -File `"$checkoutScript`" -Configuration `"$selfTestConfigPath`"" }) }
+  $checkoutWorkingDirectoryTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'C:\Program Files\PowerShell\7\pwsh.exe'; Arguments = "-WindowStyle Hidden -NoProfile -File `"$expectedProcessHost`" -TargetExecutable `"C:\Program Files\PowerShell\7\pwsh.exe`" -TargetArgumentsBase64 $selfTestTargetArguments -WorkingDirectory `"$selfTestRoot`"" }) }
   $results += [pscustomobject]@{ Name = 'task runtime validation accepts only the manifest snapshot path'; Passed = ((Test-ScheduledTaskRuntimePath -Task $snapshotTask -ExpectedScript $expectedRuntimeScript).Ok -and -not (Test-ScheduledTaskRuntimePath -Task $checkoutTask -ExpectedScript $expectedRuntimeScript).Ok) }
+  $results += [pscustomobject]@{ Name = 'task runtime validation rejects a mutable working directory'; Passed = -not (Test-ScheduledTaskRuntimePath -Task $checkoutWorkingDirectoryTask -ExpectedScript $expectedRuntimeScript).Ok }
   $fakeOps.controller.registrationScope = 'organization'
   $fakeOps.controller.organization = 'owner'
   $organizationInstances = @(Get-RunnerInstances -Loaded $fakeLoaded)
@@ -1242,15 +1509,16 @@ function Invoke-OperationsSelfTest {
   $requiredNames = Get-RequiredCheckNames -Mapping $requiredMapping
   $currentProtection = [pscustomobject]@{
     strict = $false
-    contexts = @('legacy/status', 'all checks passed')
+    contexts = @('legacy/status', 'all checks passed', $script:LegacyReviewRequiredCheckName)
     checks = @(
       [pscustomobject]@{ context = 'third-party/check'; app_id = 99 },
-      [pscustomobject]@{ context = 'all checks passed'; app_id = -1 }
+      [pscustomobject]@{ context = 'all checks passed'; app_id = -1 },
+      [pscustomobject]@{ context = $script:LegacyReviewRequiredCheckName; app_id = 15368 }
     )
   }
   $mergedProtection = Merge-RequiredStatusChecks -Current $currentProtection -RequiredNames $requiredNames
   $mergedCheck = Test-RequiredStatusChecks -Current $mergedProtection -RequiredNames $requiredNames
-  $results += [pscustomobject]@{ Name = 'required check merge preserves unrelated checks and contexts'; Passed = ($mergedCheck.Ok -and $mergedProtection.contexts -contains 'legacy/status' -and @($mergedProtection.checks | Where-Object { $_.context -eq 'third-party/check' -and $_.app_id -eq 99 }).Count -eq 1) }
+  $results += [pscustomobject]@{ Name = 'required check merge preserves unrelated checks and removes the legacy review authority'; Passed = ($mergedCheck.Ok -and $mergedProtection.contexts -contains 'legacy/status' -and $mergedProtection.contexts -notcontains $script:LegacyReviewRequiredCheckName -and @($mergedProtection.checks | Where-Object { $_.context -eq 'third-party/check' -and $_.app_id -eq 99 }).Count -eq 1 -and @($mergedProtection.checks | Where-Object { $_.context -eq $script:LegacyReviewRequiredCheckName }).Count -eq 0) }
   $remergedProtection = Merge-RequiredStatusChecks -Current $mergedProtection -RequiredNames $requiredNames
   $results += [pscustomobject]@{ Name = 'required check merge is idempotent'; Passed = (($mergedProtection | ConvertTo-Json -Compress -Depth 8) -ceq ($remergedProtection | ConvertTo-Json -Compress -Depth 8)) }
   $wrongAppProtection = [pscustomobject]@{ strict = $true; checks = @([pscustomobject]@{ context = 'all checks passed'; app_id = -1 }, [pscustomobject]@{ context = $script:ReviewRequiredCheckName; app_id = 15368 }) }
@@ -1317,6 +1585,7 @@ function Invoke-OperationsSelfTest {
 Export-ModuleMember -Function @(
   'Write-OperationLog', 'Write-OperationHeartbeat', 'Test-OperationHeartbeat', 'Resolve-OperationPath', 'Assert-PathInside', 'Get-RepositoryKey',
   'Read-OperationsConfig', 'Get-RunnerInstances', 'Get-RunnerInstance',
+  'Resolve-InstallationPlatform', 'New-InstallationPlan', 'ConvertTo-InstallationPlanJson',
   'Initialize-PrivateDirectory', 'Test-PrivateDirectoryAcl', 'Assert-ManagedDirectoryForRemoval',
   'Get-RegistrationEndpoint', 'Get-RegistrationUrl', 'Get-RunnerToken', 'Test-HostGitHubLogin',
   'Get-RequiredCheckNames', 'Merge-RequiredStatusChecks', 'Test-RequiredStatusChecks',

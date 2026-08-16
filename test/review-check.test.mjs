@@ -31,7 +31,7 @@ test('the controller creates and completes its exact-head review CheckRun', asyn
   assert.deepEqual(created.calls[0][1], [
     'api', '--method', 'POST', `repos/${repository}/check-runs`,
     '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=in_progress', '-f', `details_url=${runUrl}`, '-f', `external_id=${runUrl}`,
-    '-f', 'output[title]=Codex review in progress', '-f', 'output[summary]=Reviewing this exact pull request head.',
+    '-f', 'output[title]=Agent review in progress', '-f', 'output[summary]=Reviewing this exact pull request head.',
   ])
 
   const completed = recorder()
@@ -39,7 +39,7 @@ test('the controller creates and completes its exact-head review CheckRun', asyn
   assert.deepEqual(completed.calls[0][1], [
     'api', '--method', 'PATCH', `repos/${repository}/check-runs/${checkId}`,
     '-f', 'status=completed', '-f', 'conclusion=success', '-f', `details_url=${runUrl}`,
-    '-f', 'output[title]=Codex review success', '-f', 'output[summary]=Passed.',
+    '-f', 'output[title]=Agent review success', '-f', 'output[summary]=Passed.',
   ])
 })
 

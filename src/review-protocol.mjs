@@ -1,27 +1,26 @@
+import { reviewMarker, reviewRepairRequestId } from './review-authority.mjs'
+
 /** Return the durable idempotency key for one exact blocked review pair. */
 export function automaticRepairRequestId(base, head) {
-  if (![base, head].every(value => /^[0-9a-f]{40}$/i.test(value))) {
-    throw new Error('Automatic repair requests require full commit SHAs')
-  }
-  return `codex-${base.toLowerCase()}-${head.toLowerCase()}`
+  return reviewRepairRequestId(base, head)
 }
 
 /** Return whether GitHub already records an automated verdict for this exact head. */
 export function hasExactReviewVerdict(comments, head, authorLogin = 'github-actions[bot]') {
-  const marker = `<!-- codex-review:${head} -->`
+  const marker = reviewMarker(head)
   return comments.some(comment => comment.user?.login === authorLogin && comment.body?.includes(marker))
 }
 
-/** Parse the hidden machine payload from a human-readable Codex final answer. */
+/** Parse the hidden machine payload from a human-readable review final answer. */
 export function parseReviewMessage(message) {
   const match = message.match(/<details>\r?\n<summary>Automation result<\/summary>\r?\n\r?\n```json\r?\n([\s\S]*?)\r?\n```\r?\n<\/details>\s*$/)
     || message.match(/<!-- dsh-review-result\r?\n([\s\S]*?)\r?\n-->\s*$/)
-  if (!match) throw new Error('Codex final answer does not end with the automation result')
+  if (!match) throw new Error('Review final answer does not end with the automation result')
   let value
   try {
     value = JSON.parse(match[1])
   } catch (error) {
-    throw new Error(`Codex hidden review result is not valid JSON: ${error.message}`, { cause: error })
+    throw new Error(`Hidden review result is not valid JSON: ${error.message}`, { cause: error })
   }
   return validateReview(value)
 }
@@ -31,7 +30,7 @@ export function validateReview(value) {
   if (!value || !['pass', 'block'].includes(value.verdict) || typeof value.summary !== 'string'
     || !englishLine(value.summary, 4000) || !Array.isArray(value.findings)
     || value.findings.length > 30) {
-    throw new Error('Codex returned an invalid review object')
+    throw new Error('Review Worker returned an invalid review object')
   }
   for (const finding of value.findings) {
     if (!['P0', 'P1'].includes(finding.priority)
@@ -45,7 +44,7 @@ export function validateReview(value) {
       || finding.line < 1
       || typeof finding.excerpt !== 'string'
       || !englishLine(finding.excerpt, 500)) {
-      throw new Error('Codex returned an invalid blocking finding')
+      throw new Error('Review Worker returned an invalid blocking finding')
     }
   }
   if (value.verdict === 'pass' && value.findings.length > 0) {
@@ -69,10 +68,14 @@ function repositoryPath(value) {
 }
 
 /** Render the English GitHub review body for one exact commit. */
-export function githubReviewBody(review, { marker, base, head }) {
+export function githubReviewBody(review, { marker, base, head, reviewer }) {
+  if (typeof reviewer?.displayName !== 'string' || !reviewer.displayName.trim()
+    || reviewer.displayName.length > 200 || /[\r\n`]/.test(reviewer.displayName)) {
+    throw new Error('Review Worker attribution is invalid')
+  }
   const lines = [
     marker,
-    `## Codex review: ${review.verdict === 'pass' ? 'PASS' : 'BLOCK'}`,
+    `## Agent review: ${review.verdict === 'pass' ? 'PASS' : 'BLOCK'}`,
     '',
     review.summary.trim(),
   ]
@@ -82,6 +85,6 @@ export function githubReviewBody(review, { marker, base, head }) {
       lines.push(`- **[${finding.priority}] ${finding.title}** — \`${finding.path}:${finding.line}\`: ${finding.body}`)
     }
   }
-  lines.push('', `_Reviewed exact head \`${head}\` against base \`${base}\` with gpt-5.6-sol (medium)._`)
+  lines.push('', `_Reviewed exact head \`${head}\` against base \`${base}\` with ${reviewer.displayName}._`)
   return lines.join('\n')
 }

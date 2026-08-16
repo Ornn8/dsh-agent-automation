@@ -11,14 +11,14 @@ const pullRequest = (baseRefOid, headRefOid) => ({
   mergeStateStatus: 'CLEAN',
 })
 const proof = (base, head) => ({ checkRun: {
-  name: 'codex/review', status: 'completed', conclusion: 'success', app: { id: 15368 },
+  name: 'agent/review', status: 'completed', conclusion: 'success', app: { id: 15368 },
   details_url: 'https://github.com/owner/repository/actions/runs/17',
 }, run: { id: 17, event: 'pull_request_target', status: 'completed', conclusion: 'success', head_sha: head,
   repository: { full_name: 'owner/repository' }, head_repository: { full_name: 'owner/repository' },
   pull_requests: [{ number: 12, base: { sha: base }, head: { sha: head } }],
-  referenced_workflows: [{ path: `Ornn8/dsh-agent-automation/.github/workflows/codex-review.yml@${'c'.repeat(40)}`, sha: 'c'.repeat(40) }],
+  referenced_workflows: [{ path: `Ornn8/dsh-agent-automation/.github/workflows/agent-review.yml@${'c'.repeat(40)}`, sha: 'c'.repeat(40) }],
 } })
-const trustedReview = { controllerRepository: 'Ornn8/dsh-agent-automation', controllerSha: 'c'.repeat(40), workflowPath: '.github/workflows/codex-review.yml' }
+const trustedReview = { controllerRepository: 'Ornn8/dsh-agent-automation', controllerSha: 'c'.repeat(40), workflowPath: '.github/workflows/agent-review.yml' }
 const checks = [{ name: 'all checks passed', status: 'completed', conclusion: 'success' }]
 
 test('landing accepts only a current exact-pair PASS with every required check green', () => {
@@ -70,7 +70,7 @@ test('landing rejects a head-only PASS after the base changes', () => {
     expectedHead: head,
     requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: proof(reviewedBase, head), trustedReview,
   })
-  assert.deepEqual(decision, { ready: false, reason: 'no trusted exact-pair Codex PASS exists' })
+  assert.deepEqual(decision, { ready: false, reason: 'no trusted exact-pair Agent PASS exists' })
 })
 
 test('landing rejects a missing trusted workflow proof even when checks are green', () => {
@@ -81,7 +81,7 @@ test('landing rejects a missing trusted workflow proof even when checks are gree
     expectedHead: head,
     requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: null, trustedReview,
   })
-  assert.deepEqual(decision, { ready: false, reason: 'no trusted exact-pair Codex PASS exists' })
+  assert.deepEqual(decision, { ready: false, reason: 'no trusted exact-pair Agent PASS exists' })
 })
 
 test('landing uses the newest app-bound required check rather than an older success', () => {

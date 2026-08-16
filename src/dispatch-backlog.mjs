@@ -6,6 +6,7 @@ import {
 } from './common.mjs'
 import { selectBacklogWork, trustedBlockedReviewProof } from './dispatch-policy.mjs'
 import { reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
+import { REVIEW_CHECK_NAME } from './review-authority.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
@@ -49,7 +50,7 @@ async function trustedBlockedRepairNumbers(pullRequests) {
       'api', `repos/${repository}/commits/${pullRequest.headRefOid}/check-runs`, '--paginate', '--slurp',
     ], `check runs for pull request #${pullRequest.number}`)
     for (const checkRun of pages.flatMap(page => page.check_runs || [])) {
-      if (checkRun.name !== 'codex/review') continue
+      if (checkRun.name !== REVIEW_CHECK_NAME) continue
       const runId = reviewRunIdFromDetailsUrl(checkRun.details_url, repository)
       if (!runId) continue
       const workflowRun = await ghJson([

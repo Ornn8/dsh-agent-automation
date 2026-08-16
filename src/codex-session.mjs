@@ -159,13 +159,17 @@ export async function runReviewTask({
   taskCwd = projectCwd,
   reviewCwd = projectCwd,
   environment,
-  model = 'gpt-5.6-sol',
-  effort = 'medium',
-  keep = 6,
+  model,
+  effort,
+  keep,
   timeoutMs = 60 * 60 * 1000,
   signal,
   onCreated = async () => undefined,
 }) {
+  for (const [name, value] of [['model', model], ['effort', effort]]) {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`Codex ${name} must be explicit`)
+  }
+  if (!Number.isSafeInteger(keep) || keep < 1) throw new Error('Codex keep must be a positive integer')
   if (signal?.aborted) throw new Error('Codex review task was cancelled before it started')
   const child = spawn(node, [codexScript, 'app-server', '--listen', 'stdio://'], {
     cwd: projectCwd,

@@ -4,7 +4,7 @@
   "type": "object",
   "required": ["schemaVersion", "repositories", "ghExecutable", "gitExecutable", "github", "workers", "operations"],
   "properties": {
-    "schemaVersion": { "const": 3 },
+    "schemaVersion": { "const": 4 },
     "repositories": {
       "type": "array",
       "minItems": 1,
@@ -50,6 +50,19 @@
               "provider": { "type": "string", "minLength": 1 },
               "model": { "type": "string", "minLength": 1 },
               "reasoningEffort": { "type": "string", "minLength": 1 }
+            }
+          }
+        }, {
+          "if": { "properties": { "adapter": { "const": "codex-app" } }, "required": ["adapter"] },
+          "then": {
+            "required": ["node", "script", "home", "model", "effort", "keep"],
+            "properties": {
+              "node": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
+              "script": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
+              "home": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
+              "model": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
+              "effort": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
+              "keep": { "type": "integer", "minimum": 1, "maximum": 100 }
             }
           }
         }, {
@@ -107,7 +120,7 @@
       "type": "object",
       "required": ["schemaVersion", "installRoot", "stateRoot", "logsRoot", "controller", "runner", "repositoryMappings", "roles", "dshWebHost"],
       "properties": {
-        "schemaVersion": { "const": 3 },
+        "schemaVersion": { "const": 4 },
         "installRoot": { "type": "string", "pattern": "^[A-Za-z]:\\\\" },
         "stateRoot": { "type": "string", "pattern": "^[A-Za-z]:\\\\" },
         "logsRoot": { "type": "string", "pattern": "^[A-Za-z]:\\\\" },
@@ -122,11 +135,23 @@
         },
         "runner": {
           "type": "object",
-          "required": ["version", "downloadUri", "sha256"],
+          "required": ["version", "artifacts"],
+          "additionalProperties": false,
           "properties": {
-            "version": { "type": "string", "minLength": 1 },
-            "downloadUri": { "type": "string", "pattern": "^https://" },
-            "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" }
+            "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+            "artifacts": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "properties": {
+                "windows-x64": { "$ref": "#/$defs/runnerArtifact" },
+                "windows-arm64": { "$ref": "#/$defs/runnerArtifact" },
+                "linux-x64": { "$ref": "#/$defs/runnerArtifact" },
+                "linux-arm64": { "$ref": "#/$defs/runnerArtifact" },
+                "macos-x64": { "$ref": "#/$defs/runnerArtifact" },
+                "macos-arm64": { "$ref": "#/$defs/runnerArtifact" }
+              }
+            }
           }
         },
         "repositoryMappings": {
@@ -172,6 +197,15 @@
     }
   },
   "$defs": {
+    "runnerArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["downloadUri", "sha256"],
+      "properties": {
+        "downloadUri": { "type": "string", "pattern": "^https://" },
+        "sha256": { "type": "string", "pattern": "^(?:[A-Fa-f0-9]{64}|REPLACE_WITH_THE_OFFICIAL_64_CHARACTER_SHA256)$" }
+      }
+    },
     "repository": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"

@@ -16,13 +16,29 @@ test('every privileged reusable workflow pins actions and checks out its own imm
   }
 })
 
-test('Codex publication is job-scoped and landing is a separate workflow', async () => {
-  const review = await readFile(new URL('codex-review.yml', workflowDirectory), 'utf8')
+test('reusable workflow commands declare a shell unless their syntax is shell-neutral', async () => {
+  const names = (await readdir(workflowDirectory)).filter(name => name.endsWith('.yml'))
+  for (const name of names) {
+    const source = await readFile(new URL(name, workflowDirectory), 'utf8')
+    if (!source.includes('workflow_call:')) continue
+    const steps = source.split(/(?=^\s{6}- name:)/m)
+    for (const step of steps) {
+      const run = step.match(/^\s+run:\s*(.*)$/m)?.[1]?.trim()
+      if (!run) continue
+      const command = /^[|>][-+]?\d*$/.test(run) ? '<block scalar>' : run
+      if (/^(?:node\b.*|exit\s+\d+)$/.test(command)) continue
+      assert.match(step, /^\s+shell:\s*\S+/m, `${name} must declare the shell for: ${command}`)
+    }
+  }
+})
+
+test('Agent review publication is job-scoped and landing is a separate workflow', async () => {
+  const review = await readFile(new URL('agent-review.yml', workflowDirectory), 'utf8')
   const landing = await readFile(new URL('land-pr.yml', workflowDirectory), 'utf8')
   const landingController = await readFile(new URL('../src/land-pr.mjs', import.meta.url), 'utf8')
   assert.match(review, /checks: write/)
   assert.doesNotMatch(review, /statuses: write/)
-  assert.match(review, /name: codex\/review/)
+  assert.match(review, /name: agent\/review/)
   assert.match(review, /checks: write/)
   assert.match(review, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/)
   assert.doesNotMatch(review, /--auto/)

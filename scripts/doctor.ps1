@@ -2,6 +2,7 @@
 param(
   [string]$Configuration,
   [switch]$DryRun,
+  [string]$TargetPlatform,
   [switch]$Online,
   [switch]$SelfTest
 )
@@ -18,20 +19,22 @@ if ($SelfTest) {
   exit 0
 }
 if ([string]::IsNullOrWhiteSpace($Configuration)) { throw 'Configuration is required unless -SelfTest is used' }
-$loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun
+$loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun -TargetPlatform $TargetPlatform
 $ops = $loaded.Operations
 $runtimeSnapshot = Get-OperationsRuntimeSnapshotDefinition -SourceRoot (Join-Path $repoRoot 'ops') -InstallRoot $ops.installRoot
 $instances = @(Get-RunnerInstances -Loaded $loaded)
 if ($DryRun) {
-  Write-Output "Configuration dry-run passed: $($ops.controller.registrationScope) topology with $(@($loaded.Config.repositories).Count) repository mapping(s) and $($instances.Count) runner instance(s)."
-  foreach ($instance in $instances) {
-    $scope = if ($instance.Repository) { $instance.Repository } else { $instance.RegistrationOwner }
-    Write-Output "DRY-RUN instance $($instance.Id): $scope -> $($instance.TaskName)"
+  $plan = New-InstallationPlan -Loaded $loaded -Platform $TargetPlatform -RuntimeSnapshot $runtimeSnapshot
+  Write-Output "Configuration dry-run passed: $($ops.controller.registrationScope) topology with $(@($loaded.Config.repositories).Count) repository mapping(s) and $(@($plan.runnerInstances).Count) runner instance(s)."
+  foreach ($instance in @($plan.runnerInstances)) {
+    $scope = if ($instance.repository) { $instance.repository } else { $instance.registrationOwner }
+    Write-Output "DRY-RUN instance $($instance.id): $scope -> $($instance.serviceName)"
   }
   foreach ($mapping in @($ops.repositoryMappings)) {
-    Write-Output "DRY-RUN protection $($mapping.repository): strict; $(@($mapping.requiredChecks) -join ', ') and codex/review bound to GitHub Actions app id 15368"
+    Write-Output "DRY-RUN protection $($mapping.repository): strict; $(@($mapping.requiredChecks) -join ', ') and agent/review bound to GitHub Actions app id 15368"
   }
   Write-Output "DRY-RUN operations runtime snapshot: $($runtimeSnapshot.id) -> $($runtimeSnapshot.root)"
+  Write-Output "AUTOMATION_INSTALLATION_PLAN_JSON=$(ConvertTo-InstallationPlanJson -Plan $plan)"
   Write-Output 'Doctor dry-run completed: no network call, task change, process change, registration, creation, or deletion was requested.'
   exit 0
 }

@@ -2,6 +2,7 @@ import { actionsCredentialEnvironment, authenticatedMarker, parseJson, requiredE
 import { recordedCiWorkflow, recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { recordedFailureClass } from './failure-classification.mjs'
+import { REVIEW_CHECK_NAME, REVIEW_DISPATCH_TYPE } from './review-authority.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('RECOVERY_SOURCE_RUN_ID')
@@ -108,7 +109,7 @@ async function reviewSubject(run) {
     const checkPages = await ghJson([
       'api', `repos/${repository}/commits/${pullRequest.head.sha}/check-runs`, '--paginate', '--slurp',
     ], `review checks for pull request #${pullRequest.number}`)
-    if (checkPages.flatMap(page => page.check_runs || []).some(checkRun => checkRun.name === 'codex/review'
+    if (checkPages.flatMap(page => page.check_runs || []).some(checkRun => checkRun.name === REVIEW_CHECK_NAME
       && checkRun.app?.id === 15368
       && reviewRunIdFromCheckRun(checkRun, repository) === Number.parseInt(sourceRunId, 10))) {
       matches.push({ type: 'pull-request', number: pullRequest.number, base: pullRequest.base.sha, head: pullRequest.head.sha })
@@ -120,7 +121,7 @@ async function reviewSubject(run) {
 async function markReviewDeadLetter(number) {
   await run(githubExecutable, [
     'label', 'create', 'automation/review-failed', '--repo', repository,
-    '--description', 'Codex review automation exhausted bounded recovery', '--color', 'D93F0B',
+    '--description', 'Agent review automation exhausted bounded recovery', '--color', 'D93F0B',
   ], { env: environment }).catch(() => undefined)
   await run(githubExecutable, ['pr', 'edit', String(number), '--repo', repository,
     '--add-label', 'automation/review-failed'], { env: environment })
@@ -129,12 +130,12 @@ async function markReviewDeadLetter(number) {
 async function wakeExactReview(subject) {
   await run(githubExecutable, [
     'label', 'create', 'automation/review-ready', '--repo', repository,
-    '--description', 'A current pull request needs a Codex review', '--color', '1D76DB',
+    '--description', 'A current pull request needs an Agent review', '--color', '1D76DB',
   ], { env: environment }).catch(() => undefined)
   await run(githubExecutable, ['pr', 'edit', String(subject.number), '--repo', repository,
     '--add-label', 'automation/review-ready'], { env: environment })
   await run(githubExecutable, ['api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=codex-review',
+    '-f', `event_type=${REVIEW_DISPATCH_TYPE}`,
     '-F', `client_payload[pull_request_number]=${subject.number}`,
     '-f', `client_payload[base_sha]=${subject.base}`,
     '-f', `client_payload[head_sha]=${subject.head}`,

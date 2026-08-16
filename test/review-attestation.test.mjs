@@ -24,14 +24,14 @@ function pullRequest() {
 function proof(overrides = {}) {
   return {
     checkRun: {
-      name: 'codex/review', status: 'completed', conclusion: 'success',
+      name: 'agent/review', status: 'completed', conclusion: 'success',
       app: { id: 15368 }, details_url: 'https://github.com/owner/repository/actions/runs/17/job/1',
     },
     run: {
       id: 17, event: 'pull_request_target', status: 'completed', conclusion: 'success',
       repository: { full_name: repository }, head_repository: { full_name: repository }, head_sha: head,
       pull_requests: [{ number: 12, base: { sha: base }, head: { sha: head } }],
-      referenced_workflows: [{ path: `${controllerRepository}/.github/workflows/codex-review.yml@${controllerSha}`,
+      referenced_workflows: [{ path: `${controllerRepository}/.github/workflows/agent-review.yml@${controllerSha}`,
         sha: controllerSha }],
     },
     ...overrides,
@@ -43,7 +43,7 @@ test('landing requires an Actions-owned immutable-controller exact-pair review p
     pullRequest: pullRequest(), expectedHead: head, requiredChecks: ['all checks passed'],
     checkRuns: [{ name: 'all checks passed', status: 'completed', conclusion: 'success' }],
     reviewProof: proof(),
-    trustedReview: { controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml' },
+    trustedReview: { controllerRepository, controllerSha, workflowPath: '.github/workflows/agent-review.yml' },
   })
   assert.deepEqual(decision, { ready: true, reason: 'exact review and required checks passed' })
 })
@@ -52,10 +52,10 @@ test('landing rejects a github-actions comment or status without a bound workflo
   const decision = evaluateLanding({
     pullRequest: pullRequest(), expectedHead: head, requiredChecks: ['all checks passed'],
     checkRuns: [{ name: 'all checks passed', status: 'completed', conclusion: 'success' }],
-    comments: [{ user: { login: 'github-actions[bot]' }, body: '## Codex review: PASS' }],
-    trustedReview: { controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml' },
+    comments: [{ user: { login: 'github-actions[bot]' }, body: '## Agent review: PASS' }],
+    trustedReview: { controllerRepository, controllerSha, workflowPath: '.github/workflows/agent-review.yml' },
   })
-  assert.deepEqual(decision, { ready: false, reason: 'no trusted exact-pair Codex PASS exists' })
+  assert.deepEqual(decision, { ready: false, reason: 'no trusted exact-pair Agent PASS exists' })
 })
 
 test('a trusted failed review run is terminal evidence but never landing proof', () => {
@@ -64,7 +64,7 @@ test('a trusted failed review run is terminal evidence but never landing proof',
     run: { ...proof().run, conclusion: 'failure' },
   })
   const trustedReview = {
-    controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml',
+    controllerRepository, controllerSha, workflowPath: '.github/workflows/agent-review.yml',
   }
   assert.equal(hasTrustedExactReviewRun({
     pullRequest: pullRequest(), reviewProof: failed, trustedReview,
@@ -84,7 +84,7 @@ test('landing accepts a recursion-safe dispatch run only from the exact current 
       pull_requests: [],
     },
   })
-  const trustedReview = { controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml' }
+  const trustedReview = { controllerRepository, controllerSha, workflowPath: '.github/workflows/agent-review.yml' }
   assert.equal(hasTrustedExactReviewProof({ pullRequest: pullRequest(), reviewProof: dispatched, trustedReview }), true)
   assert.equal(hasTrustedExactReviewProof({
     pullRequest: pullRequest(),
@@ -99,10 +99,10 @@ test('landing accepts a recursion-safe dispatch run only from the exact current 
 })
 
 test('landing rejects workflow evidence altered by the target pull request', () => {
-  const expected = { controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml' }
+  const expected = { controllerRepository, controllerSha, workflowPath: '.github/workflows/agent-review.yml' }
   for (const reviewProof of [
-    proof({ run: { ...proof().run, referenced_workflows: [{ path: `${controllerRepository}/.github/workflows/codex-review.yml@${'d'.repeat(40)}`, sha: 'd'.repeat(40) }] } }),
-    proof({ run: { ...proof().run, referenced_workflows: [{ path: '.github/workflows/codex-review.yml', sha: controllerSha }] } }),
+    proof({ run: { ...proof().run, referenced_workflows: [{ path: `${controllerRepository}/.github/workflows/agent-review.yml@${'d'.repeat(40)}`, sha: 'd'.repeat(40) }] } }),
+    proof({ run: { ...proof().run, referenced_workflows: [{ path: '.github/workflows/agent-review.yml', sha: controllerSha }] } }),
     proof({ run: { ...proof().run, pull_requests: [{ number: 12, base: { sha: 'e'.repeat(40) }, head: { sha: head } }] } }),
     proof({ checkRun: { ...proof().checkRun, app: { id: 1 } } }),
     proof({ checkRun: { ...proof().checkRun, details_url: 'https://example.invalid/actions/runs/17' } }),
@@ -125,7 +125,7 @@ test('review check provenance survives GitHub normalizing its visible details UR
     details_url: 'https://github.com/owner/repository/runs/91',
     external_id: 'https://github.com/owner/repository/actions/runs/17',
   } })
-  const trustedReview = { controllerRepository, controllerSha, workflowPath: '.github/workflows/codex-review.yml' }
+  const trustedReview = { controllerRepository, controllerSha, workflowPath: '.github/workflows/agent-review.yml' }
   assert.equal(reviewRunIdFromCheckRun(normalized.checkRun, repository), 17)
   assert.equal(hasTrustedExactReviewProof({ pullRequest: pullRequest(), reviewProof: normalized, trustedReview }), true)
 })

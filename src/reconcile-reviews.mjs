@@ -8,6 +8,7 @@ import {
 } from './common.mjs'
 import { needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
 import { hasTrustedExactReviewRun, reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
+import { REVIEW_CHECK_NAME, REVIEW_DISPATCH_TYPE } from './review-authority.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
@@ -50,7 +51,7 @@ async function requestReview(pullRequest) {
   }
   await run(githubExecutable, [
     'label', 'create', 'automation/review-ready', '--repo', repository,
-    '--description', 'Request one exact-pair Codex review', '--color', '0E8A16',
+    '--description', 'Request one exact-pair Agent review', '--color', '0E8A16',
   ], { env: githubEnvironment }).catch(() => undefined)
   await run(githubExecutable, [
     'pr', 'edit', String(pullRequest.number), '--repo', repository,
@@ -58,7 +59,7 @@ async function requestReview(pullRequest) {
   ], { env: githubEnvironment })
   await run(githubExecutable, [
     'api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=codex-review',
+    '-f', `event_type=${REVIEW_DISPATCH_TYPE}`,
     '-F', `client_payload[pull_request_number]=${pullRequest.number}`,
     '-f', `client_payload[base_sha]=${pullRequest.base.sha}`,
     '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
@@ -115,7 +116,7 @@ for (const summary of summaries.flat()) {
   let reviewProof = null
   for (const checkRun of checkRuns) {
     const runId = reviewRunIdFromDetailsUrl(checkRun.details_url, repository)
-    if (!runId || checkRun.name !== 'codex/review') continue
+    if (!runId || checkRun.name !== REVIEW_CHECK_NAME) continue
     const workflowRun = await ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `review workflow run ${runId}`)
     const proof = { checkRun, run: workflowRun }
     if (hasTrustedExactReviewRun({ pullRequest: landingPullRequest, reviewProof: proof, trustedReview })) {

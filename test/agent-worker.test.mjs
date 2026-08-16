@@ -36,6 +36,7 @@ test('a controller invokes any configured worker through one interface', async (
   assert.equal(invocations[0].invocation.taskId, 'pr-12-base-head')
   assert.deepEqual(receipt, {
     workerId: 'reviewer',
+    worker: { id: 'reviewer', adapter: 'fake', displayName: 'fake' },
     sessionId: 'review-session',
     outcome: 'completed',
     detail: '',
@@ -521,6 +522,10 @@ test('the Codex adapter satisfies the worker interface without GitHub credential
     assert.equal(calls[0].environment.GIT_CONFIG_GLOBAL, process.platform === 'win32' ? 'NUL' : '/dev/null')
     assert.equal(receipt.sessionId, 'codex-thread')
     assert.equal(receipt.output, 'PASS')
+    assert.deepEqual(receipt.worker, {
+      id: 'reviewer', adapter: 'codex-app', model: 'gpt-5.6-sol', reasoning: 'medium',
+      displayName: 'codex-app gpt-5.6-sol (medium)',
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

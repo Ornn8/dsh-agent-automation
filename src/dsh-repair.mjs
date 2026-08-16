@@ -131,7 +131,7 @@ async function upsertStatus(status, branch, detail, failureClass) {
 
 async function setRepairLabels({ add = [], remove = [] }) {
   for (const [name, description, color] of [
-    ['automation/review-blocked', 'Codex found a blocking defect at the current PR head', 'B60205'],
+    ['automation/review-blocked', 'Agent review found a blocking defect at the current PR head', 'B60205'],
     ['automation/ci-failed', 'A failed CI run requires DSH repair at the current PR head', 'D93F0B'],
     ['automation/ci-baseline', 'The failed CI condition is tracked by a separate default-branch Issue', '1D76DB'],
     ['automation/repair-blocked', 'DSH ended this repair with a valid blocked outcome', 'B60205'],
@@ -247,7 +247,7 @@ await upsertStatus('running', branch, explicitRequest
   ? ciRequest
     ? `Failed CI request ${requestId} started a fresh DSH repair session.`
     : `Trusted rework request ${requestId} started a fresh DSH repair session.`
-  : 'The blocking Codex verdict started a fresh DSH repair session.')
+  : 'The blocking Agent review verdict started a fresh repair session.')
 await setRepairLabels({
   add: ciRequest ? ['automation/repairing'] : ['automation/review-blocked', 'automation/repairing'],
   remove: ciRequest

@@ -72,6 +72,7 @@ jobs:
       - name: Reject an unknown role
         env:
           AGENT_ROLE: ${{ inputs.role }}
+        shell: pwsh
         run: |
-          echo "Unknown agent role: $AGENT_ROLE" >&2
+          Write-Error "Unknown agent role: $env:AGENT_ROLE"
           exit 1
