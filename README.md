@@ -6,7 +6,7 @@ This is a Windows-hosted automation system for GitHub.com. It turns Issues, pull
 
 Portable dry-run planning and CI validation run on Windows, Linux, and macOS. Managed installation and service execution are currently implemented only for Windows x64.
 
-Change and review Workers can be stopped, replaced, or scaled independently.
+Change, review, and maintenance Workers can be stopped, replaced, or scaled independently.
 
 Workers on the same Windows account and machine remain in one security trust domain.
 
@@ -143,9 +143,11 @@ Landing is model-free. It requires:
 
 Comments, labels, and legacy commit statuses are audit projections; none can authorize a merge.
 
-### Profiles and Governor
+### Profiles, Governor, and infrastructure recovery
 
 The trusted repository Profile under `.github/agent-automation/profiles/` owns product workflow stages, procedures, coordination, checks, and merge behavior. The Controller keeps exact revision validation, independent review, capability enforcement, bounded budgets, and merge safety fixed.
+
+Infrastructure failures use a separate Controller Maintenance Profile. One stable `FaultRecord v1` owns deterministic recovery, the finite maintenance Worker order, at most one repair pull request per epoch, independent review and CI, one fault-bound release, runtime verification, and resumption of the original WorkRequests. Child failures remain attempts of that root fault; they cannot create recursive fault Issues. Exhaustion opens a circuit until a verifiable state revision changes.
 
 ### Supervision and recovery
 
@@ -161,7 +163,7 @@ A watchdog detects Agent jobs that remain queued too long. Local replicas record
 
 ## Choosing an Agent
 
-`operations.roles` is the only Agent-selection table. Assign one named Worker to `change` and one independently isolated Worker to `review`. Repository mappings contain repository CI data only. Target workflows and the GitHub protocol do not change when a role changes Worker.
+`operations.roles` is the only Agent-selection table. Assign one named Worker to `change`, one independently isolated Worker to `review`, and a finite ordered Worker list to `maintenance`. Repository mappings contain repository CI data only. Target workflows and the GitHub protocol do not change when a role changes Worker.
 
 Bundled Adapters:
 
@@ -179,7 +181,7 @@ Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.minimal.jso
 
 Review comments render that controller-owned Worker metadata instead of hardcoding a model in presentation code.
 
-Change and review concurrency is configured independently with `operations.roles.<role>.replicas` from 1 through 8.
+Change, review, and maintenance concurrency is configured independently with `operations.roles.<role>.replicas`; maintenance remains fixed to one replica by the recovery policy.
 
 GitHub may run different subjects in parallel. Workflow concurrency keys serialize duplicate work for one Issue or pull request.
 
@@ -211,12 +213,13 @@ Unknown Workers, Adapters, outcomes, capabilities, or malformed results fail clo
 
 ## Runtime and trust boundaries
 
-The two runner roles use separate registrations, work directories, queues, and host services. The plan derives standard GitHub labels from the target platform; role configuration contains only custom routing labels. A Windows x64 plan produces:
+The three runner roles use separate registrations, work directories, queues, and host services. The plan derives standard GitHub labels from the target platform; role configuration contains only custom routing labels. A Windows x64 plan produces:
 
 - `[self-hosted, Windows, X64, agent-reviewer]`
 - `[self-hosted, Windows, X64, agent-change]`
+- `[self-hosted, Windows, X64, agent-maintenance]`
 
-Stopping either role leaves the other operational. On Windows, every managed task starts through one Adapter-neutral Role Process Host.
+Stopping any role leaves the others operational. On Windows, every managed task starts through one Adapter-neutral Role Process Host.
 
 A private desktop prevents descendant command-line windows from appearing on the user's desktop. A Job Object provides process-tree termination.
 
