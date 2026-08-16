@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
   [Parameter(Mandatory)][string]$Configuration,
-  [ValidateSet('change', 'review')][string[]]$Roles = @('change', 'review'),
+  [ValidateSet('change', 'review', 'maintenance')][string[]]$Roles = @('change', 'review', 'maintenance'),
   [string[]]$Repositories,
   [switch]$NoStart,
   [switch]$Migrate,
@@ -18,7 +18,7 @@ if ($ConfirmMigration -and -not $Migrate) { throw '-ConfirmMigration requires -M
 if ($Migrate -and -not $DryRun -and -not $ConfirmMigration) { throw 'A state migration requires -ConfirmMigration. Run -Migrate -DryRun first.' }
 $migrationRepositories = @($Repositories | Where-Object { $_ })
 $migrationRoles = @($Roles | Select-Object -Unique)
-if ($Migrate -and ($migrationRepositories.Count -or $migrationRoles.Count -ne 2)) { throw '-Migrate must reconcile the full configured topology; do not combine it with -Repositories or a partial -Roles selection.' }
+if ($Migrate -and ($migrationRepositories.Count -or $migrationRoles.Count -ne 3)) { throw '-Migrate must reconcile the full configured topology; do not combine it with -Repositories or a partial -Roles selection.' }
 $loaded = Read-OperationsConfig -Configuration $Configuration -AllowExamplePlaceholders:$DryRun -TargetPlatform $TargetPlatform
 $ops = $loaded.Operations
 $runtimeSourceRoot = Join-Path $repoRoot 'ops'
@@ -211,6 +211,15 @@ foreach ($repositoryPlan in @($plan.repositories)) {
   }
   Invoke-InstallAction "ensure strict app-bound required checks, bootstrapping an unprotected default branch of $($repositoryPlan.repository)" {
     Set-RepositoryRequiredStatusChecks -Mapping $protectionMapping -GhExecutable $loaded.Config.ghExecutable
+  }
+}
+
+if ('maintenance' -in @($Roles)) {
+  $maintenanceInstances = @($instances | Where-Object role -eq 'maintenance')
+  if ($maintenanceInstances.Count -ne 1) { throw 'Exactly one Controller maintenance instance is required.' }
+  Invoke-InstallAction "set exact maintenance replica variable for $($ops.controller.repository)" {
+    & $loaded.Config.ghExecutable variable set AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID --repo $ops.controller.repository --body $maintenanceInstances[0].id 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not set AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID for the Controller repository' }
   }
 }
 

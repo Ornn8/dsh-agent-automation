@@ -19,8 +19,10 @@ test('minimal configuration stays short and resolves the complete role topology'
   const config = resolveMachineConfig({ defaults, input, configurationPath: `${root}/config.minimal.json` })
   assert.deepEqual(roleWorkerIds(config, 'change'), ['change'])
   assert.deepEqual(roleWorkerIds(config, 'review'), ['review'])
+  assert.deepEqual(roleWorkerIds(config, 'maintenance'), ['maintenance'])
   assert.equal(config.workers.change.mode, 'change')
   assert.equal(config.workers.review.capabilities.hardReadOnlyReview, true)
+  assert.equal(config.workers.maintenance.githubLogin, input.github.login)
   assert.match(config.configurationHash, /^[a-f0-9]{64}$/)
 })
 
@@ -49,9 +51,9 @@ test('removed entry points and cross-domain Worker reuse fail before an Adapter 
     assert.throws(() => resolve(legacy), /was removed/)
   }
   const reused = structuredClone(input)
-  reused.operations.roles.change.workers = ['review']
-  delete reused.workers.change
-  assert.throws(() => resolve(reused), /cannot serve both change and review trust domains/)
+  reused.operations.roles.maintenance.workers = ['review']
+  delete reused.workers.maintenance
+  assert.throws(() => resolve(reused), /cannot serve both review and maintenance trust domains/)
 })
 
 test('every public schema property is visible in the minimal file or configuration reference', async () => {

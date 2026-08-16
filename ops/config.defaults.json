@@ -19,6 +19,11 @@
         "runnerNamePrefix": "agent-review",
         "replicas": 1,
         "labels": ["agent-reviewer"]
+      },
+      "maintenance": {
+        "runnerNamePrefix": "agent-maint",
+        "replicas": 1,
+        "labels": ["agent-maintenance"]
       }
     },
     "dshWebHost": {

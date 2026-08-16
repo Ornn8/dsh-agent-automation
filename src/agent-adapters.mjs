@@ -2,6 +2,7 @@ import path from 'node:path'
 import { mkdtemp, rm } from 'node:fs/promises'
 import {
   hostCredentialEnvironment,
+  maintenanceCredentialEnvironment,
   parseJson,
   reviewerCredentialEnvironment,
   run,
@@ -115,13 +116,17 @@ export function createAgentAdapters({
         runCommand,
         environment: input.worker.mode === 'review'
           ? reviewerCredentialEnvironment()
-          : hostCredentialEnvironment(),
+          : input.worker.mode === 'maintenance'
+            ? maintenanceCredentialEnvironment(input.worker)
+            : hostCredentialEnvironment(),
       }),
       health: async ({ worker }) => {
         const result = await runCommand(worker.executable, ['--version'], {
           env: worker.mode === 'review'
             ? reviewerCredentialEnvironment()
-            : hostCredentialEnvironment(),
+            : worker.mode === 'maintenance'
+              ? maintenanceCredentialEnvironment(worker)
+              : hostCredentialEnvironment(),
         })
         return { detail: result.stdout.trim() }
       },
@@ -132,13 +137,17 @@ export function createAgentAdapters({
         runCommand,
         environment: input.worker.mode === 'review'
           ? reviewerCredentialEnvironment()
-          : hostCredentialEnvironment(),
+          : input.worker.mode === 'maintenance'
+            ? maintenanceCredentialEnvironment(input.worker)
+            : hostCredentialEnvironment(),
       }),
       health: async ({ worker }) => {
         const result = await runCommand(worker.executable, ['--version'], {
           env: worker.mode === 'review'
             ? reviewerCredentialEnvironment()
-            : hostCredentialEnvironment(),
+            : worker.mode === 'maintenance'
+              ? maintenanceCredentialEnvironment(worker)
+              : hostCredentialEnvironment(),
         })
         return { detail: result.stdout.trim() }
       },
@@ -150,7 +159,9 @@ export function createAgentAdapters({
           cwd: invocation.cwd,
           env: worker.mode === 'review'
             ? reviewerCredentialEnvironment()
-            : hostCredentialEnvironment(),
+            : worker.mode === 'maintenance'
+              ? maintenanceCredentialEnvironment(worker)
+              : hostCredentialEnvironment(),
           input: JSON.stringify(invocation),
           timeoutMs: invocation.timeoutMs,
           signal: invocation.signal,
@@ -161,7 +172,9 @@ export function createAgentAdapters({
         validateCommandWorker(worker)
         if (!Array.isArray(worker.healthArgs)) throw new Error('command-json worker must declare healthArgs')
         const result = await runCommand(worker.executable, worker.healthArgs, {
-          env: hostCredentialEnvironment(),
+          env: worker.mode === 'maintenance'
+            ? maintenanceCredentialEnvironment(worker)
+            : hostCredentialEnvironment(),
         })
         return { detail: result.stdout.trim() }
       },
@@ -173,8 +186,8 @@ function validateCommandWorker(worker) {
   if (typeof worker.executable !== 'string' || !worker.executable.trim()) {
     throw new Error('command-json worker executable must be a non-empty string')
   }
-  if (!['change', 'review'].includes(worker.mode)) {
-    throw new Error('command-json worker mode must be change or review')
+  if (!['change', 'review', 'maintenance'].includes(worker.mode)) {
+    throw new Error('command-json worker mode must be change, review, or maintenance')
   }
   for (const field of ['args', 'healthArgs']) {
     if (worker[field] !== undefined

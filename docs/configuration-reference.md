@@ -4,7 +4,7 @@ This document is a field catalog, not an executable configuration. Start from [`
 
 ## Resolution model
 
-The public file contains intent. [`ops/config.defaults.json`](../ops/config.defaults.json) supplies ordinary host defaults. The loader then derives repositories, Worker roles, capabilities, executable defaults, the selected runner artifact, and a `configurationHash`. Repository variables may override the configured CI workflow and required-check lists at runtime. `doctor.ps1 -Explain` reports every effective leaf with its declared value, source file and line, and any repository-variable override.
+The public file contains intent. [`ops/config.defaults.json`](../ops/config.defaults.json) supplies ordinary host defaults. The loader then derives repositories, Worker roles, capabilities, executable defaults, maintenance credential paths, the selected runner artifact, and a `configurationHash`. Repository variables may override the configured CI workflow and required-check lists at runtime. `doctor.ps1 -Explain` reports every effective leaf with its declared value, source file and line, and any repository-variable override.
 
 `$schema` is an editor hint, not a revision counter. This pre-release repository rejects removed fields instead of migrating them silently. `credentialGeneration` is the only operator-controlled revision signal: increment its non-secret value after rotating a credential. The controller derives `configurationHash` from all non-credential effective settings; it is not a public input. Durable runtime records keep their own internal `schemaVersion` fields, which are unrelated to this machine configuration.
 
@@ -22,17 +22,17 @@ The public file contains intent. [`ops/config.defaults.json`](../ops/config.defa
 
 ## Worker fields
 
-Every Worker requires `adapter`. The Adapter determines the remaining fields. Role-owned values are not accepted in the Worker object: `mode`, capabilities, and review isolation are derived from `operations.roles` and the Adapter implementation.
+Every Worker requires `adapter`. The Adapter determines the remaining fields. Role-owned values are not accepted in the Worker object: `mode`, capabilities, review isolation, and maintenance `githubLogin` are derived from `operations.roles` and the Adapter implementation.
 
 | Adapter | Required fields | Optional fields |
 | --- | --- | --- |
 | `dsh-web` | `baseUrl`, `agentPreset`, `permissionPreset`, `provider`, `model`, `reasoningEffort` | None |
 | `codex-app` | `node`, `script`, `home`, `model`, `effort`, `keep` | `projectCwd` |
-| `opencode-cli` | `model`, `variant` | `executable`, `agent`, `healthArgs` |
-| `claude-code-cli` | `model`, `effort` | `executable`, `healthArgs` |
-| `command-json` | `executable` | `args`, `healthArgs` |
+| `opencode-cli` | `model`, `variant` | `executable`, `agent`, `credentialIsolationDir`, `healthArgs` |
+| `claude-code-cli` | `model`, `effort` | `executable`, `credentialIsolationDir`, `healthArgs` |
+| `command-json` | `executable` | `args`, `healthArgs`, `credentialIsolationDir` |
 
-`executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. A review Worker also derives `gitExecutable`. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. `projectCwd` selects the Codex Desktop project directory. `keep` limits visible Codex review tasks. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
+`executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. A review Worker also derives `gitExecutable`. A maintenance Worker derives `credentialIsolationDir` under `operations.stateRoot` unless it is explicitly configured. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. `projectCwd` selects the Codex Desktop project directory. `keep` limits visible Codex review tasks. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
 
 ## Operations fields
 
@@ -60,9 +60,9 @@ Each item requires `repository`, `ciWorkflows`, and `requiredChecks`. Both lists
 
 ### Roles
 
-`roles` has exactly `change` and `review`. Each role requires one Worker, and a Worker cannot appear in both roles.
+`roles` has exactly `change`, `review`, and `maintenance`. Each role requires `workers`; change and review accept exactly one Worker, while maintenance accepts an ordered list of one through eight Workers for finite failover. A Worker cannot appear in two roles.
 
-Each role may set `runnerNamePrefix`, `replicas`, and `labels`. Defaults are `agent-change`/`agent-change` and `agent-review`/`agent-reviewer`; every role defaults to one replica. Required role labels cannot be removed.
+Each role may set `runnerNamePrefix`, `replicas`, and `labels`. Defaults are `agent-change`/`agent-change`, `agent-review`/`agent-reviewer`, and `agent-maint`/`agent-maintenance`; every role defaults to one replica. The maintenance role is fixed to one replica. Required role labels cannot be removed.
 
 ### DSH Web Host
 
@@ -75,10 +75,10 @@ The loader rejects these pre-release fields so a stale file cannot appear to wor
 - `schemaVersion`, `configRevision`, and `operations.schemaVersion`: replaced by strict parsing plus the derived configuration identity.
 - `credentialRevision`: renamed to `credentialGeneration` to state that it is an operator signal, not a document revision.
 - top-level `repositories`: derived from `operations.repositoryMappings`.
-- top-level `maintenanceWorkers` and `maintenanceReviewWorker`: unsupported until the independent maintenance topology is introduced.
+- top-level `maintenanceWorkers` and `maintenanceReviewWorker`: replaced by `operations.roles.maintenance.workers` and `operations.roles.review.workers`.
 - mapping-local `changeWorker` and `reviewWorker`: replaced by the global role routing table.
 - Worker-local `mode`, capabilities, and `githubLogin`: derived from the role and Adapter.
 
 ## Explain output
 
-`scripts/doctor.ps1 -Explain -DryRun` is offline and reports `configuration`, `default`, and `derived` values. Without `-DryRun`, it also reads the two required repository variables, marks overrides, and fails if one is missing. The human table is followed by `AUTOMATION_CONFIGURATION_EXPLAIN_JSON=...` for scripts. Each record contains `Path`, effective `Value`, `DeclaredValue`, `SourceType`, `Source`, `Line`, `Override`, and `Status`.
+`scripts/doctor.ps1 -Explain -DryRun` is offline and reports `configuration`, `default`, and `derived` values. Without `-DryRun`, it also reads the three required repository variables, marks overrides, and fails if one is missing. The human table is followed by `AUTOMATION_CONFIGURATION_EXPLAIN_JSON=...` for scripts. Each record contains `Path`, effective `Value`, `DeclaredValue`, `SourceType`, `Source`, `Line`, `Override`, and `Status`.

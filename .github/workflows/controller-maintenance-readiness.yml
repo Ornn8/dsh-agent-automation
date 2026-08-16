@@ -1,0 +1,50 @@
+name: Controller Maintenance Readiness
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '3-59/15 * * * *'
+    - cron: '37 3 * * *'
+
+concurrency:
+  group: controller-maintenance-readiness
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  routing:
+    name: maintenance/routing
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Validate the trusted maintenance replica route
+        env:
+          AGENT_REPLICA_ID: ${{ vars.AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID }}
+        shell: bash
+        run: |
+          if [[ ! "$AGENT_REPLICA_ID" =~ ^controller-[A-Za-z0-9_.-]+-maintenance$ ]]; then
+            echo 'AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID is missing or invalid.' >&2
+            exit 1
+          fi
+
+  readiness:
+    name: maintenance/readiness
+    needs: routing
+    runs-on: [self-hosted, "${{ vars.AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID }}"]
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact Controller revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: controller
+          persist-credentials: false
+
+      - name: Verify exact replica, Worker CLIs, and dedicated credentials
+        env:
+          CONTROLLER_REPOSITORY: ${{ github.repository }}
+          AGENT_REPLICA_ID: ${{ vars.AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID }}
+          READINESS_CANARY: ${{ github.event.schedule == '37 3 * * *' }}
+        run: node controller/src/maintenance-readiness.mjs

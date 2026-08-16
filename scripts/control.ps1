@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string]$Configuration,
-  [Parameter(Mandatory)][ValidateSet('change', 'review', 'dsh-web')][string]$Component,
+  [Parameter(Mandatory)][ValidateSet('change', 'review', 'maintenance', 'dsh-web')][string]$Component,
   [string]$Repository,
   [ValidateRange(1, 8)][int]$Replica = 1,
   [Parameter(Mandatory)][ValidateSet('status', 'start', 'stop', 'restart', 'fault')][string]$Action
@@ -24,7 +24,8 @@ if ($Component -eq 'dsh-web') {
     FaultFile = Join-Path $ops.stateRoot (Join-Path 'faults' 'dsh-web.restart')
   }
 } else {
-  if ($ops.controller.registrationScope -eq 'target-repositories' -and [string]::IsNullOrWhiteSpace($Repository)) { throw '-Repository is required in target-repositories mode so exactly one runner is selected' }
+  if ($Component -ne 'maintenance' -and $ops.controller.registrationScope -eq 'target-repositories' -and [string]::IsNullOrWhiteSpace($Repository)) { throw '-Repository is required in target-repositories mode so exactly one runner is selected' }
+  if ($Component -eq 'maintenance' -and $Repository) { throw '-Repository is not valid for the Controller maintenance role' }
   if ($ops.controller.registrationScope -eq 'organization' -and $Repository) { throw '-Repository is not valid in organization mode because each role is shared' }
   $repositories = if ($Repository) { @($Repository) } else { @() }
   $matches = @(Get-RunnerInstances -Loaded $loaded -Roles @($Component) -Repositories $repositories | Where-Object { $_.Replica -eq $Replica })

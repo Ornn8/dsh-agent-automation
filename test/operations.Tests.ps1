@@ -109,7 +109,7 @@ Describe 'Effective configuration explanation' {
     $configured | Should -HaveCount 1
     $configured[0].SourceType | Should -BeExactly 'configuration'
     $configured[0].Source | Should -BeExactly ([IO.Path]::GetFullPath($configuration))
-    $configured[0].Line | Should -Be 21
+    $configured[0].Line | Should -Be 22
 
     $defaulted = @($rows | Where-Object Path -CEQ 'ghExecutable')
     $defaulted | Should -HaveCount 1
@@ -142,7 +142,7 @@ Describe 'Effective configuration explanation' {
     $rows = @(Get-ConfigurationExplanation -Loaded $loaded -RepositoryVariableResolver $resolver)
     $missing = @($rows | Where-Object Status -CEQ 'missing')
 
-    $missing | Should -HaveCount 2
+    $missing | Should -HaveCount 3
     @($missing | Where-Object Override) | Should -HaveCount 0
   }
 }

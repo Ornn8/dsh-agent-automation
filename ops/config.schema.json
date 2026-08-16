@@ -19,7 +19,7 @@
     },
     "workers": {
       "type": "object",
-      "minProperties": 2,
+      "minProperties": 3,
       "additionalProperties": { "$ref": "#/$defs/worker" }
     },
     "operations": {
@@ -79,10 +79,16 @@
         "roles": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["change", "review"],
+          "required": ["change", "review", "maintenance"],
           "properties": {
             "change": { "$ref": "#/$defs/role" },
-            "review": { "$ref": "#/$defs/role" }
+            "review": { "$ref": "#/$defs/role" },
+            "maintenance": {
+              "allOf": [
+                { "$ref": "#/$defs/role" },
+                { "properties": { "replicas": { "const": 1 } } }
+              ]
+            }
           }
         },
         "dshWebHost": { "$ref": "#/$defs/dshWebHost" }
@@ -156,6 +162,7 @@
         "executable": { "type": "string", "minLength": 1 },
         "variant": { "type": "string", "minLength": 1 },
         "agent": { "type": "string", "minLength": 1 },
+        "credentialIsolationDir": { "$ref": "#/$defs/absolutePath" },
         "args": { "type": "array", "items": { "type": "string" } },
         "healthArgs": { "type": "array", "items": { "type": "string" } }
       },

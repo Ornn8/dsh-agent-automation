@@ -2,7 +2,7 @@ import path from 'node:path'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { AGENT_READINESS_SKILL, AGENT_REVIEW_SKILL, AGENT_SUPERVISION_SKILL, agentSkillDefinition, parseAgentAutomationResult } from './agent-work-result.mjs'
+import { AGENT_MAINTENANCE_SKILL, AGENT_READINESS_SKILL, AGENT_REVIEW_SKILL, AGENT_SUPERVISION_SKILL, agentSkillDefinition, parseAgentAutomationResult } from './agent-work-result.mjs'
 import { prepareAgentReviewInput } from './agent-review-input.mjs'
 
 const PLUGIN_NAME = 'dsh-github-work'
@@ -88,8 +88,8 @@ async function materializeClaudePlugin(skillName) {
 
 /** Run one controller invocation through the official non-interactive Claude Code CLI. */
 export async function runClaudeCodeCli({ worker, invocation, runCommand, environment }) {
-  if (!['change', 'review'].includes(worker.mode)) {
-    throw new Error('Claude Code CLI worker mode must be change or review')
+  if (!['change', 'review', 'maintenance'].includes(worker.mode)) {
+    throw new Error('Claude Code CLI worker mode must be change, review, or maintenance')
   }
   const executable = requiredText(worker.executable, 'Claude Code executable')
   const model = requiredText(worker.model, 'Claude Code model')
@@ -102,7 +102,10 @@ export async function runClaudeCodeCli({ worker, invocation, runCommand, environ
   if (worker.mode === 'review' && ![AGENT_REVIEW_SKILL, AGENT_SUPERVISION_SKILL, AGENT_READINESS_SKILL].includes(requiredSkill)) {
     throw new Error(`Claude Code review does not implement ${requiredSkill}`)
   }
-  const pluginDirectory = worker.mode === 'change'
+  if (worker.mode === 'maintenance' && ![AGENT_MAINTENANCE_SKILL, AGENT_READINESS_SKILL].includes(requiredSkill)) {
+    throw new Error(`Claude Code maintenance does not implement ${requiredSkill}`)
+  }
+  const pluginDirectory = worker.mode === 'change' || worker.mode === 'maintenance'
     ? await materializeClaudePlugin(requiredSkill)
     : undefined
   let review

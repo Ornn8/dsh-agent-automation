@@ -4,7 +4,8 @@
   "github": { "login": "REPLACE-GITHUB-LOGIN" },
   "workers": {
     "change": { "adapter": "opencode-cli", "model": "opencode-go/deepseek-v4-flash", "variant": "max" },
-    "review": { "adapter": "opencode-cli", "model": "openai/gpt-5", "variant": "medium" }
+    "review": { "adapter": "opencode-cli", "model": "openai/gpt-5", "variant": "medium" },
+    "maintenance": { "adapter": "opencode-cli", "model": "opencode-go/deepseek-v4-flash", "variant": "max" }
   },
   "operations": {
     "controller": { "repository": "REPLACE/controller" },
@@ -22,7 +23,8 @@
     ],
     "roles": {
       "change": { "workers": ["change"] },
-      "review": { "workers": ["review"] }
+      "review": { "workers": ["review"] },
+      "maintenance": { "workers": ["maintenance"] }
     }
   }
 }
