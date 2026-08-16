@@ -650,6 +650,11 @@ test('landing uses the exact-head REST merge endpoint without GraphQL pull reque
   assert.match(source, /sha: expectedHead/)
   assert.match(source, /merge_method: cycle\.merge\.strategy/)
   assert.match(source, /reviewProof\.checkRun\.conclusion !== 'success'/)
+  assert.ok(
+    source.indexOf("checksStage.source === 'branch-protection'")
+      < source.indexOf('/protection/required_status_checks'),
+    'branch-protection mode must defer enforcement to GitHub without requiring Administration read access',
+  )
   assert.doesNotMatch(source, /'pr', 'merge'/)
 })
 

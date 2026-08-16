@@ -97,6 +97,7 @@ async function targetProfile(revision) {
 }
 
 async function protectedChecks(checksStage) {
+  if (checksStage.source === 'branch-protection') return []
   const protection = await ghJson([
     'api', `repos/${repository}/branches/${encodeURIComponent(defaultBranch)}/protection/required_status_checks`,
   ], `required checks for ${defaultBranch}`)
@@ -104,7 +105,6 @@ async function protectedChecks(checksStage) {
     ? protection.checks
     : (protection?.contexts || []).map(context => ({ context, app_id: null }))
   const independent = configured.filter(check => check?.context !== 'agent/review')
-  if (checksStage.source === 'branch-protection') return independent
   return checksStage.names.map(name => {
     const matching = independent.filter(check => check.context === name)
     if (matching.length !== 1) throw new Error(`Profile check ${name} is not uniquely required by branch protection`)
