@@ -80,6 +80,12 @@ if ($manifest) {
   } catch {
     Add-Finding 'manifest reconciliation' $false $_.Exception.Message
   }
+  try {
+    $maintenanceInstances = @($instances | Where-Object Role -eq 'maintenance')
+    $actualMaintenanceReplica = & $loaded.Config.ghExecutable variable get AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID --repo $ops.controller.repository --json value --jq '.value' 2>$null
+    $maintenanceReplicaMatches = $maintenanceInstances.Count -eq 1 -and $LASTEXITCODE -eq 0 -and $actualMaintenanceReplica.Trim().Equals($maintenanceInstances[0].Id, [StringComparison]::Ordinal)
+    Add-Finding 'Controller maintenance replica variable' $maintenanceReplicaMatches $(if ($maintenanceReplicaMatches) { 'matches exact installed replica' } else { 'missing or mismatched' })
+  } catch { Add-Finding 'Controller maintenance replica variable' $false 'query failed' }
 }
 foreach ($path in @($ops.installRoot, $ops.stateRoot, $ops.logsRoot)) {
   $exists = Test-Path -LiteralPath $path
@@ -144,6 +150,10 @@ if ($Online) {
     $principal = Test-HostGitHubLogin -Config $loaded.Config
     Add-Finding 'GitHub CLI principal' $principal.Ok $principal.Detail
   } catch { Add-Finding 'GitHub CLI principal' $false 'gh api user failed' }
+  foreach ($workerId in @($loaded.Config.maintenanceWorkers)) {
+    $maintenancePrincipal = Test-MaintenanceGitHubLogin -Config $loaded.Config -Worker $loaded.Config.workers.$workerId -ControllerRepository $ops.controller.repository
+    Add-Finding "maintenance Worker $workerId GitHub credential" $maintenancePrincipal.Ok $maintenancePrincipal.Detail
+  }
   foreach ($mapping in @($ops.repositoryMappings)) {
     try {
       $actualWorkflows = & $loaded.Config.ghExecutable variable get DSH_AUTOMATION_CI_WORKFLOWS --repo $mapping.repository --json value --jq '.value' 2>$null

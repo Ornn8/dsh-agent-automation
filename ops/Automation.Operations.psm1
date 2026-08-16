@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:RoleNames = @('change', 'review')
+$script:RoleNames = @('change', 'review', 'maintenance')
 $script:GitHubActionsAppId = 15368
 $script:ReviewRequiredCheckName = 'agent/review'
 $script:LegacyReviewRequiredCheckName = 'codex/review'
@@ -314,7 +314,7 @@ function Read-OperationsConfig {
 function Get-RunnerInstances {
   param(
     [Parameter(Mandatory)]$Loaded,
-    [ValidateSet('change', 'review')][string[]]$Roles = @('change', 'review'),
+    [ValidateSet('change', 'review', 'maintenance')][string[]]$Roles = @('change', 'review', 'maintenance'),
     [string[]]$Repositories
   )
   $ops = $Loaded.Operations
@@ -481,7 +481,7 @@ function New-InstallationPlan {
     [Parameter(Mandatory)]$Loaded,
     [string]$Platform,
     [string]$HostName,
-    [ValidateSet('change', 'review')][string[]]$Roles = @('change', 'review'),
+    [ValidateSet('change', 'review', 'maintenance')][string[]]$Roles = @('change', 'review', 'maintenance'),
     [string[]]$Repositories,
     [switch]$NoStart,
     $RuntimeSnapshot

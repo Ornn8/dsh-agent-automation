@@ -732,7 +732,7 @@ test('agent failure classes separate backoff, infrastructure, protocol, and task
   }]))
 })
 
-test('unattended health combines a hosted queue watchdog, replica heartbeats, and real daily canaries', async () => {
+test('unattended health combines a hosted queue watchdog, role heartbeats, and real daily canaries', async () => {
   const target = await readFile(new URL('../templates/target/.github/workflows/agent-health.yml', import.meta.url), 'utf8')
   const pipeline = await readFile(new URL('../src/pipeline-health.mjs', import.meta.url), 'utf8')
   const watchdog = await readFile(new URL('../src/runner-watchdog.mjs', import.meta.url), 'utf8')
@@ -742,12 +742,11 @@ test('unattended health combines a hosted queue watchdog, replica heartbeats, an
   const webSupervisor = await readFile(new URL('../ops/dsh-web-host-supervisor.ps1', import.meta.url), 'utf8')
   const operations = await readFile(new URL('../ops/Automation.Operations.psm1', import.meta.url), 'utf8')
   assert.match(target, /runner-watchdog\.yml/)
-  assert.match(target, /fromJSON\(vars\.AGENT_AUTOMATION_REPLICA_HEALTH\)/)
-  assert.match(target, /replica_id: \$\{\{ matrix\.label \}\}/)
+  assert.match(target, /role: review/)
+  assert.match(target, /role: change/)
   assert.match(target, /29 3 \* \* \*/)
   assert.match(pipeline, /runAgentWorker/)
   assert.match(pipeline, /AGENT_READINESS_SKILL/)
-  assert.match(pipeline, /heartbeats/)
   assert.match(watchdog, /20 \* 60 \* 1000/)
   assert.match(watchdog, /Controller Maintenance has no successful run/)
   assert.match(watchdog, /automation%2Ffault/)
