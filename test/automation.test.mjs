@@ -724,6 +724,7 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.match(workflow, /contents: read/)
   assert.match(workflow, /pull-requests: write/)
   assert.match(workflow, /issues: write/)
+  assert.match(workflow, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/)
 })
 
 test('the shared process runner terminates output floods at a bounded byte limit', async () => {
