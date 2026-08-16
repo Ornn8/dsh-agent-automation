@@ -11,6 +11,8 @@ function examples(source) {
 }
 
 test('repair Skill hands a proven CI baseline failure to a same-repository Issue', () => {
+  assert.match(repairSkill, /at most one same-head rebuttal/)
+  assert.match(repairSkill, /must not request another same-head review/)
   assert.match(repairSkill, /same named workflow fails on the current `defaultBranch` commit/)
   assert.match(repairSkill, /Search open, non-pull-request Issues in the same repository/)
   assert.match(repairSkill, /`<!-- dsh-ci-baseline:v1:<baselineKey> -->`/)

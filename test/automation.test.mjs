@@ -33,7 +33,6 @@ import {
   trustedCiRerunSuccess,
 } from '../src/dispatch-policy.mjs'
 import {
-  automaticRepairRequestId,
   githubReviewBody,
   hasExactReviewVerdict,
   parseReviewMessage,
@@ -1379,13 +1378,6 @@ test('githubReviewBody stays English and binds the reviewed commits', () => {
   })
   assert.match(body, /Agent review: PASS/)
   assert.match(body, /head456.*base123/)
-})
-
-test('automatic repair requests are idempotent for one exact review pair', () => {
-  const base = 'a'.repeat(40)
-  const head = 'b'.repeat(40)
-  assert.equal(automaticRepairRequestId(base, head), `agent-review-${base}-${head}`)
-  assert.throws(() => automaticRepairRequestId('main', head), /full commit SHA/)
 })
 
 test('an interrupted running repair request can be reclaimed exactly once', () => {

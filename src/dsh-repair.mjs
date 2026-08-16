@@ -33,7 +33,7 @@ import {
   nonBaselineBlockFromReceipt,
   trustedBaselineIssue,
 } from './baseline-issue.mjs'
-import { isReviewRepairRequestId, parseAgentWorkRequest } from './work-request.mjs'
+import { isReviewRepairRequestId, parseAgentWorkRequest, reviewRepairTransition } from './work-request.mjs'
 import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
 import { hasNewReviewCheck, trustedReviewCheckIds } from './review-check.mjs'
@@ -94,6 +94,9 @@ const repairClass = ciRequest
   : explicitRequest
     ? 'explicit-human'
     : 'automatic-review'
+const reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
+  ? transportedRequest.requestId.slice(`review-repair-${expectedHead}-`.length)
+  : null
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (transportedRequest && (transportedRequest.repository !== repository
@@ -304,7 +307,12 @@ const governorStateVersion = subjectStateVersion(governorSubject)
 if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
   throw new Error(`Pull request #${pullRequestNumber} is paused and requires an authorized resume`)
 }
-const governedTransition = ciRequest ? 'ci-repair' : 'review-repair'
+const governedTransition = ciRequest
+  ? 'ci-repair'
+  : reviewObservationId
+    ? reviewRepairTransition(reviewObservationId)
+    : 'review-repair'
+const budgetTransition = ciRequest ? 'ci-repair' : 'review-repair'
 if (ciRequest && !recoveryRequest) {
   const admission = governorDecision({
     transition: governedTransition,
@@ -327,7 +335,7 @@ if (ciRequest && !recoveryRequest) {
     process.exit(0)
   }
   const budget = governorBudgetDecision({
-    transition: governedTransition,
+    transition: budgetTransition,
     subject: { type: governorSubject.type, number: governorSubject.number },
     workIdentity: `branch:${pullRequest.head.ref}`,
     observationId: governorObservationId,
