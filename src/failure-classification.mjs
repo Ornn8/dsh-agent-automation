@@ -20,3 +20,28 @@ export function classifyAgentFailure(error) {
 export function recordedFailureClass(body) {
   return /^- Failure class: `(transport|auth-quota|protocol|task)`$/m.exec(String(body || ''))?.[1] || null
 }
+
+/** Build a stable failure signature from trusted workflow job and step conclusions. */
+export function workflowFailureSignature(run, jobs) {
+  if (!run || typeof run !== 'object' || !Array.isArray(jobs)) throw new Error('workflow failure evidence is invalid')
+  const failures = jobs.flatMap(job => {
+    const steps = Array.isArray(job.steps) ? job.steps : []
+    const failedSteps = steps
+      .filter(step => !['success', 'skipped', 'neutral'].includes(String(step.conclusion || '').toLowerCase()))
+      .map(step => ({
+        name: String(step.name || ''),
+        number: Number.isSafeInteger(step.number) ? step.number : 0,
+        conclusion: String(step.conclusion || ''),
+      }))
+    if (!failedSteps.length && ['success', 'skipped', 'neutral'].includes(String(job.conclusion || '').toLowerCase())) return []
+    return [{ name: String(job.name || ''), conclusion: String(job.conclusion || ''), steps: failedSteps }]
+  }).sort((left, right) => left.name.localeCompare(right.name))
+  const evidence = {
+    workflow: String(run.name || ''),
+    event: String(run.event || ''),
+    conclusion: String(run.conclusion || ''),
+    failures,
+  }
+  return `workflow:${createHash('sha256').update(JSON.stringify(evidence)).digest('hex')}`
+}
+import { createHash } from 'node:crypto'

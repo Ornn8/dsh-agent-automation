@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "profileId": "controller-maintenance",
+  "deterministic": {
+    "actions": [
+      "restart-component",
+      "start-component",
+      "reconcile-managed-state"
+    ],
+    "limit": 3,
+    "backoffSeconds": [30, 120, 300]
+  },
+  "repair": {
+    "procedure": "controller-maintenance-repair",
+    "allowedPaths": [
+      ".github/workflows/**",
+      "ops/**",
+      "scripts/**",
+      "src/**",
+      "test/**",
+      "README.md",
+      "docs/**",
+      "package.json"
+    ],
+    "maxPullRequestsPerEpoch": 1,
+    "failoverBackoffSeconds": 300
+  },
+  "review": {
+    "procedure": "github-pr-review",
+    "required": true,
+    "hardReadOnly": true
+  },
+  "checks": {
+    "workflowNames": ["Controller CI"],
+    "requiredChecks": ["all checks passed"],
+    "waitMinutes": 180
+  },
+  "promotion": {
+    "mode": "fault-bound",
+    "limitPerEpoch": 1
+  },
+  "verification": {
+    "procedure": "verify-root-fault",
+    "healthySamples": 3
+  },
+  "resume": {
+    "procedure": "resume-root-requests"
+  },
+  "limits": {
+    "maxEpochsPer24Hours": 3,
+    "maintenanceWorkerAttemptsPerEpoch": 1,
+    "concurrency": 1
+  }
+}
