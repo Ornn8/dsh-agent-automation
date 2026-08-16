@@ -2,7 +2,7 @@
   "name": "dsh-agent-automation",
   "version": "0.1.0",
   "private": true,
-  "description": "Event-driven GitHub control plane for independent local change and review agents.",
+  "description": "Event-driven GitHub control plane for independent change, review, and maintenance Agent Workers.",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -6,7 +6,7 @@ This is a Windows-hosted automation system for GitHub.com. It turns Issues, pull
 
 Portable dry-run planning and CI validation run on Windows, Linux, and macOS. Managed installation and service execution are currently implemented only for Windows x64.
 
-Change and review Workers can be stopped, replaced, or scaled independently.
+Change, review, and maintenance Workers can be stopped, replaced, or scaled independently.
 
 Workers on the same Windows account and machine remain in one security trust domain.
 
@@ -42,13 +42,12 @@ Acceptance criteria:
 - The saved preference survives a restart.
 - Existing light-mode behavior remains unchanged.
 
-<!-- agent-work:v1 -->
+<!-- agent-work:v2 -->
 ```json
 {
-  "version": 1,
+  "version": 2,
   "dispatch": "ready",
-  "role": "change",
-  "kind": "implementation",
+  "workflow": "default",
   "dependsOn": []
 }
 ```
@@ -112,12 +111,11 @@ The complete install, migration, failure-injection, and removal procedures are i
 
 ### Issue work
 
-The `agent-work:v1` declaration is routing data, not the task description. Issue title, prose, and acceptance criteria remain the human-readable source of work.
+The `agent-work:v2` declaration is routing data, not the task description. Issue title, prose, and acceptance criteria remain the human-readable source of work.
 
-- Required fields: `version`, `dispatch`, `role`, `kind`, and `dependsOn`.
+- Required fields: `version`, `dispatch`, `workflow`, and `dependsOn`.
 - `dispatch` is `ready` or `hold`; `dispatch: "hold"` does not start a Worker.
-- The current role is `change`.
-- Supported kinds are `implementation`, `bug-fix`, `integration`, and `documentation`.
+- `workflow` selects a workflow from the trusted repository Profile; `default` selects the bundled GitHub pull-request cycle.
 - `dependsOn` contains unique open Issue numbers. Work waits until they close.
 - Optional `branch` defaults to `agent/issue-<number>`.
 
@@ -144,6 +142,12 @@ Landing is model-free. It requires:
 
 Comments, labels, and legacy commit statuses are audit projections; none can authorize a merge.
 
+### Profiles, Governor, and infrastructure recovery
+
+The trusted repository Profile under `.github/agent-automation/profiles/` owns product workflow stages, procedures, coordination, checks, and merge behavior. The Controller keeps exact revision validation, independent review, capability enforcement, bounded budgets, and merge safety fixed.
+
+Infrastructure failures use a separate Controller Maintenance Profile. One stable `FaultRecord v1` owns deterministic recovery, the finite maintenance Worker order, at most one repair pull request per epoch, independent review and CI, one fault-bound release, runtime verification, and resumption of the original WorkRequests. Child failures remain attempts of that root fault; they cannot create recursive fault Issues. Exhaustion opens a circuit until a verifiable state revision changes.
+
 ### Supervision and recovery
 
 Optional repository supervision uses a read-only Worker to propose evidence-backed maintenance actions.
@@ -158,7 +162,7 @@ A watchdog detects Agent jobs that remain queued too long. Local replicas record
 
 ## Choosing an Agent
 
-Repository mappings are the only Agent-selection point. Assign compatible named Workers to `changeWorker` and `reviewWorker`; target workflows and the GitHub protocol do not change.
+Repository mappings are the product Agent-selection point. Assign compatible named Workers to `changeWorker` and `reviewWorker`; select a finite ordered `maintenanceWorkers` list for Controller recovery. Target workflows and the GitHub protocol do not change.
 
 Bundled Adapters:
 
@@ -176,7 +180,7 @@ Set `DSH_AGENT_CONFIG` to a machine-local JSON file based on [config.example.jso
 
 Review comments render that controller-owned Worker metadata instead of hardcoding a model in presentation code.
 
-Change and review concurrency is configured independently with `operations.roles.<role>.replicas` from 1 through 8.
+Change, review, and maintenance concurrency is configured independently with `operations.roles.<role>.replicas`; maintenance remains fixed to one replica by the recovery policy.
 
 GitHub may run different subjects in parallel. Workflow concurrency keys serialize duplicate work for one Issue or pull request.
 
@@ -208,10 +212,11 @@ Unknown Workers, Adapters, outcomes, capabilities, or malformed results fail clo
 
 ## Runtime and trust boundaries
 
-The two runner roles use separate registrations, work directories, queues, and host services. The plan derives standard GitHub labels from the target platform; role configuration contains only custom routing labels. A Windows x64 plan produces:
+The three runner roles use separate registrations, work directories, queues, and host services. The plan derives standard GitHub labels from the target platform; role configuration contains only custom routing labels. A Windows x64 plan produces:
 
 - `[self-hosted, Windows, X64, agent-reviewer]`
 - `[self-hosted, Windows, X64, agent-change]`
+- `[self-hosted, Windows, X64, agent-maintenance]`
 
 Stopping either role leaves the other operational. On Windows, every managed task starts through one Adapter-neutral Role Process Host.
 

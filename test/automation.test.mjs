@@ -6,6 +6,7 @@ import test from 'node:test'
 import {
   actionsCredentialEnvironment,
   hostCredentialEnvironment,
+  maintenanceCredentialEnvironment,
   reviewerCredentialEnvironment,
   githubLogin,
   declaredIssueBranch,
@@ -21,10 +22,12 @@ import {
   validateCodexWorkerConfig,
   validateDshWorkerConfig,
   validateOpenCodeWorkerConfig,
+  validateMaintenanceWorkerCredentials,
   validateWorkerCapabilities,
   verifyGithubIdentity,
 } from '../src/common.mjs'
 import {
+  activeWorkflowIssueNumbers,
   ciRepairRequest,
   explicitReworkCommand,
   issueDependencies,
@@ -40,7 +43,7 @@ import {
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
 import { validateReviewFindings } from '../src/review-evidence.mjs'
-import { classifyAgentFailure, recordedFailureClass } from '../src/failure-classification.mjs'
+import { classifyAgentFailure, recordedFailureClass, workflowFailureSignature } from '../src/failure-classification.mjs'
 import {
   dshModelSelection,
   dshRpc,
@@ -66,7 +69,7 @@ import {
   reviewThreadConfig,
 } from '../src/codex-session.mjs'
 import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
-import { agentWorkRequestId, parseAgentWork } from '../src/agent-work.mjs'
+import { parseAgentWork } from '../src/agent-work.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -293,10 +296,12 @@ test('operations directory creation uses a supported New-Item path parameter', a
   assert.doesNotMatch(directoryFunction, /New-Item[^\n]+-LiteralPath/)
 })
 
-test('scheduled tasks use the installer-resolved absolute PowerShell host', async () => {
+test('scheduled tasks use the managed Role Process Host for every Agent process tree', async () => {
   const installer = await readFile(new URL('../scripts/install.ps1', import.meta.url), 'utf8')
   assert.match(installer, /\$pwshExecutable = \(Get-Command pwsh\.exe -ErrorAction Stop\)\.Source/)
-  assert.equal((installer.match(/New-ScheduledTaskAction -Execute \$pwshExecutable/g) ?? []).length, 2)
+  assert.equal((installer.match(/New-ScheduledTaskAction -Execute \$roleHost/g) ?? []).length, 2)
+  assert.match(installer, /RoleProcessHost\.exe/)
+  assert.match(installer, /--executable/)
   assert.doesNotMatch(installer, /New-ScheduledTaskAction -Execute 'pwsh\.exe'/)
   assert.match(installer, /\$action\.PSObject\.Properties\['Arguments'\]/)
   assert.doesNotMatch(installer, /\[string\]\$_\.Arguments/)
@@ -560,20 +565,6 @@ test('Claude Code workers declare one complete role-specific CLI selection', () 
   } }), /workers\.review effort/)
 })
 
-test('Codex workers require explicit public model attribution and retention', () => {
-  const worker = {
-    adapter: 'codex-app', node: 'node.exe', script: 'codex.js', home: 'F:\\CodexData',
-    model: 'gpt-5.6-sol', effort: 'medium', keep: 6,
-  }
-  assert.doesNotThrow(() => validateCodexWorkerConfig({ workers: { reviewer: worker } }))
-  assert.throws(() => validateCodexWorkerConfig({
-    workers: { reviewer: { ...worker, model: undefined } },
-  }), /model must be explicit/)
-  assert.throws(() => validateCodexWorkerConfig({
-    workers: { reviewer: { ...worker, keep: 0 } },
-  }), /keep must be an integer/)
-})
-
 test('DSH Web review returns its final message without requiring a change receipt', async () => {
   const fake = visibleSessionFetch('completed', undefined, 'VERDICT: PASS')
   const result = await runDshWebSession({
@@ -612,6 +603,8 @@ test('Codex retention reads every active-task page and rejects repeated cursors'
 test('a blocking review publishes an independent change work request', async () => {
   const reviewWorkflow = await readFile(new URL('../.github/workflows/agent-review.yml', import.meta.url), 'utf8')
   const workflow = await readFile(new URL('../.github/workflows/dsh-repair.yml', import.meta.url), 'utf8')
+  const reviewController = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
+  const publisher = await readFile(new URL('../src/publish-work-request.mjs', import.meta.url), 'utf8')
   assert.match(reviewWorkflow, /Publish an independent change work request/)
   assert.match(reviewWorkflow, /node controller\/src\/publish-work-request\.mjs/)
   assert.doesNotMatch(reviewWorkflow, /node controller\/src\/dsh-repair\.mjs/)
@@ -621,23 +614,36 @@ test('a blocking review publishes an independent change work request', async () 
   assert.doesNotMatch(workflow, /Address Codex review with DSH/)
   assert.doesNotMatch(workflow, /workflow_dispatch:/)
   assert.match(workflow, /job\.workflow_sha/)
+  assert.doesNotMatch(reviewController, /routeLabel[^\n]*automation\/paused/)
+  assert.ok(publisher.indexOf("status: 'paused'") < publisher.indexOf("'--add-label', 'automation/paused'"),
+    'the attested pause record must precede its observable label projection')
 })
 
-test('privileged agent workflows pass only an immutable role, never a caller-selected worker', async () => {
-  for (const name of ['agent-review.yml', 'dsh-issue.yml', 'dsh-repair.yml', 'wake-rework.yml', 'pipeline-health.yml']) {
+test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {
+  for (const name of ['dsh-repair.yml', 'pipeline-health.yml']) {
     const workflow = await readFile(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8')
     assert.match(workflow, /AGENT_ROLE:/)
     assert.doesNotMatch(workflow, /AGENT_WORKER_ID:/)
   }
+  const issueWorkflow = await readFile(new URL('../.github/workflows/dsh-issue.yml', import.meta.url), 'utf8')
+  assert.match(issueWorkflow, /WORK_REQUEST_JSON:/)
+  assert.doesNotMatch(issueWorkflow, /AGENT_ROLE:|AGENT_WORKER_ID:/)
+  const reviewWorkflow = await readFile(new URL('../.github/workflows/agent-review.yml', import.meta.url), 'utf8')
+  assert.match(reviewWorkflow, /PROFILE_ID:|WORKFLOW_ID:|STAGE_ID:/)
+  assert.doesNotMatch(reviewWorkflow, /AGENT_ROLE:|AGENT_WORKER_ID:/)
+  const admission = await readFile(new URL('../.github/workflows/wake-rework.yml', import.meta.url), 'utf8')
+  assert.match(admission, /runs-on: ubuntu-latest/)
+  assert.doesNotMatch(admission, /AGENT_ROLE:|agent-change/)
   const source = await readFile(new URL('../src/common.mjs', import.meta.url), 'utf8')
   assert.match(source, /must have exactly one mapping/)
 })
 
-test('the explicit rework child preserves every required repair input', async () => {
+test('an explicit rework comment records admission without starting a repair child', async () => {
   const source = await readFile(new URL('../src/wake-rework.mjs', import.meta.url), 'utf8')
-  assert.match(source, /DEFAULT_BRANCH: requiredEnv\('DEFAULT_BRANCH'\)/)
-  assert.match(source, /CONTROLLER_SHA: requiredEnv\('CONTROLLER_SHA'\)/)
-  assert.doesNotMatch(source, /CONTROLLER_REPOSITORY: requiredEnv/)
+  assert.match(source, /governorDecision/)
+  assert.match(source, /observationId: `comment-\$\{commentId\}`/)
+  assert.match(source, /CONTROLLER_REPOSITORY/)
+  assert.doesNotMatch(source, /dsh-repair\.mjs|runAgentWorker/)
 })
 
 test('a completed BLOCK publishes repair without being mistaken for reviewer infrastructure failure', async () => {
@@ -657,12 +663,12 @@ test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispat
   const source = await readFile(new URL('../src/recover-backlog.mjs', import.meta.url), 'utf8')
   assert.match(source, /async function wakeExactReview/)
   assert.match(source, /--add-label', 'automation\/review-ready/)
-  assert.match(source, /REVIEW_DISPATCH_TYPE/)
+  assert.match(source, /event_type=agent-review/)
   assert.match(source, /client_payload\[base_sha\]/)
   assert.match(source, /client_payload\[head_sha\]/)
 })
 
-test('review checkout contains the exact base and head before the Agent reads their diff', async () => {
+test('review checkout contains the exact base and head before Codex reads their diff', async () => {
   const workflow = await readFile(new URL('../.github/workflows/agent-review.yml', import.meta.url), 'utf8')
   const source = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
   assert.match(workflow, /fetch-depth: 0/)
@@ -683,20 +689,19 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.doesNotMatch(source, /requestReview\(updatedPullRequest\)/)
   assert.match(source, /hostCredentialEnvironment\(\)/)
   assert.match(source, /verifyGithubIdentity\(\{ config \}\)/)
-  assert.doesNotMatch(source, /actionsCredentialEnvironment\(\)/)
+  assert.match(source, /actionsCredentialEnvironment\(\)/)
   assert.doesNotMatch(source, /synchronize will request review/)
   assert.match(source, /'automation\/ci-baseline', 'automation\/repair-blocked'/)
   assert.match(source, /'--remove-label', label/)
   assert.match(source, /--add-label', 'automation\/review-ready'/)
-  assert.match(source, /REVIEW_DISPATCH_TYPE/)
+  assert.match(source, /event_type=agent-review/)
   assert.match(source, /client_payload\[base_sha\]/)
   assert.match(source, /client_payload\[head_sha\]/)
   assert.match(workflow, /DEFAULT_BRANCH: \$\{\{ github\.event\.repository\.default_branch \}\}/)
   assert.match(workflow, /runs-on: \[self-hosted, agent-change\]/)
   assert.match(workflow, /contents: read/)
-  assert.doesNotMatch(workflow, /GITHUB_TOKEN:/)
-  assert.doesNotMatch(workflow, /pull-requests: write/)
-  assert.doesNotMatch(workflow, /issues: write/)
+  assert.match(workflow, /pull-requests: write/)
+  assert.match(workflow, /issues: write/)
 })
 
 test('the shared process runner terminates output floods at a bounded byte limit', async () => {
@@ -714,20 +719,49 @@ test('agent failure classes separate backoff, infrastructure, protocol, and task
   assert.equal(classifyAgentFailure(new Error('invalid RPC receipt')), 'protocol')
   assert.equal(classifyAgentFailure(new Error('Tests still fail')), 'task')
   assert.equal(recordedFailureClass('- Failure class: `transport`'), 'transport')
+  const runValue = { id: 10, name: 'Agent Issue', event: 'repository_dispatch', conclusion: 'failure', updated_at: '2026-08-16T00:00:00Z' }
+  const jobs = [{ id: 20, name: 'change', conclusion: 'failure', steps: [
+    { number: 1, name: 'Prepare', conclusion: 'success' },
+    { number: 2, name: 'Run Worker', conclusion: 'failure' },
+  ] }]
+  const stable = workflowFailureSignature(runValue, jobs)
+  assert.equal(stable, workflowFailureSignature(
+    { ...runValue, id: 999, updated_at: '2026-08-16T01:00:00Z' },
+    [{ ...jobs[0], id: 888 }],
+  ))
+  assert.notEqual(stable, workflowFailureSignature(runValue, [{
+    ...jobs[0], steps: [{ number: 3, name: 'Publish PR', conclusion: 'failure' }],
+  }]))
 })
 
 test('unattended health combines a hosted queue watchdog, replica heartbeats, and real daily canaries', async () => {
   const target = await readFile(new URL('../templates/target/.github/workflows/agent-health.yml', import.meta.url), 'utf8')
   const pipeline = await readFile(new URL('../src/pipeline-health.mjs', import.meta.url), 'utf8')
   const watchdog = await readFile(new URL('../src/runner-watchdog.mjs', import.meta.url), 'utf8')
+  const maintenance = await readFile(new URL('../.github/workflows/controller-maintenance.yml', import.meta.url), 'utf8')
+  const maintenanceReadiness = await readFile(new URL('../.github/workflows/controller-maintenance-readiness.yml', import.meta.url), 'utf8')
   const runnerSupervisor = await readFile(new URL('../ops/runner-supervisor.ps1', import.meta.url), 'utf8')
   const webSupervisor = await readFile(new URL('../ops/dsh-web-host-supervisor.ps1', import.meta.url), 'utf8')
   const operations = await readFile(new URL('../ops/Automation.Operations.psm1', import.meta.url), 'utf8')
   assert.match(target, /runner-watchdog\.yml/)
+  assert.match(target, /fromJSON\(vars\.AGENT_AUTOMATION_REPLICA_HEALTH\)/)
+  assert.match(target, /replica_id: \$\{\{ matrix\.label \}\}/)
   assert.match(target, /29 3 \* \* \*/)
   assert.match(pipeline, /runAgentWorker/)
   assert.match(pipeline, /AGENT_READINESS_SKILL/)
+  assert.match(pipeline, /heartbeats/)
   assert.match(watchdog, /20 \* 60 \* 1000/)
+  assert.match(watchdog, /Controller Maintenance has no successful run/)
+  assert.match(watchdog, /automation%2Ffault/)
+  assert.match(watchdog, /bounded three-page snapshot/)
+  assert.match(maintenanceReadiness, /37 3 \* \* \*/)
+  assert.match(maintenanceReadiness, /READINESS_CANARY/)
+  assert.match(maintenance, /AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID/)
+  assert.doesNotMatch(maintenance, /runs-on: \[self-hosted, agent-maintenance\]/)
+  assert.match(maintenanceReadiness, /AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID/)
+  assert.match(maintenance, /^  actions: read$/m)
+  assert.match(maintenance, /^  contents: read$/m)
+  assert.doesNotMatch(maintenance, /^  (?:issues|pull-requests|checks): write$/m)
   assert.match(runnerSupervisor, /Write-OperationHeartbeat/)
   assert.match(runnerSupervisor, /\[Math\]::Pow\(2/)
   assert.match(webSupervisor, /Write-OperationHeartbeat/)
@@ -802,8 +836,25 @@ test('Codex review results do not depend on task metadata housekeeping', async (
 
 test('backlog Issue dispatch is not lost to GitHub token recursion suppression', async () => {
   const source = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
-  assert.match(source, /event_type=dsh-issue/)
-  assert.match(source, /client_payload\[issue_number\]/)
+  assert.match(source, /repositoryDispatchBody\(work\.request\)/)
+  assert.doesNotMatch(source, /event_type=dsh-issue/)
+})
+
+test('recovered infrastructure faults resume through an attested target workflow', async () => {
+  const target = await readFile(new URL('../templates/target/.github/workflows/agent-issues.yml', import.meta.url), 'utf8')
+  const reusable = await readFile(new URL('../.github/workflows/resume-fault.yml', import.meta.url), 'utf8')
+  const recovery = await readFile(new URL('../src/maintenance-recovery.mjs', import.meta.url), 'utf8')
+  const resume = await readFile(new URL('../src/resume-fault.mjs', import.meta.url), 'utf8')
+  assert.match(target, /automation_fault_recovered/)
+  assert.match(target, /resume-fault\.yml/)
+  assert.match(reusable, /contents: write/)
+  assert.match(reusable, /issues: write/)
+  assert.match(recovery, /event_type=automation_fault_recovered/)
+  assert.doesNotMatch(recovery, /--remove-label', 'automation\/paused'/)
+  assert.match(resume, /trustedFaultRecords/)
+  assert.match(resume, /attestedGovernorRecordBody/)
+  assert.match(resume, /event_type=agent_backlog_reconcile/)
+  assert.match(resume, /event_type=agent-review/)
 })
 
 test('a valid blocked Issue result becomes terminal state without recovery failure', async () => {
@@ -813,10 +864,11 @@ test('a valid blocked Issue result becomes terminal state without recovery failu
   assert.match(source, /no retry was scheduled/)
 })
 
-test('the Issue worker gives its own CI baseline handoff a deterministic branch', async () => {
+test('the Issue worker requires the exact Profile-bound WorkRequest branch', async () => {
   const source = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
-  assert.match(source, /baselineIssueWorkItem\(issue\)/)
-  assert.match(source, /\? \{ number: issueNumber \}/)
+  assert.match(source, /resolveAgentWorkDispatch\(/)
+  assert.match(source, /workRequest\.definitionHash/)
+  assert.doesNotMatch(source, /baselineIssueWorkItem|\^\\\[BUG\\\]/)
 })
 
 test('reviewer instructions come from the verified base rather than the pull request head', async () => {
@@ -982,6 +1034,9 @@ test('backlog dispatch leaves failed or active repairs for their explicit recove
 })
 
 test('backlog dispatch waits for open dependencies and skips trackers', () => {
+  const declaration = (workflow, dependsOn = []) => `<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify({
+    version: 2, dispatch: 'ready', workflow, dependsOn,
+  })}\n\`\`\``
   const issues = [
     {
       number: 1,
@@ -995,7 +1050,7 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
       number: 2,
       state: 'open',
       title: '[GUI-01] Architecture',
-      body: 'Branch: `gui/01-architecture`',
+      body: declaration('default'),
       author_association: 'OWNER',
       labels: [{ name: 'agent/dsh' }],
     },
@@ -1003,51 +1058,53 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
       number: 3,
       state: 'open',
       title: '[GUI-02] Shell',
-      body: 'Blocked by #2.\nBranch: `gui/02-shell`',
+      body: declaration('default', [2]),
       author_association: 'OWNER',
       labels: [],
     },
     {
       number: 11,
       state: 'open',
-      title: '[BUG] Static I/O error',
-      body: 'A focused bug report without a branch field.',
+      title: 'Static I/O error without an orchestration declaration',
+      body: 'A focused bug report without an agent-work block.',
       author_association: 'OWNER',
       labels: [],
     },
   ]
-  assert.deepEqual(selectBacklogWork({
+  assert.equal(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
-  }), { type: 'issue', number: 11 })
+  }), null)
 
   issues[1].labels = [{ name: 'agent/dsh-blocked' }]
-  assert.deepEqual(selectBacklogWork({
+  assert.equal(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
-  }), { type: 'issue', number: 11 })
+  }), null)
   issues[1].labels = [{ name: 'agent/dsh' }]
 
-  assert.deepEqual(selectBacklogWork({
+  assert.equal(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness',
     pullRequests: [{ body: 'Closes #2' }],
     issues,
-  }), { type: 'issue', number: 11 })
+  }), null)
 
   issues[1].state = 'closed'
-  assert.deepEqual(selectBacklogWork({
+  const selected = selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
-  }), { type: 'issue', number: 3 })
+  })
+  assert.equal(selected.type, 'issue')
+  assert.equal(selected.number, 3)
+  assert.equal(selected.work.workflow, 'default')
 })
 
 test('backlog dispatch selects a ready agent-work declaration after its dependencies close', () => {
   const declaration = {
-    version: 1,
+    version: 2,
     dispatch: 'ready',
-    role: 'change',
-    kind: 'integration',
+    workflow: 'default',
     branch: 'agent/integrate-ci-baseline',
     dependsOn: [39],
   }
-  const body = `Resolve the CI baseline cycle.\n\n<!-- agent-work:v1 -->\n\`\`\`json\n${JSON.stringify(declaration)}\n\`\`\``
+  const body = `Resolve the CI baseline cycle.\n\n<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify(declaration)}\n\`\`\``
   const workIssue = {
     number: 40,
     state: 'open',
@@ -1070,14 +1127,10 @@ test('backlog dispatch selects a ready agent-work declaration after its dependen
   }), null)
 
   dependency.state = 'closed'
-  assert.deepEqual(selectBacklogWork({
+  const selected = selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [dependency, workIssue],
-  }), {
-    type: 'issue',
-    number: 40,
-    role: 'change',
-    requestId: agentWorkRequestId(parseAgentWork(body)),
   })
+  assert.deepEqual(selected, { type: 'issue', number: 40, work: parseAgentWork(body) })
 
   workIssue.body = workIssue.body.replace('"ready"', '"hold"')
   assert.equal(selectBacklogWork({
@@ -1086,8 +1139,8 @@ test('backlog dispatch selects a ready agent-work declaration after its dependen
 })
 
 test('a later malformed work declaration cannot block an earlier ready Issue', () => {
-  const readyBody = '<!-- agent-work:v1 -->\n```json\n{"version":1,"dispatch":"ready","role":"change","kind":"implementation","dependsOn":[]}\n```'
-  const malformedBody = '<!-- agent-work:v1 -->\n```json\n{"version":1,"dispatch":"ready","role":"change","kind":"unknown","dependsOn":[]}\n```'
+  const readyBody = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"default","dependsOn":[]}\n```'
+  const malformedBody = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"../unknown","dependsOn":[]}\n```'
   assert.deepEqual(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness',
     pullRequests: [],
@@ -1095,12 +1148,36 @@ test('a later malformed work declaration cannot block an earlier ready Issue', (
       { number: 41, state: 'open', title: 'Broken declaration', body: malformedBody, author_association: 'OWNER', labels: [] },
       { number: 40, state: 'open', title: 'Ready work', body: readyBody, author_association: 'OWNER', labels: [] },
     ],
-  }), {
-    type: 'issue',
-    number: 40,
-    role: 'change',
-    requestId: agentWorkRequestId(parseAgentWork(readyBody)),
-  })
+  }), { type: 'issue', number: 40, work: parseAgentWork(readyBody) })
+})
+
+test('workflow coordination counts active work across labels and open pull requests', () => {
+  const body = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"default","dependsOn":[]}\n```'
+  const issues = [
+    { number: 1, state: 'open', body, labels: [{ name: 'agent/dsh' }] },
+    { number: 2, state: 'open', body, labels: [] },
+    { number: 3, state: 'open', body: body.replace('"default"', '"other"'), labels: [{ name: 'agent/dsh' }] },
+  ]
+  assert.deepEqual([...activeWorkflowIssueNumbers({
+    issues,
+    pullRequests: [{ body: 'Closes #2' }],
+    profileId: 'github-pr-cycle',
+    workflowId: 'default',
+  })], [1, 2])
+})
+
+test('workflow coordination ignores malformed declarations', () => {
+  const readyBody = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"default","dependsOn":[]}\n```'
+  const malformedBody = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"../unknown","dependsOn":[]}\n```'
+  assert.deepEqual([...activeWorkflowIssueNumbers({
+    issues: [
+      { number: 1, state: 'open', body: malformedBody, labels: [{ name: 'agent/dsh' }] },
+      { number: 2, state: 'open', body: readyBody, labels: [{ name: 'agent/dsh' }] },
+    ],
+    pullRequests: [],
+    profileId: 'github-pr-cycle',
+    workflowId: 'default',
+  })], [2])
 })
 
 test('backlog dispatch consumes the CI baseline Issue emitted by the repair Skill', () => {
@@ -1278,6 +1355,20 @@ test('parseReviewMessage reads a collapsible automation result after Chinese pro
   assert.deepEqual(review, { verdict: 'pass', summary: 'No blocking defects.', findings: [] })
 })
 
+test('blocking review protocol requires a controller-routable finding class', () => {
+  const payload = {
+    verdict: 'block',
+    summary: 'A current pull request defect blocks landing.',
+    findings: [{
+      class: 'product-pr', priority: 'P1', title: 'Unsafe default',
+      body: 'The changed default bypasses validation.', path: 'src/config.mjs', line: 2, excerpt: 'unsafe = true',
+    }],
+  }
+  const message = `Report\n<details>\n<summary>Automation result</summary>\n\n\`\`\`json\n${JSON.stringify(payload)}\n\`\`\`\n</details>`
+  assert.deepEqual(parseReviewMessage(message), payload)
+  assert.throws(() => parseReviewMessage(message.replace('"class":"product-pr",', '')), /invalid blocking finding/)
+})
+
 test('parseReviewMessage fails closed on inconsistent results', () => {
   assert.throws(() => parseReviewMessage('plain text'), /does not end/)
   assert.throws(() => parseReviewMessage('x\n<!-- dsh-review-result\n{"verdict":"block","summary":"Blocked.","findings":[]}\n-->'), /must contain/)
@@ -1297,31 +1388,52 @@ test('GitHub review fields reject non-English prose and Markdown path injection'
 })
 
 test('repository mappings fail closed on missing skills or soft review isolation', () => {
-  const changeCapabilities = { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false }
-  const reviewCapabilities = { skills: ['github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'], hardReadOnlyReview: true }
+  const changeCapabilities = { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: 'change' }
+  const reviewCapabilities = { skills: ['github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'], hardReadOnlyReview: true, trustDomain: 'review' }
+  const maintenanceCapabilities = { skills: ['controller-maintenance-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: 'maintenance' }
   const config = {
     repositories: ['owner/repository'],
     workers: {
       change: { adapter: 'dsh-web', capabilities: changeCapabilities },
       review: { adapter: 'codex-app', capabilities: reviewCapabilities },
+      maintenance: {
+        adapter: 'opencode-cli', mode: 'maintenance', capabilities: maintenanceCapabilities,
+        credentialIsolationDir: 'F:\\credentials\\maintenance', githubLogin: 'maintenance-bot',
+      },
     },
+    maintenanceWorkers: ['maintenance'],
     operations: { repositoryMappings: [{
       repository: 'owner/repository', changeWorker: 'change', reviewWorker: 'review',
     }] },
   }
   assert.doesNotThrow(() => validateWorkerCapabilities(config))
+  assert.doesNotThrow(() => validateMaintenanceWorkerCredentials(config))
+  assert.throws(() => validateMaintenanceWorkerCredentials({
+    ...config,
+    workers: { ...config.workers, maintenance: { ...config.workers.maintenance, credentialIsolationDir: '.\\shared' } },
+  }), /absolute path/)
   assert.throws(() => validateWorkerCapabilities({
     ...config,
     workers: { ...config.workers, review: { adapter: 'codex-app', capabilities: { ...reviewCapabilities, skills: ['github-pr-review'] } } },
   }), /lacks github-repository-supervision/)
   assert.throws(() => validateWorkerCapabilities({
     ...config,
-    workers: { ...config.workers, review: { adapter: 'dsh-web', capabilities: { skills: ['github-pr-review'], hardReadOnlyReview: true } } },
+    workers: { ...config.workers, review: { adapter: 'dsh-web', capabilities: { skills: ['github-pr-review'], hardReadOnlyReview: true, trustDomain: 'review' } } },
   }), /does not match Adapter isolation/)
   assert.throws(() => validateWorkerCapabilities({
     ...config,
     workers: { ...config.workers, review: { adapter: 'command-json', mode: 'review', capabilities: reviewCapabilities } },
   }), /does not implement declared skill/)
+})
+
+test('maintenance workers use a dedicated GitHub credential store', () => {
+  const environment = maintenanceCredentialEnvironment({ credentialIsolationDir: 'F:\\credentials\\maintenance' }, {}, {
+    PATH: 'path', GH_TOKEN: 'actions', GITHUB_TOKEN: 'actions', GH_CONFIG_DIR: 'shared',
+  })
+  assert.equal(environment.GH_CONFIG_DIR, 'F:\\credentials\\maintenance')
+  assert.equal(environment.GH_TOKEN, undefined)
+  assert.equal(environment.GITHUB_TOKEN, undefined)
+  assert.equal(environment.GH_PROMPT_DISABLED, '1')
 })
 
 test('blocking review findings bind an excerpt to an added exact-head line', async () => {
@@ -1331,7 +1443,7 @@ test('blocking review findings bind an excerpt to an added exact-head line', asy
     verdict: 'block',
     summary: 'A blocking defect is present.',
     findings: [{
-      priority: 'P1', title: 'Unsafe default', body: 'The new default bypasses validation.',
+      class: 'product-pr', priority: 'P1', title: 'Unsafe default', body: 'The new default bypasses validation.',
       path: 'src/config.mjs', line: 2, excerpt: 'unsafe = true',
     }],
   }
@@ -1365,11 +1477,9 @@ test('githubReviewBody stays English and binds the reviewed commits', () => {
     marker: '<!-- marker -->',
     base: 'base123',
     head: 'head456',
-    reviewer: { displayName: 'opencode-cli openai/gpt-5 (high)' },
   })
   assert.match(body, /Agent review: PASS/)
   assert.match(body, /head456.*base123/)
-  assert.match(body, /opencode-cli openai\/gpt-5 \(high\)/)
 })
 
 test('automatic repair requests are idempotent for one exact review pair', () => {

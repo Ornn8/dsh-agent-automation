@@ -137,6 +137,33 @@ foreach ($name in $workflowNames) {
   }
 }
 
+$profileRelativePath = '.github/agent-automation/profiles/github-pr-cycle.json'
+$profileTemplatePath = Join-Path $PSScriptRoot '..\profiles\github-pr-cycle\profile.json'
+if (-not (Test-Path -LiteralPath $profileTemplatePath -PathType Leaf)) {
+  throw "Missing bootstrap Profile: $profileTemplatePath"
+}
+$profileContent = Get-Content -LiteralPath $profileTemplatePath -Raw
+$profileDestination = Join-Path $resolvedRoot $profileRelativePath
+$profileDirty = ''
+if (Test-Path -LiteralPath $profileDestination) {
+  $profileDirty = & $git.Source -C $resolvedRoot status --porcelain -- $profileRelativePath
+  if ($LASTEXITCODE -ne 0) { throw "Could not inspect $profileRelativePath in the target checkout." }
+}
+if ($profileDirty -and -not $Update) {
+  throw "$profileRelativePath has local changes. Re-run with -Update to replace this exact generated Profile."
+}
+$profileCurrent = if (Test-Path -LiteralPath $profileDestination -PathType Leaf) {
+  Get-Content -LiteralPath $profileDestination -Raw
+} else {
+  $null
+}
+$plan += [pscustomobject]@{
+  RelativePath = $profileRelativePath
+  Destination = $profileDestination
+  Content = $profileContent
+  Action = if ($profileCurrent -ceq $profileContent) { 'unchanged' } elseif ($DryRun) { 'would write' } else { 'write' }
+}
+
 if ($DryRun) {
   $hostOs = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
     'windows'
@@ -172,15 +199,13 @@ if ($DryRun) {
   Write-Output "AUTOMATION_BOOTSTRAP_PLAN_JSON=$(ConvertTo-Json -InputObject $document -Depth 16 -Compress)"
 }
 
-if (-not $DryRun -and @($plan | Where-Object { $_.Action -eq 'write' }).Count) {
-  [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
-}
 foreach ($item in $plan) {
   if ($item.Action -eq 'unchanged') {
     Write-Output "unchanged $($item.RelativePath)"
   } elseif ($item.Action -eq 'would write') {
     Write-Output "would write $($item.RelativePath)"
   } else {
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $item.Destination)) | Out-Null
     [IO.File]::WriteAllText($item.Destination, $item.Content, $utf8)
     Write-Output "wrote $($item.RelativePath)"
   }

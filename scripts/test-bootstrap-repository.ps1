@@ -25,6 +25,7 @@ $PowerShell = (Get-Command pwsh -CommandType Application -ErrorAction Stop).Sour
 $Bootstrap = Join-Path $PSScriptRoot 'bootstrap-repository.ps1'
 $TemplateRoot = Join-Path $PSScriptRoot '..\templates\target\.github\workflows'
 $TemplateRoot = (Resolve-Path -LiteralPath $TemplateRoot).Path
+$ProfileTemplate = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\profiles\github-pr-cycle\profile.json')).Path
 $sha = '0123456789abcdef0123456789abcdef01234567'
 $repository = 'Ornn8/dsh-agent-automation'
 $upstreamRepository = 'deepseek-ai/deepseek-harness'
@@ -41,18 +42,26 @@ $names = @(
   'agent-recovery.yml'
 )
 $temp = Join-Path ([IO.Path]::GetTempPath()) "dsh-bootstrap-$([Guid]::NewGuid().ToString('N'))"
+$promotionRecord = Join-Path ([IO.Path]::GetTempPath()) "dsh-controller-release-$([Guid]::NewGuid().ToString('N')).json"
+$faultRecord = Join-Path ([IO.Path]::GetTempPath()) "dsh-controller-fault-$([Guid]::NewGuid().ToString('N')).json"
 
 try {
   [IO.Directory]::CreateDirectory($temp) | Out-Null
   & git -C $temp init -q
   if ($LASTEXITCODE -ne 0) { throw 'git init failed.' }
 
+  [IO.File]::WriteAllText($promotionRecord, (ConvertTo-Json -InputObject @{
+    version = 1
+    stableRevision = $sha
+    pendingRevisions = @()
+  }), [Text.UTF8Encoding]::new($false))
   $arguments = @(
     '-TargetCheckout', $temp,
     '-ControllerRepository', $repository,
     '-ControllerSha', $sha,
     '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
-    '-UpstreamRepository', $upstreamRepository
+    '-UpstreamRepository', $upstreamRepository,
+    '-PromotionRecordPath', $promotionRecord
   )
   $dryRunOutput = @(Invoke-Bootstrap -Arguments ($arguments + '-DryRun'))
   $planLine = @($dryRunOutput | Where-Object { $_ -is [string] -and $_.StartsWith('AUTOMATION_BOOTSTRAP_PLAN_JSON=') })
@@ -62,7 +71,11 @@ try {
   Assert-True (@($plan.workflows).Count -eq $names.Count) 'Bootstrap plan does not cover every target workflow.'
   Assert-True (@($plan.workflows | Where-Object action -eq 'would-write').Count -eq $names.Count) 'Bootstrap plan actions do not match an empty target checkout.'
   Assert-True (-not (Test-Path -LiteralPath (Join-Path $temp '.github\workflows\agent-health.yml'))) 'Dry run wrote a target workflow.'
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $temp '.github\agent-automation\profiles\github-pr-cycle.json'))) 'Dry run wrote a target Profile.'
   Invoke-Bootstrap -Arguments $arguments
+
+  $templateNames = @(Get-ChildItem -LiteralPath $TemplateRoot -File | ForEach-Object Name | Sort-Object)
+  Assert-True ((@($names | Sort-Object) -join ',') -ceq ($templateNames -join ',')) 'Bootstrap workflow manifest does not exactly match target templates.'
 
   foreach ($name in $names) {
     $actual = Get-Content -LiteralPath (Join-Path $temp ".github\workflows\$name") -Raw
@@ -73,6 +86,9 @@ try {
     $expected = $expected.Replace('{{UPSTREAM_REPOSITORY}}', $upstreamRepository)
     Assert-True ($actual -ceq $expected) "First render of $name did not exactly match its template."
   }
+  $renderedProfile = Get-Content -LiteralPath (Join-Path $temp '.github\agent-automation\profiles\github-pr-cycle.json') -Raw
+  $expectedProfile = Get-Content -LiteralPath $ProfileTemplate -Raw
+  Assert-True ($renderedProfile -ceq $expectedProfile) 'Rendered target Profile did not exactly match the bundled default Profile.'
 
   $rendered = ($names | ForEach-Object {
     Get-Content -LiteralPath (Join-Path $temp ".github\workflows\$_") -Raw
@@ -82,7 +98,7 @@ try {
   Assert-True ($rendered -match $immutablePin) 'Generated YAML omitted the immutable controller SHA.'
   Assert-True ($rendered -notmatch 'controller_sha|worker_id|runner_labels_json') 'Generated YAML exposes controller or runner selection to callers.'
   Assert-True ($rendered -notmatch 'with:\s*\r?\n\s*repository:') 'Generated YAML exposes a reusable repository input.'
-  Assert-True ($rendered -match 'role: review' -and $rendered -match 'role: change') 'Health workflow did not keep separate roles.'
+  Assert-True ($rendered -match 'fromJSON\(vars\.AGENT_AUTOMATION_REPLICA_HEALTH\)' -and $rendered -match 'replica_id: \$\{\{ matrix\.label \}\}') 'Health workflow did not use the exact configured replica matrix.'
   $healthWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-health.yml') -Raw
   Assert-True ($healthWorkflow -match 'runner-watchdog\.yml') 'Health workflow omitted the GitHub-hosted queue watchdog.'
   Assert-True ($healthWorkflow -match "(?m)^    - cron: '29 3 \* \* \*'\r?$") 'Health workflow omitted the daily provider canary.'
@@ -117,12 +133,12 @@ try {
   Assert-True ($reviewWorkflow -match '(?m)^  repository_dispatch:\r?$') 'Agent PR Review lacks the GitHub-token recursion-safe review trigger.'
   Assert-True ($reviewWorkflow -match '(?m)^    types: \[agent-review\]\r?$') 'Agent PR Review lacks the exact agent-review dispatch type.'
   Assert-True ($reviewWorkflow -notmatch 'statuses: write|dsh-review') 'Agent PR Review retained an obsolete review trigger or permission.'
-  Assert-True ($issuesWorkflow -match '(?m)^    types: \[dsh-issue\]\r?$') 'Agent Issues lacks the GitHub-token recursion-safe Issue trigger.'
+  Assert-True ($issuesWorkflow -match '(?m)^    types: \[agent_work_requested, agent_backlog_reconcile, automation_fault_recovered\]\r?$') 'Agent Issues lacks the generic WorkRequest, reconciliation, and fault-resume triggers.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
   Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR CI Repair, Agent PR Review\]\r?$') 'Agent Recovery must include each trusted model-backed entry workflow.'
   Assert-True ($recoveryWorkflow -match [Regex]::Escape('contains(fromJSON(''["failure", "cancelled", "timed_out", "startup_failure", "stale"]''), github.event.workflow_run.conclusion)')) 'Agent Recovery must retain every terminal infrastructure conclusion.'
 
-  & git -C $temp add .github/workflows
+  & git -C $temp add .github
   & git -C $temp -c user.name=Bootstrap -c user.email=bootstrap@example.invalid commit -qm 'bootstrap fixtures'
   if ($LASTEXITCODE -ne 0) { throw 'Could not commit bootstrap fixtures.' }
   Invoke-Bootstrap -Arguments $arguments
@@ -187,10 +203,67 @@ try {
     '-CiWorkflowNamesJson', '["CI","CI"]',
     '-UpstreamRepository', $upstreamRepository
   ) -ExpectedExitCode 1
+  $faultBoundSha = '1' * 40
+  [IO.File]::WriteAllText($faultRecord, (ConvertTo-Json -Depth 8 -InputObject @{
+    version = 1
+    status = 'verifying'
+    publishedSha = $faultBoundSha
+    repairPullRequest = 17
+    epochs = @(@{ number = 1 })
+    attempts = @(
+      @{ epoch = 1; kind = 'review'; outcome = 'succeeded' },
+      @{ epoch = 1; kind = 'ci'; outcome = 'succeeded' },
+      @{ epoch = 1; kind = 'promotion'; outcome = 'succeeded' }
+    )
+  }), [Text.UTF8Encoding]::new($false))
+  Invoke-Bootstrap -Arguments @(
+    '-TargetCheckout', $temp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', $faultBoundSha,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
+    '-UpstreamRepository', $upstreamRepository,
+    '-PromotionRecordPath', $promotionRecord,
+    '-FaultRecordPath', $faultRecord,
+    '-Update',
+    '-DryRun'
+  )
+  [IO.File]::WriteAllText($faultRecord, (Get-Content -LiteralPath $faultRecord -Raw).Replace('"status": "verifying"', '"status": "circuit-open"'), [Text.UTF8Encoding]::new($false))
+  Invoke-Bootstrap -Arguments @(
+    '-TargetCheckout', $temp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', $faultBoundSha,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
+    '-UpstreamRepository', $upstreamRepository,
+    '-PromotionRecordPath', $promotionRecord,
+    '-FaultRecordPath', $faultRecord,
+    '-Update',
+    '-DryRun'
+  ) -ExpectedExitCode 1
+  Invoke-Bootstrap -Arguments @(
+    '-TargetCheckout', $temp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', ('1' * 40),
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
+    '-UpstreamRepository', $upstreamRepository,
+    '-PromotionRecordPath', $promotionRecord
+  ) -ExpectedExitCode 1
+  [IO.File]::WriteAllText($promotionRecord, (ConvertTo-Json -InputObject @{
+    version = 1
+    stableRevision = $sha
+    pendingRevisions = @()
+    unexpected = $true
+  }), [Text.UTF8Encoding]::new($false))
+  Invoke-Bootstrap -Arguments $arguments -ExpectedExitCode 1
 
   Write-Output 'bootstrap-repository tests passed.'
 } finally {
   if (Test-Path -LiteralPath $temp) {
     Remove-Item -LiteralPath $temp -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $promotionRecord) {
+    Remove-Item -LiteralPath $promotionRecord -Force
+  }
+  if (Test-Path -LiteralPath $faultRecord) {
+    Remove-Item -LiteralPath $faultRecord -Force
   }
 }
