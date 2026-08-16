@@ -4,7 +4,9 @@ import {
   completeReviewCheck,
   failReviewCheck,
   hasNewReviewCheck,
+  parseReviewCheckIdentity,
   REVIEW_CHECK_NAME,
+  reviewCheckIdentity,
   startReviewCheck,
   trustedReviewCheckIds,
 } from '../src/review-check.mjs'
@@ -12,6 +14,11 @@ import {
 const repository = 'owner/repository'
 const head = 'a'.repeat(40)
 const runUrl = 'https://github.com/owner/repository/actions/runs/17'
+const identity = {
+  workflowId: 'repair',
+  stageId: 'review',
+  definitionHash: 'b'.repeat(64),
+}
 
 function recorder(stdout = '{}') {
   const calls = []
@@ -26,11 +33,11 @@ function recorder(stdout = '{}') {
 
 test('the controller creates and completes its exact-head review CheckRun', async () => {
   const created = recorder('{"id":91}')
-  const checkId = await startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl, execute: created.execute })
+  const checkId = await startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl, identity, execute: created.execute })
   assert.equal(checkId, 91)
   assert.deepEqual(created.calls[0][1], [
     'api', '--method', 'POST', `repos/${repository}/check-runs`,
-    '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=in_progress', '-f', `details_url=${runUrl}`, '-f', `external_id=${runUrl}`,
+    '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=in_progress', '-f', `details_url=${runUrl}`, '-f', `external_id=${reviewCheckIdentity(identity)}`,
     '-f', 'output[title]=Agent review in progress', '-f', 'output[summary]=Reviewing this exact pull request head.',
   ])
 
@@ -41,6 +48,14 @@ test('the controller creates and completes its exact-head review CheckRun', asyn
     '-f', 'status=completed', '-f', 'conclusion=success', '-f', `details_url=${runUrl}`,
     '-f', 'output[title]=Agent review success', '-f', 'output[summary]=Passed.',
   ])
+})
+
+test('review CheckRun identity binds the trusted Profile workflow and rejects malformed metadata', () => {
+  const external_id = reviewCheckIdentity(identity)
+  assert.deepEqual(parseReviewCheckIdentity({ external_id }), identity)
+  assert.equal(parseReviewCheckIdentity({ external_id: `${external_id}:extra` }), null)
+  assert.equal(parseReviewCheckIdentity({ external_id: 'https://github.com/owner/repository/actions/runs/17' }), null)
+  assert.throws(() => reviewCheckIdentity({ ...identity, workflowId: 'bad workflow' }), /incomplete/)
 })
 
 test('an infrastructure failure creates a terminal exact-head review CheckRun', async () => {

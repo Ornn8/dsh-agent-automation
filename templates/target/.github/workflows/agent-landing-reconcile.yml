@@ -23,4 +23,3 @@ jobs:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/reconcile-landing.yml@{{CONTROLLER_SHA}}
     with:
       profile_id: github-pr-cycle
-      workflow_id: default

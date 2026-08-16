@@ -625,6 +625,24 @@ test('a blocking review publishes an independent change work request', async () 
   assert.match(workflow, /job\.workflow_sha/)
 })
 
+test('a completed repair routes review and landing through the same trusted Profile workflow', async () => {
+  const repairSource = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')
+  const reviewCaller = await readFile(new URL('../templates/target/.github/workflows/agent-pr-review.yml', import.meta.url), 'utf8')
+  const landSource = await readFile(new URL('../src/land-pr.mjs', import.meta.url), 'utf8')
+  const landWorkflow = await readFile(new URL('../.github/workflows/land-pr.yml', import.meta.url), 'utf8')
+  const reconcileWorkflow = await readFile(new URL('../.github/workflows/reconcile-landing.yml', import.meta.url), 'utf8')
+
+  assert.match(repairSource, /event_type: 'agent-review'/)
+  assert.match(repairSource, /workflow_id: transportedRequest\.workflowId/)
+  assert.match(repairSource, /stage_id: cycle\.review\.id/)
+  assert.match(reviewCaller, /github\.event\.client_payload\.workflow_id \|\| 'default'/)
+  assert.match(reviewCaller, /!contains\(github\.event\.pull_request\.labels\.\*\.name, 'automation\/repairing'\)/)
+  assert.match(landSource, /parseReviewCheckIdentity/)
+  assert.match(landSource, /reviewIdentity\.workflowId/)
+  assert.doesNotMatch(landWorkflow, /workflow_id:|WORKFLOW_ID:/)
+  assert.doesNotMatch(reconcileWorkflow, /workflow_id:|WORKFLOW_ID:/)
+})
+
 test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {
   for (const name of ['dsh-repair.yml', 'pipeline-health.yml']) {
     const workflow = await readFile(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8')

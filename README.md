@@ -130,7 +130,7 @@ A same-repository, non-draft pull request queues the configured review Worker. T
 
 The Worker cannot execute pull-request code or inherit GitHub credentials.
 
-PASS and BLOCK bind the exact base and head SHAs. A changed head makes the result stale. BLOCK creates one idempotent repair WorkRequest for the change role.
+PASS and BLOCK bind the exact base and head SHAs. A changed head makes the result stale. BLOCK creates one idempotent repair WorkRequest for the change role. When that Worker advances the head, the Controller dispatches the next review with the same Profile workflow identity; the resulting CheckRun carries that identity so landing cannot silently fall back to another workflow.
 
 Failed CI and an explicit trusted rework request enter the same queue after independent GitHub-state validation.
 

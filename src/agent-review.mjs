@@ -155,6 +155,11 @@ const reviewCheckId = await startReviewCheck({
   repository,
   head: expectedHead,
   runUrl: requiredEnv('RUN_URL'),
+  identity: {
+    workflowId,
+    stageId,
+    definitionHash: profile.definitionHash,
+  },
   env: githubEnvironment,
 })
 await writeOutput('review_check_id', reviewCheckId)
