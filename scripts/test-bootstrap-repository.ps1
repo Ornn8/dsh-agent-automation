@@ -125,7 +125,7 @@ try {
     Assert-True ($issuesWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent Issues omitted caller permission $permission."
   }
   $landingWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-pr-land.yml') -Raw
-  foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: read', 'pull-requests: write')) {
+  foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: write', 'pull-requests: write')) {
     Assert-True ($landingWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent PR Landing omitted caller permission $permission."
   }
   $reviewWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-pr-review.yml') -Raw

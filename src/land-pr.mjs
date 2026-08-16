@@ -8,6 +8,7 @@ import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
+import { sameRepositoryClosingIssues } from './closing-issues.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const expectedHead = requiredEnv('HEAD_SHA')
@@ -47,8 +48,37 @@ if (pullRequestNumber === 0) {
 async function readPullRequest() {
   return ghJson([
     'pr', 'view', String(pullRequestNumber), '--repo', repository,
-    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,mergeStateStatus,url,body,labels',
+    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,mergeStateStatus,url,body,labels,closingIssuesReferences',
   ], 'pull request for landing')
+}
+
+async function closeLinkedIssues(pullRequest) {
+  const issueNumbers = sameRepositoryClosingIssues(pullRequest.closingIssuesReferences, repository)
+  for (const issueNumber of issueNumbers) {
+    const issue = await ghJson([
+      'issue', 'view', String(issueNumber), '--repo', repository, '--json', 'number,state,url',
+    ], `closing Issue #${issueNumber}`)
+    if (issue.number !== issueNumber
+      || issue.url !== `https://github.com/${repository}/issues/${issueNumber}`) {
+      throw new Error(`Closing Issue #${issueNumber} changed before mutation`)
+    }
+    if (issue.state === 'OPEN') {
+      await run(githubExecutable, [
+        'issue', 'close', String(issueNumber), '--repo', repository, '--reason', 'completed',
+      ], { env: githubEnvironment })
+    }
+  }
+  if (issueNumbers.length > 0) {
+    await run(githubExecutable, [
+      'api', `repos/${repository}/dispatches`, '--method', 'POST', '--input', '-',
+    ], {
+      env: githubEnvironment,
+      input: JSON.stringify({
+        event_type: 'agent_backlog_reconcile',
+        client_payload: { issue_number: 0 },
+      }),
+    })
+  }
 }
 
 async function readCheckRuns() {
@@ -74,6 +104,14 @@ async function readLatestReviewProof(pullRequest, checkRuns) {
 
 const pullRequest = await readPullRequest()
 pullRequest.repository = repository
+if (pullRequest.state === 'MERGED') {
+  if (pullRequest.baseRefName !== defaultBranch || pullRequest.headRefOid !== expectedHead) {
+    throw new Error(`Merged pull request #${pullRequestNumber} does not match the requested landing pair`)
+  }
+  await closeLinkedIssues(pullRequest)
+  process.stdout.write(`Reconciled closing Issues for merged pull request #${pullRequestNumber}.\n`)
+  process.exit(0)
+}
 if (pullRequest.labels?.some(label => label.name === 'automation/paused')) {
   process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: automation is paused.\n`)
   process.exit(0)
@@ -196,6 +234,7 @@ const merge = parseJson(mergeResult.stdout, 'pull request merge result')
 if (merge?.merged !== true || !/^[0-9a-f]{40}$/.test(merge.sha || '')) {
   throw new Error(`GitHub did not merge pull request #${pullRequestNumber}`)
 }
+await closeLinkedIssues(current)
 if (cycle.merge.deleteBranch && !current.isCrossRepository && current.headRefName !== defaultBranch) {
   try {
     await run(githubExecutable, [

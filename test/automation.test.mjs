@@ -646,6 +646,8 @@ test('a completed repair routes review and landing through the same trusted Prof
 
 test('landing uses the exact-head REST merge endpoint without GraphQL pull request expansion', async () => {
   const source = await readFile(new URL('../src/land-pr.mjs', import.meta.url), 'utf8')
+  const workflow = await readFile(new URL('../.github/workflows/land-pr.yml', import.meta.url), 'utf8')
+  const caller = await readFile(new URL('../templates/target/.github/workflows/agent-pr-land.yml', import.meta.url), 'utf8')
   assert.match(source, /pulls\/\$\{pullRequestNumber\}\/merge/)
   assert.match(source, /sha: expectedHead/)
   assert.match(source, /merge_method: cycle\.merge\.strategy/)
@@ -656,6 +658,12 @@ test('landing uses the exact-head REST merge endpoint without GraphQL pull reque
     'branch-protection mode must defer enforcement to GitHub without requiring Administration read access',
   )
   assert.doesNotMatch(source, /'pr', 'merge'/)
+  assert.match(source, /await closeLinkedIssues\(current\)/)
+  assert.match(source, /pullRequest\.state === 'MERGED'/)
+  assert.match(source, /event_type: 'agent_backlog_reconcile'/)
+  assert.match(source, /client_payload: \{ issue_number: 0 \}/)
+  assert.match(workflow, /issues: write/)
+  assert.match(caller, /issues: write/)
 })
 
 test('WorkRequest repository dispatch uses one extensible payload envelope', async () => {
