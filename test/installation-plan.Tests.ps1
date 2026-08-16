@@ -45,10 +45,12 @@ BeforeAll {
     $config.operations.logsRoot = Join-Path $fixtureRoot 'state/logs'
     $config.repositories = @('example/plan-fixture')
     $config.operations.repositoryMappings[0].repository = 'example/plan-fixture'
-    $config.operations.runner.artifacts | Add-Member -NotePropertyName 'linux-x64' -NotePropertyValue ([pscustomobject]@{
-      downloadUri = 'https://example.invalid/actions-runner-linux-x64.tar.gz'
-      sha256 = ('d' * 64)
-    }) -Force
+    foreach ($platform in @('windows-arm64', 'linux-x64', 'linux-arm64', 'macos-x64', 'macos-arm64')) {
+      $config.operations.runner.artifacts | Add-Member -NotePropertyName $platform -NotePropertyValue ([pscustomobject]@{
+        downloadUri = "https://example.invalid/actions-runner-$platform.bin"
+        sha256 = ('d' * 64)
+      }) -Force
+    }
     $config.operations.dshWebHost.enabled = $false
     [IO.File]::WriteAllText($Destination, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
     return $Destination
@@ -85,7 +87,7 @@ Describe 'Portable installation plan' {
     $plan = New-InstallationPlan -Loaded $loaded -Platform 'linux-x64' -HostName 'fixture-host'
 
     $loaded.Operations.runner.platform | Should -BeExactly 'linux-x64'
-    $plan.runnerPackage.downloadUri | Should -BeExactly 'https://example.invalid/actions-runner-linux-x64.tar.gz'
+    $plan.runnerPackage.downloadUri | Should -BeExactly 'https://example.invalid/actions-runner-linux-x64.bin'
   }
 
   It 'describes deterministic Linux runner, repository, path, and service intentions' {
