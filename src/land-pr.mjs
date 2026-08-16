@@ -122,6 +122,10 @@ if (!reviewProof) {
   process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: no trusted exact-pair review run is available.\n`)
   process.exit(0)
 }
+if (reviewProof.checkRun.status !== 'completed' || reviewProof.checkRun.conclusion !== 'success') {
+  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: the trusted exact-pair review did not pass.\n`)
+  process.exit(0)
+}
 const reviewIdentity = parseReviewCheckIdentity(reviewProof?.checkRun)
 if (!reviewIdentity
   || reviewIdentity.definitionHash !== profile.definitionHash) {
