@@ -9,11 +9,18 @@ permissions:
   actions: read
   checks: read
   contents: write
-  issues: read
+  issues: write
   pull-requests: write
 
 jobs:
+  backlog:
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dispatch-backlog.yml@{{CONTROLLER_SHA}}
+
+  review-reconcile:
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/reconcile-reviews.yml@{{CONTROLLER_SHA}}
+
   reconcile:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/reconcile-landing.yml@{{CONTROLLER_SHA}}
     with:
-      required_checks_json: ${{ vars.DSH_AUTOMATION_REQUIRED_CHECKS }}
+      profile_id: github-pr-cycle
+      workflow_id: default

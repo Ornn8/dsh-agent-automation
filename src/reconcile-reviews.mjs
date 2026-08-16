@@ -1,4 +1,5 @@
 import {
+  actionsCredentialEnvironment,
   hostCredentialEnvironment,
   loadConfig,
   parseJson,
@@ -8,7 +9,16 @@ import {
 } from './common.mjs'
 import { needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
 import { hasTrustedExactReviewRun, reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
-import { REVIEW_CHECK_NAME, REVIEW_DISPATCH_TYPE } from './review-authority.mjs'
+import { governorBudgetDecision, governorDecision, subjectStateVersion } from './governor-policy.mjs'
+import {
+  attestedGovernorRecordBody,
+  GOVERNOR_WORKFLOW_PATHS,
+  pullRequestGovernorSubject,
+  trustedGovernorRecords,
+} from './governor-state.mjs'
+import { createReviewRepairRequest, repositoryDispatchBody } from './work-request.mjs'
+import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
+import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
@@ -16,18 +26,122 @@ const config = await loadConfig()
 await verifyGithubIdentity({ config })
 const githubExecutable = config.ghExecutable
 const githubEnvironment = hostCredentialEnvironment()
+const actionsEnvironment = actionsCredentialEnvironment()
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
   workflowPath: requiredEnv('TRUSTED_REVIEW_WORKFLOW_PATH'),
 }
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
+const governorTrust = {
+  repository,
+  controllerRepository: trustedReview.controllerRepository,
+  controllerSha: trustedReview.controllerSha.toLowerCase(),
+  workflowPaths: GOVERNOR_WORKFLOW_PATHS,
+}
+const governorWriterTrust = {
+  ...governorTrust,
+  workflowPath: '.github/workflows/reconcile-reviews.yml',
+}
+delete governorWriterTrust.workflowPaths
+const governorRunId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
+const governorObservationId = `${governorRunId}:${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 const updatePollAttempts = 10
 const updatePollDelayMs = 1_000
 
 async function ghJson(args, description) {
   const result = await run(githubExecutable, args, { env: githubEnvironment })
   return parseJson(result.stdout, description)
+}
+
+async function targetProfile(profileId, revision) {
+  return loadTrustedWorkflowProfile({
+    repository,
+    revision,
+    profileId,
+    loadContent: async ({ path, revision: exactRevision }) => {
+      const content = await ghJson([
+        'api', '--method', 'GET', `repos/${repository}/contents/${path}`, '-f', `ref=${exactRevision}`,
+      ], `Profile ${profileId} at ${exactRevision}`)
+      if (content?.encoding !== 'base64' || typeof content.content !== 'string') {
+        throw new Error(`Profile ${profileId} is not a GitHub file`)
+      }
+      return Buffer.from(content.content.replace(/\s/g, ''), 'base64').toString('utf8')
+    },
+  })
+}
+
+async function actionsJson(args, description) {
+  const result = await run(githubExecutable, args, { env: actionsEnvironment })
+  return parseJson(result.stdout, description)
+}
+
+async function pullRequestGovernorRecords(number) {
+  const comments = (await actionsJson([
+    'api', `repos/${repository}/issues/${number}/comments?per_page=100`, '--paginate', '--slurp',
+  ], `pull request #${number} governor records`)).flat()
+  return trustedGovernorRecords({
+    comments,
+    trust: governorTrust,
+    loadRun: runId => actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], `governor workflow run ${runId}`),
+  })
+}
+
+async function writeGovernorRecord(number, record) {
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/issues/${number}/comments`, '--input', '-',
+  ], {
+    env: actionsEnvironment,
+    input: JSON.stringify({
+      body: attestedGovernorRecordBody(record, { ...governorWriterTrust, runId: governorRunId }),
+    }),
+  })
+}
+
+async function governTransition(pullRequest, transition, { limit, workIdentity } = {}) {
+  const subject = pullRequestGovernorSubject(pullRequest)
+  const stateVersion = subjectStateVersion(subject)
+  const records = await pullRequestGovernorRecords(pullRequest.number)
+  const decision = governorDecision({
+    transition, subject, stateVersion, observationId: governorObservationId, records,
+  })
+  if (decision.record) await writeGovernorRecord(pullRequest.number, decision.record)
+  if (!decision.execute) return { execute: false, action: decision.action }
+  if (limit) {
+    const budget = governorBudgetDecision({
+      transition,
+      subject: { type: subject.type, number: subject.number },
+      workIdentity,
+      observationId: governorObservationId,
+      limit,
+      records,
+    })
+    if (budget.record) await writeGovernorRecord(pullRequest.number, budget.record)
+    if (!budget.execute) {
+      if (budget.action !== 'pause') return { execute: false, action: budget.action }
+      await run(githubExecutable, [
+        'label', 'create', 'automation/paused', '--repo', repository,
+        '--description', 'Automatic governor budget exhausted', '--color', 'D93F0B',
+      ], { env: githubEnvironment }).catch(() => undefined)
+      await run(githubExecutable, [
+        'pr', 'edit', String(pullRequest.number), '--repo', repository,
+        '--add-label', 'automation/paused',
+      ], { env: githubEnvironment })
+      return { execute: false, action: 'pause' }
+    }
+  }
+  return { execute: true, subject, stateVersion }
+}
+
+async function markGovernorApplied(pullRequest, transition, governed) {
+  await writeGovernorRecord(pullRequest.number, {
+    version: 1,
+    status: 'applied',
+    transition,
+    subject: { type: governed.subject.type, number: governed.subject.number },
+    stateVersion: governed.stateVersion,
+    observationId: governorObservationId,
+  })
 }
 
 const summaries = await ghJson([
@@ -59,7 +173,7 @@ async function requestReview(pullRequest) {
   ], { env: githubEnvironment })
   await run(githubExecutable, [
     'api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', `event_type=${REVIEW_DISPATCH_TYPE}`,
+    '-f', 'event_type=agent-review',
     '-F', `client_payload[pull_request_number]=${pullRequest.number}`,
     '-f', `client_payload[base_sha]=${pullRequest.base.sha}`,
     '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
@@ -94,12 +208,19 @@ for (const summary of summaries.flat()) {
   if (pullRequest.draft
     || pullRequest.base?.ref !== defaultBranch
     || pullRequest.head?.repo?.full_name !== repository) continue
+  if (pullRequest.labels?.some(label => label.name === 'automation/paused')) continue
   if (needsDefaultBranchUpdate({ defaultBranch, defaultBranchHead, pullRequest })) {
+    const governed = await governTransition(pullRequest, 'base-reconcile', {
+      limit: 3,
+      workIdentity: `branch:${pullRequest.head.ref}`,
+    })
+    if (!governed.execute) continue
     await run(githubExecutable, [
       'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequest.number}/update-branch`,
       '-f', `expected_head_sha=${pullRequest.head.sha}`,
     ], { env: githubEnvironment })
     await waitForUpdatedPair(pullRequest)
+    await markGovernorApplied(pullRequest, 'base-reconcile', governed)
     reconciled += 1
     process.stdout.write(`Updated pull request #${pullRequest.number} from ${defaultBranch}; GitHub will deliver its new exact pair to CI and review listeners.\n`)
     continue
@@ -113,10 +234,60 @@ for (const summary of summaries.flat()) {
     'api', `repos/${repository}/commits/${pullRequest.head.sha}/check-runs`, '--paginate', '--slurp',
   ], `pull request #${summary.number} check runs`)
   const checkRuns = checkRunPages.flatMap(page => page.check_runs || [])
+  const subject = pullRequestGovernorSubject(pullRequest)
+  const stateVersion = subjectStateVersion(subject)
+  const governorRecords = await pullRequestGovernorRecords(pullRequest.number)
+  const pendingRecord = governorRecords.find(record => record.status === 'candidate'
+    && ['review-repair', 'workflow-recovery'].includes(record.transition)
+    && record.subject.type === 'pull-request'
+    && record.subject.number === pullRequest.number
+    && record.stateVersion === stateVersion)
+  const pendingTransition = pendingRecord?.transition
+  if (pendingTransition) {
+    const repairProfile = pendingTransition === 'review-repair'
+      ? await targetProfile('github-pr-cycle', pullRequest.base.sha)
+      : null
+    const repairLimit = repairProfile
+      ? resolveGithubPrCycle(repairProfile.definition, 'repair').change.retry?.limit
+      : 3
+    if (!Number.isSafeInteger(repairLimit)) throw new Error('Repair Profile must declare a bounded retry limit')
+    const governed = await governTransition(pullRequest, pendingTransition, {
+      limit: repairLimit,
+      workIdentity: `branch:${pullRequest.head.ref}`,
+    })
+    if (!governed.execute) continue
+    await markGovernorApplied(pullRequest, pendingTransition, governed)
+    if (pendingTransition === 'review-repair') {
+      if (pendingRecord.observationId.startsWith('comment-')) {
+        await run(githubExecutable, [
+          'api', '--method', 'POST', `repos/${repository}/dispatches`,
+          '-f', 'event_type=dsh-repair',
+          '-F', `client_payload[pr_number]=${pullRequest.number}`,
+          '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
+          '-f', `client_payload[request_id]=${pendingRecord.observationId}`,
+        ], { env: actionsEnvironment })
+      } else {
+        const request = createReviewRepairRequest({
+          ...repairProfile,
+          repository,
+          pullRequestNumber: pullRequest.number,
+          base: pullRequest.base.sha,
+          head: pullRequest.head.sha,
+        })
+        await run(githubExecutable, [
+          'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
+        ], { env: actionsEnvironment, input: JSON.stringify(repositoryDispatchBody(request)) })
+      }
+    } else {
+      await requestReview(pullRequest)
+    }
+    reconciled += 1
+    continue
+  }
   let reviewProof = null
   for (const checkRun of checkRuns) {
     const runId = reviewRunIdFromDetailsUrl(checkRun.details_url, repository)
-    if (!runId || checkRun.name !== REVIEW_CHECK_NAME) continue
+    if (!runId || checkRun.name !== 'agent/review') continue
     const workflowRun = await ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `review workflow run ${runId}`)
     const proof = { checkRun, run: workflowRun }
     if (hasTrustedExactReviewRun({ pullRequest: landingPullRequest, reviewProof: proof, trustedReview })) {

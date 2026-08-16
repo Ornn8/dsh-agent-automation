@@ -692,20 +692,19 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.doesNotMatch(source, /requestReview\(updatedPullRequest\)/)
   assert.match(source, /hostCredentialEnvironment\(\)/)
   assert.match(source, /verifyGithubIdentity\(\{ config \}\)/)
-  assert.doesNotMatch(source, /actionsCredentialEnvironment\(\)/)
+  assert.match(source, /actionsCredentialEnvironment\(\)/)
   assert.doesNotMatch(source, /synchronize will request review/)
   assert.match(source, /'automation\/ci-baseline', 'automation\/repair-blocked'/)
   assert.match(source, /'--remove-label', label/)
   assert.match(source, /--add-label', 'automation\/review-ready'/)
-  assert.match(source, /REVIEW_DISPATCH_TYPE/)
+  assert.match(source, /event_type=agent-review/)
   assert.match(source, /client_payload\[base_sha\]/)
   assert.match(source, /client_payload\[head_sha\]/)
   assert.match(workflow, /DEFAULT_BRANCH: \$\{\{ github\.event\.repository\.default_branch \}\}/)
   assert.match(workflow, /runs-on: \[self-hosted, agent-change\]/)
   assert.match(workflow, /contents: read/)
-  assert.doesNotMatch(workflow, /GITHUB_TOKEN:/)
-  assert.doesNotMatch(workflow, /pull-requests: write/)
-  assert.doesNotMatch(workflow, /issues: write/)
+  assert.match(workflow, /pull-requests: write/)
+  assert.match(workflow, /issues: write/)
 })
 
 test('the shared process runner terminates output floods at a bounded byte limit', async () => {
@@ -1375,11 +1374,9 @@ test('githubReviewBody stays English and binds the reviewed commits', () => {
     marker: '<!-- marker -->',
     base: 'base123',
     head: 'head456',
-    reviewer: { displayName: 'opencode-cli openai/gpt-5 (high)' },
   })
   assert.match(body, /Agent review: PASS/)
   assert.match(body, /head456.*base123/)
-  assert.match(body, /opencode-cli openai\/gpt-5 \(high\)/)
 })
 
 test('automatic repair requests are idempotent for one exact review pair', () => {

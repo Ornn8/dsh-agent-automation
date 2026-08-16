@@ -4,7 +4,9 @@ import {
   hasTrustedExactReviewRun,
   reviewRunIdFromCheckRun,
 } from './landing-policy.mjs'
-import { REVIEW_CHECK_NAME } from './review-authority.mjs'
+import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
+import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
+import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const expectedHead = requiredEnv('HEAD_SHA')
@@ -12,7 +14,8 @@ const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const githubEnvironment = actionsCredentialEnvironment()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
-const requiredCheckNames = parseJson(requiredEnv('REQUIRED_CHECKS_JSON'), 'required check names')
+const profileId = requiredEnv('PROFILE_ID')
+const workflowId = requiredEnv('WORKFLOW_ID')
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
@@ -22,12 +25,6 @@ const trustedReview = {
 if (!/^[0-9a-f]{40}$/i.test(expectedHead)) throw new Error('HEAD_SHA must be a full commit SHA')
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
 if (!Number.isSafeInteger(requestedNumber) || requestedNumber < 0) throw new Error('Invalid PR_NUMBER')
-if (!Array.isArray(requiredCheckNames) || requiredCheckNames.length < 1 || requiredCheckNames.length > 32
-  || new Set(requiredCheckNames).size !== requiredCheckNames.length
-  || requiredCheckNames.some(name => typeof name !== 'string' || !name.trim() || name.length > 100 || name === REVIEW_CHECK_NAME)) {
-  throw new Error('REQUIRED_CHECKS_JSON must name unique independent CI checks')
-}
-
 async function ghJson(args, description) {
   const result = await run(githubExecutable, args, { env: githubEnvironment })
   return parseJson(result.stdout, description)
@@ -50,7 +47,7 @@ if (pullRequestNumber === 0) {
 async function readPullRequest() {
   return ghJson([
     'pr', 'view', String(pullRequestNumber), '--repo', repository,
-    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefOid,mergeStateStatus,url,body',
+    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefOid,mergeStateStatus,url,body,labels',
   ], 'pull request for landing')
 }
 
@@ -63,7 +60,7 @@ async function readCheckRuns() {
 
 async function readLatestReviewProof(pullRequest, checkRuns) {
   const candidates = [...checkRuns]
-    .filter(checkRun => checkRun.name === REVIEW_CHECK_NAME)
+    .filter(checkRun => checkRun.name === 'agent/review')
     .sort((left, right) => (right.id || 0) - (left.id || 0))
   for (const checkRun of candidates) {
     const runId = reviewRunIdFromCheckRun(checkRun, repository)
@@ -77,11 +74,54 @@ async function readLatestReviewProof(pullRequest, checkRuns) {
 
 const pullRequest = await readPullRequest()
 pullRequest.repository = repository
+if (pullRequest.labels?.some(label => label.name === 'automation/paused')) {
+  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: automation is paused.\n`)
+  process.exit(0)
+}
+
+async function targetProfile(revision) {
+  return loadTrustedWorkflowProfile({
+    repository,
+    revision,
+    profileId,
+    loadContent: async ({ path, revision: exactRevision }) => {
+      const content = await ghJson([
+        'api', '--method', 'GET', `repos/${repository}/contents/${path}`, '-f', `ref=${exactRevision}`,
+      ], `Profile ${profileId} at ${exactRevision}`)
+      if (content?.encoding !== 'base64' || typeof content.content !== 'string') {
+        throw new Error(`Profile ${profileId} is not a GitHub file`)
+      }
+      return Buffer.from(content.content.replace(/\s/g, ''), 'base64').toString('utf8')
+    },
+  })
+}
+
+async function protectedChecks(checksStage) {
+  const protection = await ghJson([
+    'api', `repos/${repository}/branches/${encodeURIComponent(defaultBranch)}/protection/required_status_checks`,
+  ], `required checks for ${defaultBranch}`)
+  const configured = Array.isArray(protection?.checks)
+    ? protection.checks
+    : (protection?.contexts || []).map(context => ({ context, app_id: null }))
+  const independent = configured.filter(check => check?.context !== 'agent/review')
+  if (checksStage.source === 'branch-protection') return independent
+  return checksStage.names.map(name => {
+    const matching = independent.filter(check => check.context === name)
+    if (matching.length !== 1) throw new Error(`Profile check ${name} is not uniquely required by branch protection`)
+    return matching[0]
+  })
+}
 if (pullRequest.baseRefName !== defaultBranch) {
   process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: base branch is not ${defaultBranch}.\n`)
   process.exit(0)
 }
-const requiredChecks = requiredCheckNames.map(context => ({ context, app_id: 15368 }))
+const profile = await targetProfile(pullRequest.baseRefOid)
+const cycle = resolveGithubPrCycle(profile.definition, workflowId)
+if (cycle.merge.mode !== 'auto') {
+  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: Profile requires manual merge.\n`)
+  process.exit(0)
+}
+const requiredChecks = await protectedChecks(cycle.checks)
 
 const checkRuns = await readCheckRuns()
 const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)
@@ -94,6 +134,15 @@ if (!decision.ready) {
 
 const current = await readPullRequest()
 current.repository = repository
+if (current.labels?.some(label => label.name === 'automation/paused')) {
+  throw new Error(`Pull request #${pullRequestNumber} became paused before merge`)
+}
+requireEligibleWorkflowStage(
+  profile.definition,
+  workflowId,
+  cycle.merge.id,
+  [cycle.change.id, cycle.review.id, cycle.checks.id],
+)
 if (current.baseRefName !== defaultBranch) {
   throw new Error(`Pull request base changed before merge: expected ${defaultBranch}`)
 }
@@ -111,9 +160,12 @@ if (current.baseRefOid !== pullRequest.baseRefOid || !currentDecision.ready) {
   throw new Error(`Pull request or landing evidence changed before merge: ${currentDecision.reason}`)
 }
 
-await run(githubExecutable, [
+const mergeArguments = [
   'pr', 'merge', String(pullRequestNumber), '--repo', repository,
-  '--squash', '--delete-branch', '--match-head-commit', expectedHead,
+  `--${cycle.merge.strategy}`,
+  ...(cycle.merge.deleteBranch ? ['--delete-branch'] : []),
+  '--match-head-commit', expectedHead,
   '--body', current.body || '',
-], { env: githubEnvironment, tee: true })
+]
+await run(githubExecutable, mergeArguments, { env: githubEnvironment, tee: true })
 process.stdout.write(`Landed pull request #${pullRequestNumber} at exact head ${expectedHead}.\n`)
