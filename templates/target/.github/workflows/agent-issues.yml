@@ -4,9 +4,11 @@ on:
   push:
   workflow_dispatch:
   repository_dispatch:
-    types: [dsh-issue]
+    types: [agent_work_requested, agent_backlog_reconcile, automation_fault_recovered]
   issues:
     types: [opened, reopened, edited, closed, labeled]
+  issue_comment:
+    types: [created]
 
 permissions:
   actions: read
@@ -16,28 +18,50 @@ permissions:
   pull-requests: write
 
 jobs:
+  resume:
+    if: >-
+      github.event_name == 'issue_comment'
+      && !github.event.issue.pull_request
+      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      && github.event.comment.body == '/automation resume'
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/resume-subject.yml@{{CONTROLLER_SHA}}
+    with:
+      issue_number: ${{ github.event.issue.number }}
+      comment_id: ${{ github.event.comment.id }}
+
   dsh-backlog:
     if: >-
       (github.event_name == 'push'
         && github.ref_name == github.event.repository.default_branch)
       || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'repository_dispatch' && github.event.action == 'agent_backlog_reconcile')
       || (github.event_name == 'issues' && contains(fromJSON('["opened","reopened","edited","closed"]'), github.event.action))
       || (github.event_name == 'issues'
         && github.event.action == 'labeled'
         && github.event.label.name == 'agent/dsh-failed')
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dispatch-backlog.yml@{{CONTROLLER_SHA}}
 
+  fault-resume:
+    if: >-
+      github.event_name == 'repository_dispatch'
+      && github.event.action == 'automation_fault_recovered'
+      && github.event.client_payload.repository == github.repository
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/resume-fault.yml@{{CONTROLLER_SHA}}
+    with:
+      subject_type: ${{ github.event.client_payload.subject_type }}
+      subject_number: ${{ github.event.client_payload.subject_number }}
+      fault_issue_number: ${{ github.event.client_payload.fault_issue_number }}
+      fault_id: ${{ github.event.client_payload.fault_id }}
+
   dsh-issue:
     if: >-
       github.event_name == 'repository_dispatch'
-      || (github.event_name == 'issues'
-        && github.event.action == 'labeled'
-        && github.event.label.name == 'agent/dsh'
-        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+      && github.event.client_payload.version == 2
+      && github.event.client_payload.repository == github.repository
+      && github.event.client_payload.subject.type == 'issue'
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-issue.yml@{{CONTROLLER_SHA}}
     with:
-      issue_number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.issue_number || github.event.issue.number }}
-      request_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.request_id || format('label-{0}-{1}', github.run_id, github.run_attempt) }}
+      work_request: ${{ toJSON(github.event.client_payload) }}
 
   reconcile-reviews:
     if: >-

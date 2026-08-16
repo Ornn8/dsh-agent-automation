@@ -3,7 +3,6 @@ import { join, resolve } from 'node:path'
 import {
   hostCredentialEnvironment,
   githubLogin,
-  issueBranch,
   authenticatedMarker,
   authorizedIssueBranch,
   loadConfig,
@@ -18,25 +17,34 @@ import {
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
-import { baselineIssueWorkItem } from './baseline-issue.mjs'
-import { AGENT_ISSUE_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
+import { agentWorkPrompt } from './agent-work-result.mjs'
 import { openAgentWorkDependencies, resolveAgentWorkDispatch } from './agent-work.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
+import { subjectStateVersion, workflowStageTransition } from './governor-policy.mjs'
+import { GOVERNOR_WORKFLOW_PATHS, issueGovernorSubject, trustedGovernorRecords } from './governor-state.mjs'
+import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
+import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
+import { parseAgentWorkRequest } from './work-request.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
-const issueNumber = Number.parseInt(requiredEnv('ISSUE_NUMBER'), 10)
-const issueRequestId = requiredEnv('ISSUE_REQUEST_ID')
+const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
+const issueNumber = workRequest.subject.number
+const issueRequestId = workRequest.requestId
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const workerId = resolveRepositoryWorker(config, repository, requiredEnv('AGENT_ROLE'))
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
-const marker = '<!-- dsh-agent-run -->'
+const marker = '<!-- agent-worker-run -->'
+const governorTrust = {
+  repository,
+  controllerRepository: requiredEnv('CONTROLLER_REPOSITORY'),
+  workflowPaths: GOVERNOR_WORKFLOW_PATHS,
+}
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
-if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
-  throw new Error(`Invalid ISSUE_NUMBER: ${process.env.ISSUE_NUMBER}`)
+if (workRequest.repository !== repository || workRequest.subject.type !== 'issue') {
+  throw new Error('WorkRequest does not identify an Issue in the target repository')
 }
 
 async function ghJson(args, description) {
@@ -44,12 +52,29 @@ async function ghJson(args, description) {
   return parseJson(result.stdout, description)
 }
 
+async function targetProfile() {
+  return loadTrustedWorkflowProfile({
+    repository,
+    revision: workRequest.revision.base,
+    profileId: workRequest.profileId,
+    loadContent: async ({ path, revision }) => {
+      const content = await ghJson([
+        'api', '--method', 'GET', `repos/${repository}/contents/${path}`, '-f', `ref=${revision}`,
+      ], `Profile ${workRequest.profileId} at ${revision}`)
+      if (content?.encoding !== 'base64' || typeof content.content !== 'string') {
+        throw new Error(`Profile ${workRequest.profileId} is not a GitHub file`)
+      }
+      return Buffer.from(content.content.replace(/\s/g, ''), 'base64').toString('utf8')
+    },
+  })
+}
+
 await verifyGithubIdentity({ config })
 
 async function upsertStatus(body) {
-  const comments = await ghJson([
-    'api', `repos/${repository}/issues/${issueNumber}/comments`, '--paginate',
-  ], 'Issue comments')
+  const comments = (await ghJson([
+    'api', `repos/${repository}/issues/${issueNumber}/comments?per_page=100`, '--paginate', '--slurp',
+  ], 'Issue comments')).flat()
   const prior = comments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
   if (prior) {
     await run(config.ghExecutable, [
@@ -65,7 +90,7 @@ async function upsertStatus(body) {
 function statusBody(status, branch, detail, failureClass) {
   return [
     marker,
-    '### DSH agent run',
+    '### Agent worker run',
     '',
     `- Status: **${status}**`,
     `- Branch: \`${branch}\``,
@@ -73,7 +98,7 @@ function statusBody(status, branch, detail, failureClass) {
     ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
     `- Detail: ${detail}`,
     '',
-    '_DSH owns implementation, validation, commits, pushes, and the pull request._',
+    '_The selected change Worker owns implementation, validation, commits, pushes, and the pull request._',
   ].join('\n')
 }
 
@@ -85,16 +110,59 @@ if (!trustedAssociation(issue.author_association)) {
 if (!issue.labels?.some(label => label.name === 'agent/dsh')) {
   throw new Error(`Issue #${issueNumber} no longer has the exact agent/dsh label`)
 }
+if (issue.labels?.some(label => label.name === 'automation/paused')) {
+  throw new Error(`Issue #${issueNumber} is paused and requires an authorized resume`)
+}
+const defaultHead = await ghJson([
+  'api', `repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`,
+], `default branch ${defaultBranch}`)
+if (defaultHead?.sha !== workRequest.revision.base || workRequest.revision.head !== workRequest.revision.base) {
+  throw new Error(`WorkRequest base ${workRequest.revision.base} is stale for ${defaultBranch}`)
+}
+const profile = await targetProfile()
+if (profile.definitionHash !== workRequest.definitionHash) {
+  throw new Error('WorkRequest Profile hash does not match the trusted target revision')
+}
+const stage = resolveWorkflowStage(
+  profile.definition,
+  workRequest.workflowId,
+  workRequest.stageId,
+  'worker',
+)
+requireEligibleWorkflowStage(profile.definition, workRequest.workflowId, workRequest.stageId, [])
+if (stage.role !== workRequest.role) throw new Error('WorkRequest role does not match the trusted Stage')
+const workerId = resolveRepositoryWorker(config, repository, stage.role)
+const admissionComments = (await ghJson([
+  'api', `repos/${repository}/issues/${issueNumber}/comments?per_page=100`, '--paginate', '--slurp',
+], 'Issue governor records')).flat()
+const governorRecords = await trustedGovernorRecords({
+  comments: admissionComments,
+  trust: governorTrust,
+  loadRun: runId => ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `governor workflow run ${runId}`),
+})
+const governorSubject = issueGovernorSubject(issue)
+const governorStateVersion = subjectStateVersion(governorSubject)
+if (!governorRecords.some(record => record.status === 'applied'
+  && record.transition === workflowStageTransition(workRequest)
+  && record.subject.type === 'issue'
+  && record.subject.number === issueNumber
+  && record.stateVersion === governorStateVersion)) {
+  throw new Error(`Issue #${issueNumber} has no current controller-attested work admission`)
+}
 
-const agentDispatch = resolveAgentWorkDispatch(issue.body || '', issueNumber, issueRequestId)
+const agentDispatch = resolveAgentWorkDispatch(
+  issue.body || '',
+  issueNumber,
+  issueRequestId,
+  workRequest.definitionHash,
+)
 const agentWork = agentDispatch?.work
+if (!agentDispatch || agentWork.profile !== workRequest.profileId || agentWork.workflow !== workRequest.workflowId) {
+  throw new Error(`Issue #${issueNumber} no longer selects the dispatched Profile workflow`)
+}
 const branch = authorizedIssueBranch(
   issueNumber,
-  agentDispatch
-    ? agentDispatch.branch
-    : issueBranch(issue.body || '', /^\[BUG\]\s+/i.test(issue.title || '') || baselineIssueWorkItem(issue)
-      ? { number: issueNumber }
-      : undefined),
+  agentDispatch.branch,
   defaultBranch,
 )
 const existing = await ghJson([
@@ -159,7 +227,7 @@ try {
     ], { tee: true })
   }
 
-  const prompt = agentWorkPrompt(AGENT_ISSUE_SKILL, {
+  const prompt = agentWorkPrompt(stage.procedure, {
     kind: 'issue',
     repository,
     issueNumber,
@@ -176,7 +244,7 @@ try {
       cwd: checkoutPath,
       title: `[Agent: ${workerId}] 执行 Issue #${issueNumber}`,
       prompt,
-      requiredSkill: AGENT_ISSUE_SKILL,
+      requiredSkill: stage.procedure,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
       onStarted: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible ${workerId} session: ${sessionId}.`)),

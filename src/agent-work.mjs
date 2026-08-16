@@ -1,84 +1,98 @@
 import { createHash } from 'node:crypto'
 import { validateIssueBranch } from './common.mjs'
+import { DEFAULT_PROFILE_ID } from './workflow-profile.mjs'
 
-const MARKER = '<!-- agent-work:v1 -->'
-const REQUIRED_FIELDS = ['version', 'dispatch', 'role', 'kind', 'dependsOn']
-const ALLOWED_FIELDS = new Set([...REQUIRED_FIELDS, 'branch'])
-const KINDS = new Set(['implementation', 'bug-fix', 'integration', 'documentation'])
+const MARKER = '<!-- agent-work:v2 -->'
+const REQUIRED_FIELDS = ['version', 'dispatch', 'workflow', 'dependsOn']
+const ALLOWED_FIELDS = new Set([...REQUIRED_FIELDS, 'profile', 'branch'])
+const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+const DEFINITION_HASH = /^[0-9a-f]{64}$/
 
 function validateDependencies(value) {
   if (!Array.isArray(value)
     || value.length > 100
     || value.some(number => !Number.isSafeInteger(number) || number < 1)
     || new Set(value).size !== value.length) {
-    throw new Error('agent-work:v1 dependsOn must contain unique positive Issue numbers')
+    throw new Error('agent-work:v2 dependsOn must contain unique positive Issue numbers')
   }
   return value
 }
 
-/** Parse the machine-readable agent work declaration from an Issue body. */
+function identifier(value, name) {
+  if (typeof value !== 'string' || !ID.test(value)) {
+    throw new Error(`agent-work:v2 ${name} must be an identifier of at most 64 characters`)
+  }
+  return value
+}
+
+/** Parse the machine-readable orchestration declaration from an Issue body. */
 export function parseAgentWork(body) {
   const source = String(body || '')
   const markers = source.split(MARKER).length - 1
   if (markers === 0) return null
-  if (markers !== 1) throw new Error('An Issue must contain exactly one agent-work:v1 declaration')
+  if (markers !== 1) throw new Error('An Issue must contain exactly one agent-work:v2 declaration')
 
   const markerAt = source.indexOf(MARKER)
   const fenced = source.slice(markerAt + MARKER.length)
     .match(/^\s*```json\s*\r?\n([\s\S]*?)\r?\n```/)
-  if (!fenced) throw new Error('agent-work:v1 must be followed by one JSON code block')
-  if (fenced[1].length > 4096) throw new Error('agent-work:v1 JSON exceeds 4096 characters')
+  if (!fenced) throw new Error('agent-work:v2 must be followed by one JSON code block')
+  if (fenced[1].length > 4096) throw new Error('agent-work:v2 JSON exceeds 4096 characters')
 
   let value
   try {
     value = JSON.parse(fenced[1])
   } catch {
-    throw new Error('agent-work:v1 must contain valid JSON')
+    throw new Error('agent-work:v2 must contain valid JSON')
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('agent-work:v1 JSON must be an object')
+    throw new Error('agent-work:v2 JSON must be an object')
   }
   for (const key of Object.keys(value)) {
-    if (!ALLOWED_FIELDS.has(key)) throw new Error(`agent-work:v1 has unknown field ${key}`)
+    if (!ALLOWED_FIELDS.has(key)) throw new Error(`agent-work:v2 has unknown field ${key}`)
   }
   for (const key of REQUIRED_FIELDS) {
-    if (!Object.hasOwn(value, key)) throw new Error(`agent-work:v1 is missing required field ${key}`)
+    if (!Object.hasOwn(value, key)) throw new Error(`agent-work:v2 is missing required field ${key}`)
   }
-  if (value.version !== 1) throw new Error('agent-work:v1 version must be 1')
-  if (!['ready', 'hold'].includes(value.dispatch)) throw new Error('agent-work:v1 dispatch must be ready or hold')
-  if (value.role !== 'change') throw new Error('agent-work:v1 role must be change')
-  if (!KINDS.has(value.kind)) throw new Error('agent-work:v1 kind is unsupported')
+  if (value.version !== 2) throw new Error('agent-work:v2 version must be 2')
+  if (!['ready', 'hold'].includes(value.dispatch)) throw new Error('agent-work:v2 dispatch must be ready or hold')
 
-  const result = {
-    version: value.version,
+  return {
+    version: 2,
     dispatch: value.dispatch,
-    role: value.role,
-    kind: value.kind,
+    profile: Object.hasOwn(value, 'profile')
+      ? identifier(value.profile, 'profile')
+      : DEFAULT_PROFILE_ID,
+    workflow: identifier(value.workflow, 'workflow'),
     ...(Object.hasOwn(value, 'branch') ? { branch: validateIssueBranch(value.branch) } : {}),
     dependsOn: validateDependencies(value.dependsOn),
   }
-  return result
 }
 
-/** Return the stable dispatch identity for one validated agent-work declaration. */
-export function agentWorkRequestId(work) {
-  const digest = createHash('sha256').update(JSON.stringify(work)).digest('hex').slice(0, 32)
+/** Return the stable dispatch identity bound to the exact trusted Profile definition. */
+export function agentWorkRequestId(work, definitionHash) {
+  if (!DEFINITION_HASH.test(definitionHash || '')) {
+    throw new Error('agent-work:v2 request identity requires a Workflow Definition hash')
+  }
+  const digest = createHash('sha256')
+    .update(JSON.stringify({ work, definitionHash }))
+    .digest('hex')
+    .slice(0, 32)
   return `agent-work-${digest}`
 }
 
-/** Resolve the work branch for one ready agent-work declaration. */
+/** Resolve the work branch for one ready orchestration declaration. */
 export function agentWorkBranch(work, issueNumber) {
-  if (work?.dispatch !== 'ready') throw new Error('agent-work:v1 is not ready for dispatch')
+  if (work?.dispatch !== 'ready') throw new Error('agent-work:v2 is not ready for dispatch')
   if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) throw new Error('Issue number must be positive')
   return work.branch || `agent/issue-${issueNumber}`
 }
 
-/** Bind a queued request id to the current live agent-work declaration. */
-export function resolveAgentWorkDispatch(body, issueNumber, requestId) {
+/** Bind a queued request id to the current live declaration and trusted Profile hash. */
+export function resolveAgentWorkDispatch(body, issueNumber, requestId, definitionHash) {
   const work = parseAgentWork(body)
   if (String(requestId || '').startsWith('agent-work-')) {
-    if (!work || requestId !== agentWorkRequestId(work)) {
-      throw new Error(`Issue #${issueNumber} agent-work:v1 changed after dispatch`)
+    if (!work || requestId !== agentWorkRequestId(work, definitionHash)) {
+      throw new Error(`Issue #${issueNumber} agent-work:v2 or its Profile changed after dispatch`)
     }
   }
   return work ? { work, branch: agentWorkBranch(work, issueNumber) } : null
@@ -91,7 +105,7 @@ export async function openAgentWorkDependencies(work, readIssue) {
     const expectedNumber = work.dependsOn[index]
     if (issue?.number !== expectedNumber || issue.pull_request
       || !['open', 'closed'].includes(issue.state)) {
-      throw new Error(`agent-work:v1 dependency #${expectedNumber} must reference an Issue`)
+      throw new Error(`agent-work:v2 dependency #${expectedNumber} must reference an Issue`)
     }
     return issue
   }).filter(issue => issue.state === 'open').map(issue => issue.number)

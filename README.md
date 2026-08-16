@@ -42,13 +42,12 @@ Acceptance criteria:
 - The saved preference survives a restart.
 - Existing light-mode behavior remains unchanged.
 
-<!-- agent-work:v1 -->
+<!-- agent-work:v2 -->
 ```json
 {
-  "version": 1,
+  "version": 2,
   "dispatch": "ready",
-  "role": "change",
-  "kind": "implementation",
+  "workflow": "default",
   "dependsOn": []
 }
 ```
@@ -113,12 +112,11 @@ The complete install, migration, failure-injection, and removal procedures are i
 
 ### Issue work
 
-The `agent-work:v1` declaration is routing data, not the task description. Issue title, prose, and acceptance criteria remain the human-readable source of work.
+The `agent-work:v2` declaration is routing data, not the task description. Issue title, prose, and acceptance criteria remain the human-readable source of work.
 
-- Required fields: `version`, `dispatch`, `role`, `kind`, and `dependsOn`.
+- Required fields: `version`, `dispatch`, `workflow`, and `dependsOn`.
 - `dispatch` is `ready` or `hold`; `dispatch: "hold"` does not start a Worker.
-- The current role is `change`.
-- Supported kinds are `implementation`, `bug-fix`, `integration`, and `documentation`.
+- `workflow` selects a workflow from the trusted repository Profile; `default` selects the bundled GitHub pull-request cycle.
 - `dependsOn` contains unique open Issue numbers. Work waits until they close.
 - Optional `branch` defaults to `agent/issue-<number>`.
 
@@ -144,6 +142,10 @@ Landing is model-free. It requires:
 4. The CheckRun's workflow run proves the exact repository, base, head, controller workflow path, and pinned controller SHA.
 
 Comments, labels, and legacy commit statuses are audit projections; none can authorize a merge.
+
+### Profiles and Governor
+
+The trusted repository Profile under `.github/agent-automation/profiles/` owns product workflow stages, procedures, coordination, checks, and merge behavior. The Controller keeps exact revision validation, independent review, capability enforcement, bounded budgets, and merge safety fixed.
 
 ### Supervision and recovery
 

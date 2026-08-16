@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  MAX_RECOVERY_ATTEMPTS,
   recordedCiWorkflow,
   recoveryDecision,
-  recoveryMarkerBody,
   trustedFailedAgentRun,
 } from '../src/recovery-policy.mjs'
 
@@ -63,17 +61,6 @@ test('recovery binds the failed run to one current PR head and never trusts labe
   }).action, 'ignore')
 })
 
-test('recovery caps exact subjects at three durable attempts without recursive model calls', () => {
-  const attempts = Array.from({ length: MAX_RECOVERY_ATTEMPTS }, (_, index) => ({ attempt: index + 1 }))
-  const decision = recoveryDecision({
-    run: run({ name: 'Agent Issues', referenced_workflows: [{ path: `${controller}/.github/workflows/dsh-issue.yml@${sha}`, sha }] }), repository, trust: { controllerRepository: controller, controllerSha: sha },
-    subject: { type: 'issue', number: 7 },
-    current: { state: 'open', labels: [{ name: 'agent/dsh-failed' }] }, attempts,
-  })
-  assert.deepEqual(decision, { action: 'dead-letter', attempt: 3 })
-  assert.match(recoveryMarkerBody({ type: 'issue', number: 7 }, 3, 81, 'dead-letter', repository), /Status: \*\*dead-letter\*\*/)
-})
-
 test('recovery backs off transport failures and dead-letters auth, quota, or protocol failures', () => {
   const arguments_ = {
     run: run(), repository, trust: { controllerRepository: controller, controllerSha: sha },
@@ -110,14 +97,14 @@ test('a trusted intentional review BLOCK never schedules a second review, while 
   const subject = { type: 'pull-request', number: 12, base, head }
   const intentionalBlock = [{
     name: 'agent-review / agent/review', conclusion: 'failure', steps: [
-      { name: 'Review exact PR head with Agent', conclusion: 'success' },
+      { name: 'Review exact PR head with Codex', conclusion: 'success' },
       { name: 'Publish an independent change work request', conclusion: 'success' },
       { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
     ],
   }]
   const reviewerInfrastructureFailure = [{
     name: 'agent-review / agent/review', conclusion: 'failure', steps: [
-      { name: 'Review exact PR head with Agent', conclusion: 'failure' },
+      { name: 'Review exact PR head with Codex', conclusion: 'failure' },
     ],
   }]
   const arguments_ = {
@@ -138,7 +125,7 @@ test('a trusted intentional review BLOCK never schedules a second review, while 
     ...arguments_,
     jobs: reviewerInfrastructureFailure,
     attempts: [{ attempt: 1 }, { attempt: 2 }, { attempt: 3 }],
-  }), { action: 'dead-letter', attempt: 3 })
+  }), { action: 'retry', attempt: 4, requestId: 'recovery-81-4' })
   assert.deepEqual(recoveryDecision({
     ...arguments_,
     run: { ...reviewRun, head_repository: { full_name: 'fork/repository' } },

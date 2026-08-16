@@ -1,7 +1,6 @@
 import { REVIEW_WORKFLOW_PATH } from './review-authority.mjs'
 
 const FULL_SHA = /^[0-9a-f]{40}$/
-export const MAX_RECOVERY_ATTEMPTS = 3
 const RECOVERABLE_CONCLUSIONS = new Set([
   'failure', 'cancelled', 'timed_out', 'startup_failure', 'stale',
 ])
@@ -75,7 +74,7 @@ export function intentionalReviewBlock(run, jobs) {
   if (run?.conclusion !== 'failure') return false
   return jobs?.some(job => job.name === 'agent-review / agent/review'
     && job.conclusion === 'failure'
-    && job.steps?.some(step => step.name === 'Review exact PR head with Agent' && step.conclusion === 'success')
+    && job.steps?.some(step => step.name === 'Review exact PR head with Codex' && step.conclusion === 'success')
     && job.steps?.some(step => step.name === 'Publish an independent change work request' && step.conclusion === 'success')
     && job.steps?.some(step => step.name === 'Preserve the blocking review conclusion' && step.conclusion === 'failure'))
 }
@@ -91,7 +90,6 @@ export function recoveryDecision({ run, jobs, repository, trust, subject, curren
   if (['auth-quota', 'protocol'].includes(failureClass)) {
     return { action: 'dead-letter', attempt, reason: failureClass }
   }
-  if (attempt >= MAX_RECOVERY_ATTEMPTS) return { action: 'dead-letter', attempt }
   const next = attempt + 1
   const decision = {
     action: 'retry',

@@ -3,15 +3,12 @@ name: DSH Issue Agent
 on:
   workflow_call:
     inputs:
-      issue_number:
-        required: true
-        type: number
-      request_id:
+      work_request:
         required: true
         type: string
 
 concurrency:
-  group: dsh-issue-${{ github.repository }}-${{ inputs.issue_number }}
+  group: dsh-issue-${{ github.repository }}-${{ fromJSON(inputs.work_request).subject.number }}
   cancel-in-progress: false
 
 jobs:
@@ -33,11 +30,9 @@ jobs:
       - name: Execute Issue with DSH
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
-          ISSUE_REQUEST_ID: ${{ inputs.request_id }}
+          WORK_REQUEST_JSON: ${{ inputs.work_request }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           CONTROLLER_SHA: ${{ job.workflow_sha }}
-          AGENT_ROLE: change
         run: node controller/src/dsh-issue.mjs

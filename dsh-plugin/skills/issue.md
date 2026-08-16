@@ -1,4 +1,4 @@
-The invoking user message contains a JSON WorkRequest after `/github-issue-work`. It names `repository`, `issueNumber`, `defaultBranch`, and `branch`. Its optional `work` object is the validated `agent-work:v1` routing declaration. Treat those fields as controller-supplied routing data, then verify the live GitHub state yourself. The live Issue prose, not the routing object, defines the requested implementation and acceptance criteria.
+The invoking user message contains a JSON WorkRequest after `/github-issue-work`. It names `repository`, `issueNumber`, `defaultBranch`, and `branch`. Its `work` object is the validated `agent-work:v2` Profile workflow selection. Treat those fields as controller-supplied routing data, then verify the live GitHub state yourself. The live Issue prose, not the routing object, defines the requested implementation and acceptance criteria.
 
 Use the current checkout and complete the Issue end to end. Read the live Issue, its comments, repository instructions, and the current diff before editing. Work only on the declared branch. Do not delegate the implementation or wait for another agent.
 

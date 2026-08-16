@@ -1,8 +1,18 @@
 import { actionsCredentialEnvironment, authenticatedMarker, parseJson, requiredEnv, run, trustedAssociation } from './common.mjs'
 import { recordedCiWorkflow, recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
-import { recordedFailureClass } from './failure-classification.mjs'
+import { recordedFailureClass, workflowFailureSignature } from './failure-classification.mjs'
 import { REVIEW_CHECK_NAME, REVIEW_DISPATCH_TYPE } from './review-authority.mjs'
+import { faultIdentity } from './fault-record.mjs'
+import { faultProjectionBody, faultProjectionMarker } from './fault-projection.mjs'
+import { governorBudgetDecision, governorDecision, subjectStateVersion } from './governor-policy.mjs'
+import {
+  attestedGovernorRecordBody,
+  GOVERNOR_WORKFLOW_PATHS,
+  issueGovernorSubject,
+  pullRequestGovernorSubject,
+  trustedGovernorRecords,
+} from './governor-state.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('RECOVERY_SOURCE_RUN_ID')
@@ -10,14 +20,155 @@ const controllerRepository = requiredEnv('TRUSTED_CONTROLLER_REPOSITORY')
 const controllerSha = requiredEnv('TRUSTED_CONTROLLER_SHA')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const environment = actionsCredentialEnvironment()
+const governorRunId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
+const governorTrust = {
+  repository,
+  controllerRepository,
+  workflowPaths: GOVERNOR_WORKFLOW_PATHS,
+}
+const governorWriterTrust = {
+  repository,
+  controllerRepository,
+  controllerSha,
+  workflowPath: '.github/workflows/recover-backlog.yml',
+}
 
 async function ghJson(args, description) {
   const result = await run(githubExecutable, args, { env: environment })
   return parseJson(result.stdout, description)
 }
 
-async function pages(path, description) {
-  return (await ghJson(['api', path, '--paginate', '--slurp'], description)).flat()
+function paginatedPath(path, page) {
+  const endpoint = new URL(path, 'https://api.github.invalid/')
+  endpoint.searchParams.set('per_page', '100')
+  endpoint.searchParams.set('page', String(page))
+  return `${endpoint.pathname.replace(/^\//, '')}?${endpoint.searchParams}`
+}
+
+async function pages(path, description, field) {
+  const values = []
+  for (let page = 1; page <= 3; page += 1) {
+    const payload = await ghJson(['api', paginatedPath(path, page)], description)
+    const pageValues = field === undefined ? payload : payload?.[field]
+    if (!Array.isArray(pageValues)) throw new Error(`${description} did not return a page array`)
+    values.push(...pageValues)
+    if (pageValues.length < 100 || (field && Number.isSafeInteger(payload.total_count) && values.length >= payload.total_count)) return values
+  }
+  throw new Error(`${description} exceeded the bounded three-page snapshot`)
+}
+
+async function upsertInfrastructureFault({ role, subject, failureClass, errorCode, failureSignature }) {
+  if (!['transport', 'auth-quota', 'protocol', 'host', 'permissions'].includes(failureClass)) return
+  const observation = {
+    repository,
+    component: role === 'review' ? 'review-worker' : 'change-worker',
+    operation: `recover-${role}`,
+    failureClass,
+    errorCode,
+    failureSignature,
+    rootRequestIds: [`${subject.type}-${subject.number}`],
+    sourceRunId: Number.parseInt(sourceRunId, 10),
+    projectionRunId: governorRunId,
+    controllerRepository,
+    controllerSha,
+  }
+  const faultId = faultIdentity(observation)
+  const issues = (await pages(`repos/${repository}/issues?state=all&labels=automation%2Ffault&per_page=100`, 'infrastructure faults'))
+    .filter(issue => !issue.pull_request)
+  const existing = issues.find(issue => String(issue.body || '').includes(faultProjectionMarker(faultId)))
+  if (existing) {
+    await run(githubExecutable, ['api', '--method', 'PATCH', `repos/${repository}/issues/${existing.number}`, '--input', '-'], {
+      env: environment,
+      input: JSON.stringify({ body: faultProjectionBody(observation), state: 'open' }),
+    })
+    return
+  }
+  await run(githubExecutable, ['label', 'create', 'automation/fault', '--repo', repository,
+    '--description', 'Controller-owned infrastructure fault projection', '--color', 'B60205'], { env: environment }).catch(() => undefined)
+  await run(githubExecutable, ['api', '--method', 'POST', `repos/${repository}/issues`, '--input', '-'], {
+    env: environment,
+    input: JSON.stringify({
+      title: `[Infrastructure] ${observation.component} ${observation.operation} failed`,
+      body: faultProjectionBody(observation),
+      labels: ['automation/fault'],
+    }),
+  })
+}
+
+async function writeGovernorRecord(number, record) {
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/issues/${number}/comments`, '--input', '-',
+  ], {
+    env: environment,
+    input: JSON.stringify({ body: attestedGovernorRecordBody(record, { ...governorWriterTrust, runId: governorRunId }) }),
+  })
+}
+
+async function governRecovery(current, comments) {
+  if (current.labels?.some(label => (typeof label === 'string' ? label : label?.name) === 'automation/paused')) {
+    return { execute: false, action: 'paused' }
+  }
+  const subject = current.pull_request || current.head
+    ? pullRequestGovernorSubject(current)
+    : issueGovernorSubject(current)
+  const stateVersion = subjectStateVersion(subject)
+  const records = await trustedGovernorRecords({
+    comments,
+    trust: governorTrust,
+    loadRun: runId => ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `governor workflow run ${runId}`),
+  })
+  let workingRecords = records
+  if (!records.some(record => record.status === 'candidate'
+    && record.transition === 'workflow-recovery'
+    && record.subject.type === subject.type
+    && record.subject.number === subject.number
+    && record.stateVersion === stateVersion)) {
+    const candidate = governorDecision({
+      transition: 'workflow-recovery', subject, stateVersion,
+      observationId: `source-run-${sourceRunId}`, records,
+    })
+    if (candidate.record) {
+      await writeGovernorRecord(subject.number, candidate.record)
+      workingRecords = [...records, candidate.record]
+    }
+  }
+  const decision = governorDecision({
+    transition: 'workflow-recovery', subject, stateVersion,
+    observationId: `recovery-run-${governorRunId}`, records: workingRecords,
+  })
+  if (decision.record) await writeGovernorRecord(subject.number, decision.record)
+  if (!decision.execute) return { execute: false, action: decision.action }
+  const budget = governorBudgetDecision({
+    transition: 'workflow-recovery',
+    subject: { type: subject.type, number: subject.number },
+    workIdentity: subject.type === 'issue' ? `issue:${subject.number}` : `branch:${current.head.ref}`,
+    observationId: `recovery-run-${governorRunId}`,
+    limit: 3,
+    records: workingRecords,
+  })
+  if (budget.record) await writeGovernorRecord(subject.number, budget.record)
+  if (!budget.execute) {
+    if (budget.action !== 'pause') return { execute: false, action: budget.action }
+    await run(githubExecutable, [
+      'label', 'create', 'automation/paused', '--repo', repository,
+      '--description', 'Automatic governor budget exhausted', '--color', 'D93F0B',
+    ], { env: environment }).catch(() => undefined)
+    await run(githubExecutable, [subject.type === 'issue' ? 'issue' : 'pr', 'edit', String(subject.number), '--repo', repository,
+      '--add-label', 'automation/paused'], { env: environment })
+    return { execute: false, action: 'pause' }
+  }
+  return { execute: true, subject, stateVersion }
+}
+
+async function markRecoveryApplied(governed) {
+  await writeGovernorRecord(governed.subject.number, {
+    version: 1,
+    status: 'applied',
+    transition: 'workflow-recovery',
+    subject: { type: governed.subject.type, number: governed.subject.number },
+    stateVersion: governed.stateVersion,
+    observationId: `recovery-run-${governorRunId}`,
+  })
 }
 
 function sourceMarker(body) {
@@ -75,10 +226,7 @@ async function upsertRecovery(subject, comments, attempt, status) {
 }
 
 async function reviewJobs() {
-  const result = await ghJson([
-    'api', `repos/${repository}/actions/runs/${sourceRunId}/jobs?per_page=100`, '--paginate', '--slurp',
-  ], 'review workflow jobs')
-  return result.flatMap(page => page.jobs || [])
+  return pages(`repos/${repository}/actions/runs/${sourceRunId}/jobs`, 'review workflow jobs', 'jobs')
 }
 
 async function reviewSubject(run) {
@@ -106,10 +254,12 @@ async function reviewSubject(run) {
       ? pullRequest.head?.sha === run.head_sha
       : pullRequest.base?.sha === run.head_sha
     if (!sourceRefMatches || pullRequest.head?.repo?.full_name !== repository) continue
-    const checkPages = await ghJson([
-      'api', `repos/${repository}/commits/${pullRequest.head.sha}/check-runs`, '--paginate', '--slurp',
-    ], `review checks for pull request #${pullRequest.number}`)
-    if (checkPages.flatMap(page => page.check_runs || []).some(checkRun => checkRun.name === REVIEW_CHECK_NAME
+    const checkRuns = await pages(
+      `repos/${repository}/commits/${pullRequest.head.sha}/check-runs`,
+      `review checks for pull request #${pullRequest.number}`,
+      'check_runs',
+    )
+    if (checkRuns.some(checkRun => checkRun.name === REVIEW_CHECK_NAME
       && checkRun.app?.id === 15368
       && reviewRunIdFromCheckRun(checkRun, repository) === Number.parseInt(sourceRunId, 10))) {
       matches.push({ type: 'pull-request', number: pullRequest.number, base: pullRequest.base.sha, head: pullRequest.head.sha })
@@ -149,6 +299,8 @@ if (!role) {
   process.stdout.write(`Recovery ignored untrusted source workflow run ${sourceRunId}.\n`)
   process.exit(0)
 }
+const sourceJobs = await reviewJobs()
+const failureSignature = workflowFailureSignature(workflowRun, sourceJobs)
 
 if (role === 'review') {
   const subject = await reviewSubject(workflowRun)
@@ -158,22 +310,33 @@ if (role === 'review') {
   }
   const current = await ghJson(['api', `repos/${repository}/pulls/${subject.number}`], `pull request #${subject.number}`)
   const comments = await pages(`repos/${repository}/issues/${subject.number}/comments?per_page=100`, `comments for #${subject.number}`)
+  const failureClass = workflowFailureClass(workflowRun)
   const decision = recoveryDecision({
     run: workflowRun,
-    jobs: await reviewJobs(),
+    jobs: sourceJobs,
     repository,
     trust,
     subject,
     current,
     attempts: attemptRecords(comments, subject),
-    failureClass: workflowFailureClass(workflowRun),
+    failureClass,
   })
   if (decision.action === 'ignore') {
     process.stdout.write(`Recovery left review run ${sourceRunId} without another model review.\n`)
     process.exit(0)
   }
+  const governed = await governRecovery(current, comments)
+  if (!governed.execute) {
+    if (governed.action === 'pause') await upsertInfrastructureFault({
+      role, subject, failureClass, errorCode: workflowRun.conclusion, failureSignature,
+    })
+    process.stdout.write(`Governor ${governed.action}; review recovery did not wake work.\n`)
+    process.exit(0)
+  }
+  await markRecoveryApplied(governed)
   await upsertRecovery(subject, comments, decision.attempt, decision.action === 'retry' ? 'retrying' : 'dead-letter')
   if (decision.action === 'dead-letter') {
+    await upsertInfrastructureFault({ role, subject, failureClass, errorCode: workflowRun.conclusion, failureSignature })
     await markReviewDeadLetter(subject.number)
   } else {
     await waitForRetry(decision)
@@ -199,14 +362,24 @@ for (const current of subjects) {
   const subject = role === 'issue'
     ? { type: 'issue', number: current.number }
     : { type: 'pull-request', number: current.number, head: sourceHead }
+  const failureClass = workflowFailureClass(workflowRun, sourceComment || sourceComments[0])
   const decision = recoveryDecision({
     run: workflowRun, repository, trust, subject, current,
     attempts: attemptRecords(comments, subject),
-    failureClass: workflowFailureClass(workflowRun, sourceComment || sourceComments[0]),
+    failureClass,
   })
   if (decision.action === 'ignore') continue
+  const governed = await governRecovery(current, comments)
+  if (!governed.execute) {
+    if (governed.action === 'pause') await upsertInfrastructureFault({
+      role, subject, failureClass, errorCode: workflowRun.conclusion, failureSignature,
+    })
+    continue
+  }
+  await markRecoveryApplied(governed)
   await upsertRecovery(subject, comments, decision.attempt, decision.action === 'retry' ? 'retrying' : 'dead-letter')
   if (decision.action === 'dead-letter') {
+    await upsertInfrastructureFault({ role, subject, failureClass, errorCode: workflowRun.conclusion, failureSignature })
     await run(githubExecutable, [subject.type === 'issue' ? 'issue' : 'pr', 'edit', String(subject.number), '--repo', repository,
       '--add-label', 'agent/dsh-failed'], { env: environment }).catch(() => undefined)
     recovered += 1
