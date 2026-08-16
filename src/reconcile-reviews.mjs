@@ -8,7 +8,7 @@ import {
   verifyGithubIdentity,
 } from './common.mjs'
 import { needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
-import { hasTrustedExactReviewRun, reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
+import { hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { governorBudgetDecision, governorDecision, subjectStateVersion } from './governor-policy.mjs'
 import {
   attestedGovernorRecordBody,
@@ -209,7 +209,14 @@ for (const summary of summaries.flat()) {
     || pullRequest.base?.ref !== defaultBranch
     || pullRequest.head?.repo?.full_name !== repository) continue
   if (pullRequest.labels?.some(label => label.name === 'automation/paused')) continue
-  if (needsDefaultBranchUpdate({ defaultBranch, defaultBranchHead, pullRequest })) {
+  const comparison = await ghJson([
+    'api', `repos/${repository}/compare/${defaultBranchHead}...${pullRequest.head.sha}`,
+  ], `default-branch ancestry for pull request #${summary.number}`)
+  const mergeBaseSha = comparison?.merge_base_commit?.sha
+  if (!/^[0-9a-f]{40}$/i.test(mergeBaseSha || '')) {
+    throw new Error(`Pull request #${summary.number} comparison did not return a merge-base commit`)
+  }
+  if (needsDefaultBranchUpdate({ defaultBranch, defaultBranchHead, mergeBaseSha, pullRequest })) {
     const governed = await governTransition(pullRequest, 'base-reconcile', {
       limit: 3,
       workIdentity: `branch:${pullRequest.head.ref}`,
@@ -289,7 +296,7 @@ for (const summary of summaries.flat()) {
   }
   let reviewProof = null
   for (const checkRun of checkRuns) {
-    const runId = reviewRunIdFromDetailsUrl(checkRun.details_url, repository)
+    const runId = reviewRunIdFromCheckRun(checkRun, repository)
     if (!runId || checkRun.name !== 'agent/review') continue
     const workflowRun = await ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `review workflow run ${runId}`)
     const proof = { checkRun, run: workflowRun }

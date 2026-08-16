@@ -9,7 +9,7 @@ import {
   selectBacklogWork,
   trustedBlockedReviewProof,
 } from './dispatch-policy.mjs'
-import { reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
+import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import {
   governorBudgetDecision,
   governorDecision,
@@ -91,7 +91,7 @@ async function trustedBlockedRepairNumbers(pullRequests) {
     ], `check runs for pull request #${pullRequest.number}`)
     for (const checkRun of pages.flatMap(page => page.check_runs || [])) {
       if (checkRun.name !== 'agent/review') continue
-      const runId = reviewRunIdFromDetailsUrl(checkRun.details_url, repository)
+      const runId = reviewRunIdFromCheckRun(checkRun, repository)
       if (!runId) continue
       const workflowRun = await ghJson([
         'api', `repos/${repository}/actions/runs/${runId}`,
