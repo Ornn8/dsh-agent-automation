@@ -1244,9 +1244,17 @@ function Start-ManagedComponent {
 }
 
 function Get-RoleProcessHostCompiler {
+  if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    $identity = [Text.Encoding]::UTF8.GetBytes('windows-role-process-host-compiler-unavailable-plan-only')
+    return [pscustomobject]@{
+      path = $null
+      sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($identity)).ToLowerInvariant()
+      available = $false
+    }
+  }
   $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
   if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows .NET Framework C# compiler is required to build Role Process Host.' }
-  return [pscustomobject]@{ path = $compiler; sha256 = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash.ToLowerInvariant() }
+  return [pscustomobject]@{ path = $compiler; sha256 = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash.ToLowerInvariant(); available = $true }
 }
 
 function Build-RoleProcessHost {
@@ -1257,6 +1265,7 @@ function Build-RoleProcessHost {
   )
   if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { throw "Role Process Host source is missing: $SourcePath" }
   $compiler = Get-RoleProcessHostCompiler
+  if (-not $compiler.available) { throw 'Role Process Host compilation is available only on Windows.' }
   if ($ExpectedCompilerSha256 -and -not $compiler.sha256.Equals($ExpectedCompilerSha256, [StringComparison]::OrdinalIgnoreCase)) { throw 'Role Process Host compiler hash changed before installation.' }
   $output = [IO.Path]::GetFullPath($OutputPath)
   [IO.Directory]::CreateDirectory((Split-Path -Parent $output)) | Out-Null

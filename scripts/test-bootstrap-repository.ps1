@@ -82,7 +82,7 @@ try {
   Assert-True ($rendered -match $immutablePin) 'Generated YAML omitted the immutable controller SHA.'
   Assert-True ($rendered -notmatch 'controller_sha|worker_id|runner_labels_json') 'Generated YAML exposes controller or runner selection to callers.'
   Assert-True ($rendered -notmatch 'with:\s*\r?\n\s*repository:') 'Generated YAML exposes a reusable repository input.'
-  Assert-True ($rendered -match 'role: review' -and $rendered -match 'role: change') 'Health workflow did not keep separate roles.'
+  Assert-True ($rendered -match 'fromJSON\(vars\.AGENT_AUTOMATION_REPLICA_HEALTH\)' -and $rendered -match 'replica_id: \$\{\{ matrix\.label \}\}') 'Health workflow did not use the exact configured replica matrix.'
   $healthWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-health.yml') -Raw
   Assert-True ($healthWorkflow -match 'runner-watchdog\.yml') 'Health workflow omitted the GitHub-hosted queue watchdog.'
   Assert-True ($healthWorkflow -match "(?m)^    - cron: '29 3 \* \* \*'\r?$") 'Health workflow omitted the daily provider canary.'
