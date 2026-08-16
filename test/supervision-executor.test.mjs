@@ -235,13 +235,14 @@ test('revalidates a blocked Issue between label removal and its comment', async 
   ])
 })
 
-test('dispatches deterministic Issue work after adding the agent label', async () => {
+test('stages deterministic Issue work without adding an execution label in the same observation', async () => {
   const issue = {
     number: 8, state: 'open', stateReason: null, updatedAt: '2026-01-01T00:00:00Z',
     title: 'Ready work', body: 'Branch: `agent/ready-work`', labels: [],
   }
   const writes = []
   const githubRequest = async (request) => {
+    if (!request.method && request.path.endsWith('/comments')) return []
     if (!request.method) {
       return { ...issue, state_reason: null, updated_at: issue.updatedAt, labels: [] }
     }
@@ -259,16 +260,16 @@ test('dispatches deterministic Issue work after adding the agent label', async (
     },
     snapshot: { issues: [issue], pullRequests: [] },
     repository: 'example/project', config: {}, environment: {}, targetCheckout: '.', applyChanges: true, githubRequest,
+    governorContext: {
+      runId: 99,
+      controllerRepository: 'example/controller',
+      controllerSha: 'a'.repeat(40),
+    },
   })
-  assert.deepEqual(writes.map(request => ({ path: request.path, method: request.method, input: request.input })), [
-    {
-      path: 'repos/example/project/issues/8/labels', method: 'POST', input: { labels: ['agent/dsh'] },
-    },
-    {
-      path: 'repos/example/project/dispatches', method: 'POST',
-      input: { event_type: 'dsh-issue', client_payload: { issue_number: 8, request_id: 'supervision-ready-work' } },
-    },
-  ])
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].path, 'repos/example/project/issues/8/comments')
+  assert.match(writes[0].input.body, /"status":"candidate"/)
+  assert.doesNotMatch(writes[0].input.body, /agent\/dsh/)
 })
 
 test('refreshes a target after one mutation before validating a second mutation on it', async () => {

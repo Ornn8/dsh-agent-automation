@@ -1,4 +1,11 @@
 import { appendFile } from 'node:fs/promises'
+import { governorDecision, subjectStateVersion } from './governor-policy.mjs'
+import {
+  attestedGovernorRecordBody,
+  GOVERNOR_WORKFLOW_PATHS,
+  issueGovernorSubject,
+  trustedGovernorRecords,
+} from './governor-state.mjs'
 import { githubJson, githubPages } from './supervision-github.mjs'
 import { issueTitleSimilarity } from './supervision-protocol.mjs'
 import { run } from './common.mjs'
@@ -353,6 +360,66 @@ async function executeAction(action, { repository, config, environment, githubRe
   }
 }
 
+async function stageSupervisionDispatch(action, snapshot, {
+  repository, config, environment, githubRequest, governorContext,
+}) {
+  if (!governorContext
+    || !Number.isSafeInteger(governorContext.runId) || governorContext.runId < 1
+    || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(governorContext.controllerRepository || '')
+    || !/^[0-9a-f]{40}$/.test(governorContext.controllerSha || '')) {
+    throw new Error('Supervisor execution admission requires controller run provenance')
+  }
+  const issue = snapshot.issues.find(candidate => candidate.number === action.number)
+  if (!issue) throw new Error(`Issue #${action.number} is missing from the supervised state`)
+  const comments = await githubRequest({
+    config,
+    environment,
+    path: `repos/${repository}/issues/${action.number}/comments`,
+    description: `Issue #${action.number} governor records`,
+  })
+  const records = await trustedGovernorRecords({
+    comments,
+    trust: {
+      repository,
+      controllerRepository: governorContext.controllerRepository,
+      workflowPaths: GOVERNOR_WORKFLOW_PATHS,
+    },
+    loadRun: runId => githubRequest({
+      config,
+      environment,
+      path: `repos/${repository}/actions/runs/${runId}`,
+      description: `governor workflow run ${runId}`,
+    }),
+  })
+  const subject = issueGovernorSubject(issue)
+  const stateVersion = subjectStateVersion(subject)
+  const decision = governorDecision({
+    transition: 'issue-dispatch',
+    subject,
+    stateVersion,
+    observationId: `run-${governorContext.runId}`,
+    records,
+  })
+  if (!decision.record) return decision
+  await githubRequest({
+    config,
+    environment,
+    path: `repos/${repository}/issues/${action.number}/comments`,
+    description: `staged Issue #${action.number} work admission`,
+    method: 'POST',
+    input: {
+      body: attestedGovernorRecordBody(decision.record, {
+        repository,
+        controllerRepository: governorContext.controllerRepository,
+        controllerSha: governorContext.controllerSha,
+        workflowPath: '.github/workflows/repository-supervisor.yml',
+        runId: governorContext.runId,
+      }),
+    },
+  })
+  return decision
+}
+
 function mutationTarget(action) {
   if (action.type === 'create_issue') return ''
   return `${action.type === 'comment_pr' ? 'pull' : 'issue'}:${action.number}`
@@ -382,6 +449,7 @@ export async function applySupervisionPlan({
   applyChanges,
   githubRequest = githubJson,
   runCommand = run,
+  governorContext,
 }) {
   for (const action of plan.actions) {
     await validateSupervisionEvidence(action, snapshot, {
@@ -393,9 +461,15 @@ export async function applySupervisionPlan({
     await assertMutationTargetCurrent(action, snapshot, {
       repository, config, environment, githubRequest,
     })
-    await executeAction(action, {
-      repository, config, environment, githubRequest, snapshot,
-    })
+    if (action.type === 'add_label' && action.label === 'agent/dsh') {
+      await stageSupervisionDispatch(action, snapshot, {
+        repository, config, environment, githubRequest, governorContext,
+      })
+    } else {
+      await executeAction(action, {
+        repository, config, environment, githubRequest, snapshot,
+      })
+    }
     const target = mutationTarget(action)
     if (target && plan.actions.slice(index + 1).some(candidate => mutationTarget(candidate) === target)) {
       await refreshMutationTarget(action, snapshot, { repository, config, environment, githubRequest })

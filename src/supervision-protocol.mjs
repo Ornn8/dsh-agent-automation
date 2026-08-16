@@ -215,6 +215,9 @@ function activeOwnershipReasons(issue, snapshot, branch) {
 
 function agentDshSafetyAssessment(issue, snapshot) {
   const reasons = nonExecutableIssueReasons(issue)
+  if ((issue?.labels || []).some(label => (typeof label === 'string' ? label : label?.name) === 'automation/paused')) {
+    reasons.push('automation is paused')
+  }
   if (issue?.state !== 'open') reasons.push('the Issue is not open')
 
   let specification
@@ -506,6 +509,9 @@ export function planSupervisionActions(proposal, snapshot, {
     }
 
     if (!issueLabels.has(action.label)) continue
+    if (action.label === 'automation/paused') {
+      throw new Error('Repository supervision cannot remove terminal automation/paused state')
+    }
     if (action.label === 'agent/dsh') {
       const safety = agentDshTriggerSafety(issue, snapshot, repository)
       if (safety.safe) {
