@@ -18,8 +18,6 @@ BeforeAll {
       }
       repositoryMappings = @([pscustomobject]@{
         repository = 'example/target'
-        changeWorker = 'change-worker'
-        reviewWorker = 'review-worker'
         ciWorkflows = @('CI', 'Security')
         requiredChecks = @('all checks passed', 'security/gate')
       })
@@ -39,15 +37,14 @@ BeforeAll {
 
   function New-HostConfigPath {
     param([Parameter(Mandatory)][string]$Destination)
-    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.example.json') -Raw | ConvertFrom-Json -Depth 32
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
     $fixtureRoot = Join-Path $script:RepositoryRoot '.agent-automation-test'
-    $config.operations.installRoot = Join-Path $fixtureRoot 'runtime'
-    $config.operations.stateRoot = Join-Path $fixtureRoot 'state'
-    $config.operations.logsRoot = Join-Path $fixtureRoot 'state/logs'
-    foreach ($workerId in @($config.maintenanceWorkers)) {
-      $config.workers.$workerId.credentialIsolationDir = Join-Path $fixtureRoot "credentials/$workerId"
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue (Join-Path $fixtureRoot 'runtime') -Force
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue (Join-Path $fixtureRoot 'state') -Force
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $fixtureRoot 'state/logs') -Force
+    foreach ($workerId in @($config.operations.roles.maintenance.workers)) {
+      $config.workers.$workerId | Add-Member -NotePropertyName credentialIsolationDir -NotePropertyValue (Join-Path $fixtureRoot "credentials/$workerId") -Force
     }
-    $config.repositories = @('example/plan-fixture')
     $config.operations.repositoryMappings[0].repository = 'example/plan-fixture'
     foreach ($platform in @('windows-arm64', 'linux-x64', 'linux-arm64', 'macos-x64', 'macos-arm64')) {
       $config.operations.runner.artifacts | Add-Member -NotePropertyName $platform -NotePropertyValue ([pscustomobject]@{
@@ -55,7 +52,7 @@ BeforeAll {
         sha256 = ('d' * 64)
       }) -Force
     }
-    $config.operations.dshWebHost.enabled = $false
+    $config.operations | Add-Member -NotePropertyName dshWebHost -NotePropertyValue ([pscustomobject]@{ enabled = $false }) -Force
     [IO.File]::WriteAllText($Destination, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
     return $Destination
   }
@@ -73,7 +70,7 @@ Describe 'Portable installation plan' {
     [IO.Path]::GetPathRoot($loaded.Operations.installRoot) |
       Should -BeExactly ([IO.Path]::GetPathRoot($script:RepositoryRoot))
     $plan.paths[0].path | Should -BeExactly $loaded.Operations.installRoot
-    $instances | Should -HaveCount 6
+    $instances | Should -HaveCount 3
     foreach ($instance in $instances) {
       @($instance.Labels) | Should -Contain $plan.platform.osLabel
       @($instance.Labels) | Should -Contain $plan.platform.architectureLabel

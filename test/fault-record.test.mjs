@@ -16,8 +16,8 @@ const now = '2026-08-16T00:00:00.000Z'
 const state = {
   controllerSha: '1'.repeat(40),
   runtimeSnapshotHash: '2'.repeat(64),
-  configRevision: 'config-1',
-  credentialRevision: 'credential-1',
+  configurationHash: '3'.repeat(64),
+  credentialGeneration: 'credential-1',
   healthGeneration: 0,
   failureSignature: 'ECONNREFUSED:3080',
 }
@@ -118,12 +118,12 @@ test('stable health verification requires the configured number of durable sampl
 test('circuit epochs require changed state and obey a rolling 24 hour budget', () => {
   let record = openFaultCircuit(fault(), 'all maintenance workers failed')
   assert.throws(() => beginFaultEpoch(record, { stateVersion: state, now: '2026-08-16T01:00:00Z', maxEpochsPer24Hours: 3 }), /changed stateVersion/)
-  record = beginFaultEpoch(record, { stateVersion: { ...state, configRevision: 'config-2' }, now: '2026-08-16T01:00:00Z', maxEpochsPer24Hours: 3 })
+  record = beginFaultEpoch(record, { stateVersion: { ...state, configurationHash: '4'.repeat(64) }, now: '2026-08-16T01:00:00Z', maxEpochsPer24Hours: 3 })
   record = openFaultCircuit(record, 'failed again')
-  record = beginFaultEpoch(record, { stateVersion: { ...state, configRevision: 'config-3' }, now: '2026-08-16T02:00:00Z', maxEpochsPer24Hours: 3 })
+  record = beginFaultEpoch(record, { stateVersion: { ...state, configurationHash: '5'.repeat(64) }, now: '2026-08-16T02:00:00Z', maxEpochsPer24Hours: 3 })
   record = openFaultCircuit(record, 'failed again')
-  assert.throws(() => beginFaultEpoch(record, { stateVersion: { ...state, configRevision: 'config-4' }, now: '2026-08-16T03:00:00Z', maxEpochsPer24Hours: 3 }), /rolling epoch budget/)
-  const later = beginFaultEpoch(record, { stateVersion: { ...state, configRevision: 'config-4' }, now: '2026-08-17T03:00:01Z', maxEpochsPer24Hours: 3 })
+  assert.throws(() => beginFaultEpoch(record, { stateVersion: { ...state, configurationHash: '6'.repeat(64) }, now: '2026-08-16T03:00:00Z', maxEpochsPer24Hours: 3 }), /rolling epoch budget/)
+  const later = beginFaultEpoch(record, { stateVersion: { ...state, configurationHash: '6'.repeat(64) }, now: '2026-08-17T03:00:01Z', maxEpochsPer24Hours: 3 })
   assert.equal(later.epochs.length, 4)
 })
 

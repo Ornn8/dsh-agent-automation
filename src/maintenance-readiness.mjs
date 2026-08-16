@@ -6,7 +6,7 @@ import {
   maintenanceCredentialEnvironment,
   parseJson,
   requiredEnv,
-  resolveMaintenanceWorkers,
+  resolveRoleWorkers,
   run,
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
@@ -17,7 +17,7 @@ const controllerRepository = requiredEnv('CONTROLLER_REPOSITORY')
 const replicaId = requiredEnv('AGENT_REPLICA_ID')
 const readinessCanary = process.env.READINESS_CANARY?.toLowerCase() === 'true'
 const config = await loadConfig()
-const maintenanceWorkers = resolveMaintenanceWorkers(config)
+const maintenanceWorkers = resolveRoleWorkers(config, 'maintenance')
 const adapters = createAgentAdapters()
 
 if (config.operations.controller.repository !== controllerRepository

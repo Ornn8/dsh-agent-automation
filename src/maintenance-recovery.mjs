@@ -7,8 +7,7 @@ import {
   loadConfig,
   parseJson,
   requiredEnv,
-  resolveMaintenanceReviewWorker,
-  resolveMaintenanceWorkers,
+  resolveRoleWorkers,
   run,
   verifyGithubIdentity,
 } from './common.mjs'
@@ -41,8 +40,8 @@ const config = await loadConfig()
 const profile = parseMaintenanceProfile(JSON.parse(await readFile(
   join(controllerCheckout, '.github', 'agent-automation', 'profiles', 'controller-maintenance.json'), 'utf8',
 )))
-const maintenanceWorkers = resolveMaintenanceWorkers(config)
-const reviewWorker = resolveMaintenanceReviewWorker(config)
+const maintenanceWorkers = resolveRoleWorkers(config, 'maintenance')
+const [reviewWorker] = resolveRoleWorkers(config, 'review')
 const adapters = createAgentAdapters()
 
 if (config.operations.controller.repository !== controllerRepository) throw new Error('Maintenance workflow repository differs from local Controller configuration')
@@ -99,8 +98,8 @@ async function localStateVersion(projection, healthGeneration) {
   return {
     controllerSha,
     runtimeSnapshotHash,
-    configRevision: config.configRevision,
-    credentialRevision: config.credentialRevision,
+    configurationHash: config.configurationHash,
+    credentialGeneration: config.credentialGeneration,
     healthGeneration,
     failureSignature: projection.failureSignature,
   }

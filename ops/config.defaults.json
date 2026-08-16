@@ -1,0 +1,35 @@
+{
+  "credentialGeneration": "1",
+  "ghExecutable": "gh",
+  "gitExecutable": "git",
+  "operations": {
+    "installRoot": "${CONFIG_DIR}/runtime",
+    "stateRoot": "${CONFIG_DIR}",
+    "logsRoot": "${CONFIG_DIR}/logs",
+    "controller": {
+      "registrationScope": "target-repositories"
+    },
+    "roles": {
+      "change": {
+        "runnerNamePrefix": "agent-change",
+        "replicas": 1,
+        "labels": ["agent-change"]
+      },
+      "review": {
+        "runnerNamePrefix": "agent-review",
+        "replicas": 1,
+        "labels": ["agent-reviewer"]
+      },
+      "maintenance": {
+        "runnerNamePrefix": "agent-maint",
+        "replicas": 1,
+        "labels": ["agent-maintenance"]
+      }
+    },
+    "dshWebHost": {
+      "enabled": false,
+      "healthPath": "/api/session.list",
+      "restartAfterFailures": 3
+    }
+  }
+}

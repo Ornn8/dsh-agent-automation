@@ -6,7 +6,265 @@ $script:GitHubActionsAppId = 15368
 $script:ReviewRequiredCheckName = 'agent/review'
 $script:LegacyReviewRequiredCheckName = 'codex/review'
 $script:MinimumRunnerVersion = [Version]'2.334.0'
-$script:OperationsRuntimeFiles = @('Automation.Operations.psm1', 'runner-supervisor.ps1', 'dsh-web-host-supervisor.ps1', 'windows-role-process-host.ps1')
+$script:OperationsRuntimeFiles = @('Automation.Operations.psm1', 'config.defaults.json', 'runner-supervisor.ps1', 'dsh-web-host-supervisor.ps1', 'windows-role-process-host.ps1')
+
+function Get-JsonPropertyLineMap {
+  param([Parameter(Mandatory)][string]$Path)
+  $text = Get-Content -LiteralPath $Path -Raw -Encoding utf8
+  $pattern = '"(?:\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}|[^"\\])*"|[{}\[\],:]|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null'
+  $tokens = [Collections.Generic.List[object]]::new()
+  $line = 1
+  $cursor = 0
+  foreach ($match in [regex]::Matches($text, $pattern)) {
+    if ($match.Index -gt $cursor) { $line += [regex]::Matches($text.Substring($cursor, $match.Index - $cursor), "`n").Count }
+    $tokens.Add([pscustomobject]@{ Text = $match.Value; Line = $line })
+    $cursor = $match.Index + $match.Length
+  }
+  $locations = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+  $state = @{ Index = 0 }
+  $parseValue = $null
+  $parseValue = {
+    param([string]$JsonPath)
+    if ($state.Index -ge $tokens.Count) { throw "JSON source map ended unexpectedly: $Path" }
+    $token = $tokens[$state.Index]
+    if ($token.Text -eq '{') {
+      $state.Index += 1
+      while ($tokens[$state.Index].Text -ne '}') {
+        $keyToken = $tokens[$state.Index]
+        if (-not $keyToken.Text.StartsWith('"')) { throw "JSON source map expected an object key: $Path" }
+        $key = $keyToken.Text | ConvertFrom-Json
+        $childPath = if ($JsonPath) { "$JsonPath.$key" } else { $key }
+        $locations[$childPath] = $keyToken.Line
+        $state.Index += 1
+        if ($tokens[$state.Index].Text -ne ':') { throw "JSON source map expected a colon: $Path" }
+        $state.Index += 1
+        & $parseValue $childPath
+        if ($tokens[$state.Index].Text -eq ',') { $state.Index += 1 } elseif ($tokens[$state.Index].Text -ne '}') { throw "JSON source map expected an object delimiter: $Path" }
+      }
+      $state.Index += 1
+      return
+    }
+    if ($token.Text -eq '[') {
+      $state.Index += 1
+      $item = 0
+      while ($tokens[$state.Index].Text -ne ']') {
+        & $parseValue "$JsonPath[$item]"
+        $item += 1
+        if ($tokens[$state.Index].Text -eq ',') { $state.Index += 1 } elseif ($tokens[$state.Index].Text -ne ']') { throw "JSON source map expected an array delimiter: $Path" }
+      }
+      $state.Index += 1
+      return
+    }
+    $state.Index += 1
+  }
+  & $parseValue ''
+  if ($state.Index -ne $tokens.Count) { throw "JSON source map contains trailing tokens: $Path" }
+  return $locations
+}
+
+function ConvertTo-ConfigurationDisplayValue {
+  param($Value)
+  if ($null -eq $Value) { return 'null' }
+  if ($Value -is [bool]) { return $Value.ToString().ToLowerInvariant() }
+  if ($Value -is [string] -or $Value -is [ValueType]) { return [string]$Value }
+  return ConvertTo-Json -InputObject $Value -Depth 32 -Compress
+}
+
+function Get-ConfigurationLeafValues {
+  param([Parameter(Mandatory)]$Value, [string]$Path = '')
+  $rows = [Collections.Generic.List[object]]::new()
+  $visit = $null
+  $visit = {
+    param($Current, [string]$CurrentPath)
+    if ($Current -is [Array]) {
+      if ($Current.Count -gt 0 -and @($Current | Where-Object { $null -ne $_ -and $_ -isnot [string] -and $_ -isnot [ValueType] }).Count -eq $Current.Count) {
+        for ($index = 0; $index -lt $Current.Count; $index += 1) { & $visit $Current[$index] "$CurrentPath[$index]" }
+        return
+      }
+      $rows.Add([pscustomobject]@{ Path = $CurrentPath; Value = ConvertTo-ConfigurationDisplayValue $Current })
+      return
+    }
+    if ($null -ne $Current -and $Current -isnot [string] -and $Current -isnot [ValueType]) {
+      foreach ($property in @($Current.PSObject.Properties)) {
+        $child = if ($CurrentPath) { "$CurrentPath.$($property.Name)" } else { $property.Name }
+        & $visit $property.Value $child
+      }
+      return
+    }
+    $rows.Add([pscustomobject]@{ Path = $CurrentPath; Value = ConvertTo-ConfigurationDisplayValue $Current })
+  }
+  & $visit $Value $Path
+  return @($rows)
+}
+
+function Get-ConfigurationExplanation {
+  param(
+    [Parameter(Mandatory)]$Loaded,
+    [scriptblock]$RepositoryVariableResolver
+  )
+  $rows = [Collections.Generic.List[object]]::new()
+  foreach ($leaf in @(Get-ConfigurationLeafValues -Value $Loaded.Config)) {
+    $sourceType = 'derived'
+    $source = '<derived>'
+    $line = $null
+    if ($Loaded.Sources.UserLines.ContainsKey($leaf.Path)) {
+      $sourceType = 'configuration'
+      $source = $Loaded.Sources.UserPath
+      $line = $Loaded.Sources.UserLines[$leaf.Path]
+    } elseif ($Loaded.Sources.DefaultLines.ContainsKey($leaf.Path)) {
+      $sourceType = 'default'
+      $source = $Loaded.Sources.DefaultPath
+      $line = $Loaded.Sources.DefaultLines[$leaf.Path]
+    }
+    $rows.Add([pscustomobject][ordered]@{
+      Path = $leaf.Path
+      Value = $leaf.Value
+      DeclaredValue = $leaf.Value
+      SourceType = $sourceType
+      Source = $source
+      Line = $line
+      Override = $false
+      Status = $sourceType
+    })
+  }
+  if ($RepositoryVariableResolver) {
+    for ($index = 0; $index -lt @($Loaded.Operations.repositoryMappings).Count; $index += 1) {
+      $mapping = @($Loaded.Operations.repositoryMappings)[$index]
+      foreach ($binding in @(
+        [pscustomobject]@{ Field = 'ciWorkflows'; Variable = 'DSH_AUTOMATION_CI_WORKFLOWS' },
+        [pscustomobject]@{ Field = 'requiredChecks'; Variable = 'DSH_AUTOMATION_REQUIRED_CHECKS' }
+      )) {
+        $path = "operations.repositoryMappings[$index].$($binding.Field)"
+        $row = @($rows | Where-Object Path -CEQ $path)
+        if ($row.Count -ne 1) { throw "Configuration explanation could not find $path" }
+        $remote = & $RepositoryVariableResolver $mapping.repository $binding.Variable
+        $row[0].SourceType = 'repository-variable'
+        $row[0].Source = "github:$($mapping.repository):$($binding.Variable)"
+        $row[0].Line = $null
+        $row[0].Override = [bool]$remote.Found
+        $valid = $false
+        if ($remote.Found) {
+          try {
+            $parsed = ConvertFrom-Json -InputObject ([string]$remote.Value) -Depth 16 -NoEnumerate
+            $values = @($parsed)
+            $valid = ([string]$remote.Value).TrimStart().StartsWith('[') -and $values.Count -gt 0 -and `
+              @($values | Select-Object -Unique).Count -eq $values.Count -and `
+              @($values | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) -or $_.Length -gt 128 -or $_ -match '[\r\n]' }).Count -eq 0
+          } catch { $valid = $false }
+        }
+        $row[0].Status = if (-not $remote.Found) { 'missing' } elseif ($valid) { 'override' } else { 'invalid' }
+        $row[0].Value = if ($remote.Found) { [string]$remote.Value } else { '<missing>' }
+      }
+    }
+    $maintenance = @(Get-RunnerInstances -Loaded $Loaded -Roles maintenance)
+    $route = & $RepositoryVariableResolver $Loaded.Operations.controller.repository 'AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID'
+    $rows.Add([pscustomobject][ordered]@{
+      Path = 'operations.roles.maintenance.replicaId'
+      Value = if ($route.Found) { [string]$route.Value } else { '<missing>' }
+      DeclaredValue = if ($maintenance.Count -eq 1) { $maintenance[0].Id } else { '<invalid>' }
+      SourceType = 'repository-variable'
+      Source = "github:$($Loaded.Operations.controller.repository):AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID"
+      Line = $null
+      Override = [bool]$route.Found
+      Status = if (-not $route.Found) { 'missing' } elseif ([string]$route.Value -ceq $(if ($maintenance.Count -eq 1) { $maintenance[0].Id } else { '<invalid>' })) { 'override' } else { 'mismatch' }
+    })
+  }
+  return @($rows | Sort-Object Path)
+}
+
+function Copy-ConfigurationValue {
+  param($Value)
+  if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) { return $Value }
+  if ($Value -is [Array]) { return ,@($Value | ForEach-Object { Copy-ConfigurationValue $_ }) }
+  return (($Value | ConvertTo-Json -Depth 32 -Compress) | ConvertFrom-Json -Depth 32)
+}
+
+function Merge-ConfigurationValue {
+  param($Base, $Override)
+  if ($null -eq $Override) { return $null }
+  $baseObject = $null -ne $Base -and $Base -isnot [string] -and $Base -isnot [ValueType] -and $Base -isnot [Array]
+  $overrideObject = $Override -isnot [string] -and $Override -isnot [ValueType] -and $Override -isnot [Array]
+  if (-not $baseObject -or -not $overrideObject) { return Copy-ConfigurationValue $Override }
+  $values = [ordered]@{}
+  foreach ($property in @($Base.PSObject.Properties)) { $values[$property.Name] = Copy-ConfigurationValue $property.Value }
+  foreach ($property in @($Override.PSObject.Properties)) {
+    $values[$property.Name] = if ($values.Contains($property.Name)) { Merge-ConfigurationValue -Base $values[$property.Name] -Override $property.Value } else { Copy-ConfigurationValue $property.Value }
+  }
+  return [pscustomobject]$values
+}
+
+function Expand-ConfigurationDirectory {
+  param($Value, [Parameter(Mandatory)][string]$ConfigurationDirectory)
+  if ($Value -is [Array]) { return ,@($Value | ForEach-Object { Expand-ConfigurationDirectory -Value $_ -ConfigurationDirectory $ConfigurationDirectory }) }
+  if ($null -ne $Value -and $Value -isnot [string] -and $Value -isnot [ValueType]) {
+    $expanded = [ordered]@{}
+    foreach ($property in @($Value.PSObject.Properties)) { $expanded[$property.Name] = Expand-ConfigurationDirectory -Value $property.Value -ConfigurationDirectory $ConfigurationDirectory }
+    return [pscustomobject]$expanded
+  }
+  if ($Value -is [string] -and $Value.Contains('${CONFIG_DIR}')) { return [IO.Path]::GetFullPath($Value.Replace('${CONFIG_DIR}', $ConfigurationDirectory)) }
+  return $Value
+}
+
+function ConvertTo-CanonicalConfigurationValue {
+  param($Value)
+  if ($Value -is [Array]) { return ,@($Value | ForEach-Object { ConvertTo-CanonicalConfigurationValue $_ }) }
+  if ($null -ne $Value -and $Value -isnot [string] -and $Value -isnot [ValueType]) {
+    $canonical = [ordered]@{}
+    foreach ($property in @($Value.PSObject.Properties | Sort-Object Name)) {
+      $canonical[$property.Name] = ConvertTo-CanonicalConfigurationValue $property.Value
+    }
+    return [pscustomobject]$canonical
+  }
+  return $Value
+}
+
+function Get-EffectiveConfigurationHash {
+  param([Parameter(Mandatory)]$Config)
+  $identity = Copy-ConfigurationValue $Config
+  foreach ($field in '$schema', 'credentialGeneration', 'configurationHash') {
+    $identity.PSObject.Properties.Remove($field)
+  }
+  foreach ($field in 'platform', 'downloadUri', 'sha256') {
+    $identity.operations.runner.PSObject.Properties.Remove($field)
+  }
+  $json = ConvertTo-Json -InputObject (ConvertTo-CanonicalConfigurationValue $identity) -Depth 32 -Compress
+  $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+  return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
+function Get-RoleWorkerIds {
+  param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][ValidateSet('change', 'review', 'maintenance')][string]$Role)
+  $workers = @($Config.operations.roles.$Role.workers)
+  $maximum = if ($Role -eq 'maintenance') { 8 } else { 1 }
+  if (-not $workers.Count -or $workers.Count -gt $maximum -or @($workers | Select-Object -Unique).Count -ne $workers.Count -or @($workers | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count) {
+    throw "operations.roles.$Role.workers must contain $(if ($Role -eq 'maintenance') { '1 through 8' } else { 'exactly one' }) unique Worker id"
+  }
+  return $workers
+}
+
+function Get-DerivedWorkerCapabilities {
+  param([Parameter(Mandatory)]$Worker, [Parameter(Mandatory)][ValidateSet('change', 'review', 'maintenance')][string]$Role)
+  if ($Worker.adapter -eq 'codex-app') {
+    if ($Role -ne 'review') { throw 'codex-app can only serve the review role' }
+    return [pscustomobject]@{ skills = @('github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'); hardReadOnlyReview = $true; trustDomain = $Role }
+  }
+  if ($Worker.adapter -eq 'dsh-web') {
+    if ($Role -eq 'maintenance') { throw 'dsh-web cannot serve the maintenance role' }
+    if ($Role -eq 'review') { throw 'dsh-web does not provide hard read-only review isolation' }
+    return [pscustomobject]@{ skills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary'); hardReadOnlyReview = $false; trustDomain = $Role }
+  }
+  if ($Worker.adapter -in @('opencode-cli', 'claude-code-cli')) {
+    if ($Role -eq 'review') { return [pscustomobject]@{ skills = @('github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'); hardReadOnlyReview = $true; trustDomain = $Role } }
+    if ($Role -eq 'maintenance') { return [pscustomobject]@{ skills = @('controller-maintenance-repair', 'agent-readiness-canary'); hardReadOnlyReview = $false; trustDomain = $Role } }
+    return [pscustomobject]@{ skills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary'); hardReadOnlyReview = $false; trustDomain = $Role }
+  }
+  if ($Worker.adapter -eq 'command-json') {
+    if ($Role -eq 'review') { throw 'command-json cannot serve the review role without verifiable read-only isolation' }
+    if ($Role -eq 'maintenance') { return [pscustomobject]@{ skills = @('controller-maintenance-repair', 'agent-readiness-canary'); hardReadOnlyReview = $false; trustDomain = $Role } }
+    return [pscustomobject]@{ skills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary'); hardReadOnlyReview = $false; trustDomain = $Role }
+  }
+  throw "Unknown Worker Adapter $($Worker.adapter)"
+}
 
 function Write-OperationLog {
   param([string]$Message, [string]$Level = 'INFO', [string]$LogFile)
@@ -201,26 +459,31 @@ function Read-OperationsConfig {
   )
   $configurationPath = [IO.Path]::GetFullPath($Configuration)
   if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) { throw "Configuration file does not exist: $configurationPath" }
-  try { $config = Get-Content -LiteralPath $configurationPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 32 } catch { throw "Configuration is not valid JSON: $($_.Exception.Message)" }
-  if ($config.schemaVersion -ne 4 -or $config.operations.schemaVersion -ne 4) { throw 'Configuration schemaVersion must be 4' }
-  if (-not @($config.repositories).Count) { throw 'repositories must not be empty' }
-  if (@($config.repositories).Count -gt 32) { throw 'repositories is limited to 32 entries per host' }
-  foreach ($repository in @($config.repositories)) { if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid repository mapping: $repository" } }
+  try { $inputConfig = Get-Content -LiteralPath $configurationPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 32 } catch { throw "Configuration is not valid JSON: $($_.Exception.Message)" }
+  foreach ($field in 'schemaVersion', 'configRevision', 'credentialRevision', 'repositories', 'maintenanceWorkers', 'maintenanceReviewWorker') {
+    if ($inputConfig.PSObject.Properties[$field]) { throw "Configuration field $field was removed; use role Worker bindings and credentialGeneration" }
+  }
+  if ($inputConfig.operations.PSObject.Properties['schemaVersion']) { throw 'Configuration field operations.schemaVersion was removed' }
+  foreach ($mapping in @($inputConfig.operations.repositoryMappings)) {
+    if ($mapping.PSObject.Properties['changeWorker'] -or $mapping.PSObject.Properties['reviewWorker']) { throw 'repositoryMappings Worker fields were removed; use operations.roles.<role>.workers' }
+  }
+  foreach ($property in @($inputConfig.workers.PSObject.Properties)) {
+    foreach ($field in 'mode', 'capabilities', 'githubLogin') {
+      if ($property.Value.PSObject.Properties[$field]) { throw "workers.$($property.Name) role, capabilities, and GitHub identity are derived from its role binding" }
+    }
+  }
+  $defaultsPath = Join-Path $PSScriptRoot 'config.defaults.json'
+  try { $defaults = Get-Content -LiteralPath $defaultsPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 32 } catch { throw "Built-in configuration defaults are invalid JSON: $($_.Exception.Message)" }
+  $sources = [pscustomobject]@{
+    UserPath = $configurationPath
+    UserLines = Get-JsonPropertyLineMap -Path $configurationPath
+    DefaultPath = $defaultsPath
+    DefaultLines = Get-JsonPropertyLineMap -Path $defaultsPath
+  }
+  $config = Merge-ConfigurationValue -Base $defaults -Override $inputConfig
+  $config = Expand-ConfigurationDirectory -Value $config -ConfigurationDirectory (Split-Path -Parent $configurationPath)
   if (-not $config.workers -or @($config.workers.psobject.Properties).Count -eq 0) { throw 'workers must not be empty' }
-  Assert-AgentWorkerConfiguration -Workers $config.workers
-  foreach ($field in 'configRevision', 'credentialRevision') {
-    if ($config.$field -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "$field must be a non-secret revision identifier" }
-  }
-  $maintenanceWorkers = @($config.maintenanceWorkers)
-  if (-not $maintenanceWorkers.Count -or $maintenanceWorkers.Count -gt 8 -or @($maintenanceWorkers | Select-Object -Unique).Count -ne $maintenanceWorkers.Count) { throw 'maintenanceWorkers must contain between 1 and 8 unique worker ids' }
-  foreach ($workerId in $maintenanceWorkers) {
-    $worker = $config.workers.$workerId
-    if (-not $worker -or $worker.capabilities.trustDomain -ne 'maintenance' -or 'controller-maintenance-repair' -notin @($worker.capabilities.skills) -or 'agent-readiness-canary' -notin @($worker.capabilities.skills)) { throw "maintenanceWorkers entry is not a maintenance-capable worker: $workerId" }
-    if ([string]::IsNullOrWhiteSpace($worker.credentialIsolationDir) -or -not [IO.Path]::IsPathRooted($worker.credentialIsolationDir)) { throw "maintenance Worker $workerId requires an absolute credentialIsolationDir" }
-    if ($worker.githubLogin -notmatch '^[A-Za-z0-9-]{1,39}$') { throw "maintenance Worker $workerId requires githubLogin" }
-  }
-  $maintenanceReview = $config.workers.($config.maintenanceReviewWorker)
-  if (-not $maintenanceReview -or $maintenanceReview.capabilities.trustDomain -ne 'review' -or -not [bool]$maintenanceReview.capabilities.hardReadOnlyReview -or 'github-pr-review' -notin @($maintenanceReview.capabilities.skills) -or $config.maintenanceReviewWorker -in $maintenanceWorkers) { throw 'maintenanceReviewWorker must name an independent hard read-only review Worker' }
+  if ($config.credentialGeneration -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'credentialGeneration must be a non-secret identifier' }
   foreach ($field in 'ghExecutable', 'gitExecutable') { if ([string]::IsNullOrWhiteSpace($config.$field)) { throw "$field is required" } }
   if ($config.github.login -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$') { throw 'github.login must be a GitHub login name' }
   if ($config.github.login -like 'REPLACE-*' -and -not $AllowExamplePlaceholders) { throw 'github.login must name the expected host GitHub principal' }
@@ -270,13 +533,44 @@ function Read-OperationsConfig {
   if ($ops.roles.maintenance.labels -notcontains 'agent-maintenance') { throw 'maintenance role must have the agent-maintenance label' }
   if ([int]$ops.roles.maintenance.replicas -ne 1) { throw 'maintenance role must have exactly one replica' }
 
+  $assignedWorkers = @{}
+  foreach ($roleName in $script:RoleNames) {
+    foreach ($workerId in @(Get-RoleWorkerIds -Config $config -Role $roleName)) {
+      if ($assignedWorkers.ContainsKey($workerId)) { throw "Worker $workerId cannot serve both $($assignedWorkers[$workerId]) and $roleName trust domains" }
+      $worker = $config.workers.$workerId
+      if (-not $worker) { throw "Unknown $roleName Worker $workerId" }
+      $assignedWorkers[$workerId] = $roleName
+      $worker | Add-Member -NotePropertyName mode -NotePropertyValue $roleName -Force
+      $worker | Add-Member -NotePropertyName capabilities -NotePropertyValue (Get-DerivedWorkerCapabilities -Worker $worker -Role $roleName) -Force
+      if ($worker.adapter -eq 'opencode-cli' -and -not $worker.PSObject.Properties['executable']) { $worker | Add-Member -NotePropertyName executable -NotePropertyValue 'opencode' }
+      if ($worker.adapter -eq 'claude-code-cli' -and -not $worker.PSObject.Properties['executable']) { $worker | Add-Member -NotePropertyName executable -NotePropertyValue 'claude' }
+      if ($roleName -eq 'review' -and $worker.adapter -in @('opencode-cli', 'claude-code-cli') -and -not $worker.PSObject.Properties['gitExecutable']) { $worker | Add-Member -NotePropertyName gitExecutable -NotePropertyValue $config.gitExecutable }
+      if ($roleName -eq 'maintenance') {
+        if (-not $worker.PSObject.Properties['credentialIsolationDir']) { $worker | Add-Member -NotePropertyName credentialIsolationDir -NotePropertyValue (Join-Path $ops.stateRoot (Join-Path 'credentials' $workerId)) }
+        $worker | Add-Member -NotePropertyName githubLogin -NotePropertyValue $config.github.login -Force
+      }
+    }
+  }
+  $unassignedWorkers = @($config.workers.PSObject.Properties.Name | Where-Object { -not $assignedWorkers.ContainsKey($_) })
+  if ($unassignedWorkers.Count) { throw "Every Worker must have exactly one role binding: $($unassignedWorkers -join ', ')" }
+  Assert-AgentWorkerConfiguration -Workers $config.workers
+  $maintenanceWorkers = @(Get-RoleWorkerIds -Config $config -Role maintenance)
+  $maintenanceReviewWorker = @(Get-RoleWorkerIds -Config $config -Role review)[0]
+  if ($maintenanceReviewWorker -in $maintenanceWorkers) { throw 'The review Worker must be independent from maintenance Workers' }
+  foreach ($workerId in $maintenanceWorkers) {
+    $worker = $config.workers.$workerId
+    if ([string]::IsNullOrWhiteSpace($worker.credentialIsolationDir) -or -not [IO.Path]::IsPathRooted($worker.credentialIsolationDir)) { throw "maintenance Worker $workerId requires an absolute credentialIsolationDir" }
+    if ($worker.githubLogin -notmatch '^[A-Za-z0-9-]{1,39}$') { throw "maintenance Worker $workerId requires githubLogin" }
+  }
+
   $mappings = @($ops.repositoryMappings)
   if (-not $mappings.Count -or $mappings.Count -gt 32) { throw 'repositoryMappings must contain between 1 and 32 entries' }
   $mapped = @($mappings | ForEach-Object { $_.repository })
-  if (@($mapped | Select-Object -Unique).Count -ne $mapped.Count -or @($mapped | Where-Object { $_ -notin @($config.repositories) }).Count) { throw 'repositoryMappings must map each allowed repository exactly once' }
-  if ($mapped.Count -ne @($config.repositories).Count) { throw 'repositoryMappings must map every allowed repository' }
+  if (@($mapped | Select-Object -Unique).Count -ne $mapped.Count) { throw 'repositoryMappings must not contain duplicate repositories' }
+  if ($mapped.Count -gt 32) { throw 'repositoryMappings is limited to 32 entries per host' }
+  foreach ($repository in $mapped) { if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid repository mapping: $repository" } }
+  $config | Add-Member -NotePropertyName repositories -NotePropertyValue $mapped -Force
   foreach ($mapping in $mappings) {
-    foreach ($field in 'changeWorker', 'reviewWorker') { if ([string]::IsNullOrWhiteSpace($mapping.$field)) { throw "repositoryMappings.$field is required" } }
     foreach ($field in 'ciWorkflows', 'requiredChecks') {
       $values = @($mapping.$field)
       if (-not $values.Count -or @($values | Select-Object -Unique).Count -ne $values.Count -or @($values | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) -or $_.Length -gt 128 -or $_ -match '[\r\n]' }).Count) {
@@ -284,19 +578,17 @@ function Read-OperationsConfig {
       }
     }
     if (@($mapping.requiredChecks | Where-Object { $_ -in @($script:ReviewRequiredCheckName, $script:LegacyReviewRequiredCheckName) }).Count) { throw 'repositoryMappings.requiredChecks must not contain a controller review authority' }
-    if (-not $config.workers.($mapping.changeWorker)) { throw "repositoryMappings changeWorker is unknown: $($mapping.changeWorker)" }
-    if (-not $config.workers.($mapping.reviewWorker)) { throw "repositoryMappings reviewWorker is unknown: $($mapping.reviewWorker)" }
-    if ($mapping.changeWorker -in $maintenanceWorkers -or $mapping.reviewWorker -in $maintenanceWorkers) { throw 'maintenance Workers cannot also serve a product repository role' }
-    if ($config.workers.($mapping.changeWorker).capabilities.trustDomain -ne 'change' -or $config.workers.($mapping.reviewWorker).capabilities.trustDomain -ne 'review') { throw 'repositoryMappings must preserve change and review trust domains' }
+    $changeWorker = $config.workers.(@(Get-RoleWorkerIds -Config $config -Role change)[0])
+    $reviewWorker = $config.workers.(@(Get-RoleWorkerIds -Config $config -Role review)[0])
     foreach ($skill in @('github-issue-work', 'github-pr-repair')) {
-      if ($skill -notin @($config.workers.($mapping.changeWorker).capabilities.skills)) { throw "repositoryMappings changeWorker lacks $skill" }
+      if ($skill -notin @($changeWorker.capabilities.skills)) { throw "change role Worker lacks $skill" }
     }
     foreach ($skill in @('github-pr-review', 'github-repository-supervision')) {
-      if ($skill -notin @($config.workers.($mapping.reviewWorker).capabilities.skills)) { throw "repositoryMappings reviewWorker lacks $skill" }
+      if ($skill -notin @($reviewWorker.capabilities.skills)) { throw "review role Worker lacks $skill" }
     }
-    if (-not [bool]$config.workers.($mapping.reviewWorker).capabilities.hardReadOnlyReview) { throw 'repositoryMappings reviewWorker lacks hard read-only isolation' }
-    foreach ($workerId in @($mapping.changeWorker, $mapping.reviewWorker)) {
-      if ('agent-readiness-canary' -notin @($config.workers.($workerId).capabilities.skills)) { throw "repositoryMappings worker lacks agent-readiness-canary: $workerId" }
+    if (-not [bool]$reviewWorker.capabilities.hardReadOnlyReview) { throw 'review role Worker lacks hard read-only isolation' }
+    foreach ($worker in @($changeWorker, $reviewWorker)) {
+      if ('agent-readiness-canary' -notin @($worker.capabilities.skills)) { throw 'role Worker lacks agent-readiness-canary' }
     }
   }
 
@@ -308,7 +600,8 @@ function Read-OperationsConfig {
     $dshWorkers = @($config.workers.psobject.Properties | ForEach-Object { $_.Value } | Where-Object { $_.adapter -eq 'dsh-web' })
     if ($dshWorkers.Count -eq 0 -or @($dshWorkers | Where-Object { $_.baseUrl -eq $ops.dshWebHost.baseUrl }).Count -eq 0) { throw 'An enabled dshWebHost must match a dsh-web worker baseUrl' }
   }
-  return [pscustomobject]@{ Path = $configurationPath; Config = $config; Operations = $ops }
+  $config | Add-Member -NotePropertyName configurationHash -NotePropertyValue (Get-EffectiveConfigurationHash -Config $config) -Force
+  return [pscustomobject]@{ Path = $configurationPath; Config = $config; Operations = $ops; Sources = $sources }
 }
 
 function Get-RunnerInstances {
@@ -1569,12 +1862,14 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'manifest reconciliation detects untracked artifacts'; Passed = ($unexpectedState.UnexpectedTaskIds -contains 'target-orphan-change' -and $unexpectedState.UnexpectedProcessRecordIds -contains 'target-orphan-review') }
   $runtimeFilesA = @(
     [pscustomobject]@{ name = 'Automation.Operations.psm1'; sha256 = ('1' * 64) },
+    [pscustomobject]@{ name = 'config.defaults.json'; sha256 = ('6' * 64) },
     [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('2' * 64) },
     [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) },
     [pscustomobject]@{ name = 'windows-role-process-host.ps1'; sha256 = ('4' * 64) }
   )
   $runtimeFilesB = @(
     [pscustomobject]@{ name = 'Automation.Operations.psm1'; sha256 = ('1' * 64) },
+    [pscustomobject]@{ name = 'config.defaults.json'; sha256 = ('6' * 64) },
     [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('5' * 64) },
     [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) },
     [pscustomobject]@{ name = 'windows-role-process-host.ps1'; sha256 = ('4' * 64) }
@@ -1692,6 +1987,7 @@ function Invoke-OperationsSelfTest {
 }
 
 Export-ModuleMember -Function @(
+  'Get-JsonPropertyLineMap', 'Get-ConfigurationExplanation',
   'Write-OperationLog', 'Write-OperationHeartbeat', 'Test-OperationHeartbeat', 'Resolve-OperationPath', 'Assert-PathInside', 'Get-RepositoryKey',
   'Read-OperationsConfig', 'Get-RunnerInstances', 'Get-RunnerInstance',
   'Resolve-InstallationPlatform', 'New-InstallationPlan', 'ConvertTo-InstallationPlanJson',

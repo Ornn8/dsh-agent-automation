@@ -21,8 +21,8 @@ const workers = ['codex-maintenance', 'opencode-maintenance']
 const state = {
   controllerSha: '1'.repeat(40),
   runtimeSnapshotHash: '2'.repeat(64),
-  configRevision: 'config-1',
-  credentialRevision: 'credential-1',
+  configurationHash: '4'.repeat(64),
+  credentialGeneration: 'credential-1',
   healthGeneration: 0,
   failureSignature: `workflow:${'3'.repeat(64)}`,
 }

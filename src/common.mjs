@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
-import { readFile, rm } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { normalizeWorkerConfig } from './agent-worker.mjs'
 import { dshModelSelection, dshSessionPresets } from './dsh-web-session.mjs'
+import { readMachineConfig, roleWorkerIds } from './machine-config.mjs'
 
 /** Run a process without a command shell and return its captured output. */
 export function run(command, args, options = {}) {
@@ -138,8 +139,7 @@ export function parseJson(text, description) {
 /** Load and validate the machine-local runner configuration. */
 export async function loadConfig() {
   const path = resolve(requiredEnv('DSH_AGENT_CONFIG'))
-  const config = normalizeWorkerConfig(parseJson(await readFile(path, 'utf8'), 'runner configuration'))
-  validateConfigSchemaVersion(config)
+  const config = normalizeWorkerConfig(await readMachineConfig(path))
   const required = ['repositories', 'ghExecutable', 'gitExecutable']
   for (const name of required) {
     if (name === 'repositories') {
@@ -158,13 +158,12 @@ export async function loadConfig() {
     resolveRepositoryWorker(config, repository, 'change')
     resolveRepositoryWorker(config, repository, 'review')
   }
-  for (const name of ['configRevision', 'credentialRevision']) {
-    if (typeof config[name] !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(config[name])) {
-      throw new Error(`runner configuration ${name} must be a non-secret revision identifier`)
-    }
+  if (typeof config.credentialGeneration !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(config.credentialGeneration)) {
+    throw new Error('runner configuration credentialGeneration must be a non-secret identifier')
   }
-  resolveMaintenanceWorkers(config)
-  resolveMaintenanceReviewWorker(config)
+  if (typeof config.configurationHash !== 'string' || !/^[a-f0-9]{64}$/.test(config.configurationHash)) throw new Error('runner configuration hash is invalid')
+  resolveRoleWorkers(config, 'maintenance')
+  resolveRoleWorkers(config, 'review')
   validateDshWorkerConfig(config)
   validateCodexWorkerConfig(config)
   validateOpenCodeWorkerConfig(config)
@@ -236,9 +235,10 @@ export function validateWorkerCapabilities(config) {
       throw new Error(`workers.${workerId} hardReadOnlyReview does not match Adapter isolation`)
     }
   }
-  const maintenanceWorkers = resolveMaintenanceWorkers(config)
-  const productWorkers = new Set((config?.operations?.repositoryMappings || [])
-    .flatMap(mapping => [mapping.changeWorker, mapping.reviewWorker]))
+  const maintenanceWorkers = resolveRoleWorkers(config, 'maintenance')
+  const productWorkers = new Set([
+    ...roleWorkerIds(config, 'change'), ...roleWorkerIds(config, 'review'),
+  ])
   for (const workerId of maintenanceWorkers) {
     const capabilities = config.workers[workerId].capabilities
     if (capabilities.trustDomain !== 'maintenance'
@@ -269,13 +269,6 @@ export function validateWorkerCapabilities(config) {
     if (!reviewCapabilities.hardReadOnlyReview) {
       throw new Error(`Repository ${repository} review worker lacks hard read-only isolation`)
     }
-  }
-}
-
-/** Reject configuration formats that predate explicit worker declarations. */
-export function validateConfigSchemaVersion(config) {
-  if (config?.schemaVersion !== 4 || config?.operations?.schemaVersion !== 4) {
-    throw new Error('runner configuration schemaVersion must be 4')
   }
 }
 
@@ -310,45 +303,23 @@ export function validateCodexWorkerConfig(config) {
 /** Resolve a worker from the one local mapping permitted for a repository role. */
 export function resolveRepositoryWorker(config, repository, role) {
   if (!['change', 'review'].includes(role)) throw new Error(`Unknown agent role ${role}`)
-  const mappings = config?.operations?.repositoryMappings
-  if (!Array.isArray(mappings)) throw new Error('runner configuration operations.repositoryMappings must be an array')
-  const matches = mappings.filter(mapping => mapping?.repository === repository)
-  if (matches.length !== 1) throw new Error(`Repository ${repository} must have exactly one mapping`)
-  const workerId = matches[0][role === 'change' ? 'changeWorker' : 'reviewWorker']
-  if (typeof workerId !== 'string' || !workerId.trim()) {
-    throw new Error(`Repository ${repository} ${role} mapping must name a worker`)
-  }
-  if (!config?.workers?.[workerId]) throw new Error(`Repository ${repository} ${role} mapping has unknown worker ${workerId}`)
+  const [workerId] = resolveRoleWorkers(config, role, repository)
   return workerId
 }
 
-/** Resolve the finite, declared maintenance Worker failover order. */
-export function resolveMaintenanceWorkers(config) {
-  const workers = config?.maintenanceWorkers
-  if (!Array.isArray(workers) || workers.length < 1 || workers.length > 8
-    || workers.some(workerId => typeof workerId !== 'string' || !workerId.trim())
-    || new Set(workers).size !== workers.length) {
-    throw new Error('runner configuration maintenanceWorkers must contain unique worker ids')
+/** Resolve the declared Worker order for one role after optional repository admission. */
+export function resolveRoleWorkers(config, role, repository) {
+  if (repository !== undefined) {
+    const mappings = config?.operations?.repositoryMappings
+    if (!Array.isArray(mappings)) throw new Error('runner configuration operations.repositoryMappings must be an array')
+    const matches = mappings.filter(mapping => mapping?.repository === repository)
+    if (matches.length !== 1) throw new Error(`Repository ${repository} must have exactly one mapping`)
   }
+  const workers = roleWorkerIds(config, role)
   for (const workerId of workers) {
-    if (!config?.workers?.[workerId]) throw new Error(`Unknown maintenance worker ${workerId}`)
+    if (!config?.workers?.[workerId]) throw new Error(`${role} role names unknown worker ${workerId}`)
   }
   return [...workers]
-}
-
-/** Resolve the independent hard read-only reviewer for maintenance repairs. */
-export function resolveMaintenanceReviewWorker(config) {
-  const workerId = config?.maintenanceReviewWorker
-  const worker = typeof workerId === 'string' ? config?.workers?.[workerId] : undefined
-  if (!worker || worker.capabilities?.trustDomain !== 'review'
-    || worker.capabilities?.hardReadOnlyReview !== true
-    || !worker.capabilities?.skills?.includes('github-pr-review')) {
-    throw new Error('runner configuration maintenanceReviewWorker must name a hard read-only review Worker')
-  }
-  if (config?.maintenanceWorkers?.includes(workerId)) {
-    throw new Error('maintenanceReviewWorker must be independent from maintenanceWorkers')
-  }
-  return workerId
 }
 
 /** Return the immutable local GitHub identity that owns controller markers. */
@@ -481,7 +452,7 @@ export function validateClaudeCodeWorkerConfig(config) {
 
 /** Validate the dedicated GitHub identity declared by each maintenance Worker. */
 export function validateMaintenanceWorkerCredentials(config) {
-  for (const workerId of resolveMaintenanceWorkers(config)) {
+  for (const workerId of resolveRoleWorkers(config, 'maintenance')) {
     const worker = config.workers[workerId]
     if (typeof worker.credentialIsolationDir !== 'string' || !isAbsolute(worker.credentialIsolationDir)) {
       throw new Error(`workers.${workerId} credentialIsolationDir must be an absolute path`)

@@ -7,8 +7,8 @@ const record = createFaultRecord({
   repository: 'owner/controller', component: 'runner', operation: 'start', failureClass: 'host', errorCode: 'offline',
   rootRequestIds: ['issue-1'], now: '2026-08-16T00:00:00Z',
   stateVersion: {
-    controllerSha: '1'.repeat(40), runtimeSnapshotHash: '2'.repeat(64), configRevision: 'config-1',
-    credentialRevision: 'credential-1', healthGeneration: 0, failureSignature: 'offline',
+    controllerSha: '1'.repeat(40), runtimeSnapshotHash: '2'.repeat(64), configurationHash: '3'.repeat(64),
+    credentialGeneration: 'credential-1', healthGeneration: 0, failureSignature: 'offline',
   },
 })
 

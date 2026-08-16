@@ -74,13 +74,13 @@ export function faultIdentity({ repository, component, operation, failureClass, 
 /** Build a meaningful recovery state version; wall-clock time is intentionally excluded. */
 export function faultStateVersion(value) {
   const object = exactKeys(value, [
-    'controllerSha', 'runtimeSnapshotHash', 'configRevision', 'credentialRevision',
+    'controllerSha', 'runtimeSnapshotHash', 'configurationHash', 'credentialGeneration',
     'healthGeneration', 'failureSignature',
   ], 'fault stateVersion')
   if (!FULL_SHA.test(object.controllerSha || '')) throw new Error('fault stateVersion controllerSha must be a full lowercase SHA')
   if (!DIGEST.test(object.runtimeSnapshotHash || '')) throw new Error('fault stateVersion runtimeSnapshotHash must be a SHA-256 digest')
-  const configRevision = identifier(object.configRevision, 'fault stateVersion configRevision')
-  const credentialRevision = identifier(object.credentialRevision, 'fault stateVersion credentialRevision')
+  if (!DIGEST.test(object.configurationHash || '')) throw new Error('fault stateVersion configurationHash must be a SHA-256 digest')
+  const credentialGeneration = identifier(object.credentialGeneration, 'fault stateVersion credentialGeneration')
   if (!Number.isSafeInteger(object.healthGeneration) || object.healthGeneration < 0) {
     throw new Error('fault stateVersion healthGeneration must be a non-negative integer')
   }
@@ -88,8 +88,8 @@ export function faultStateVersion(value) {
   const normalized = {
     controllerSha: object.controllerSha,
     runtimeSnapshotHash: object.runtimeSnapshotHash,
-    configRevision,
-    credentialRevision,
+    configurationHash: object.configurationHash,
+    credentialGeneration,
     healthGeneration: object.healthGeneration,
     failureSignature,
   }
@@ -98,7 +98,7 @@ export function faultStateVersion(value) {
 
 function normalizeStateVersion(value) {
   const { hash, ...fields } = exactKeys(value, [
-    'controllerSha', 'runtimeSnapshotHash', 'configRevision', 'credentialRevision',
+    'controllerSha', 'runtimeSnapshotHash', 'configurationHash', 'credentialGeneration',
     'healthGeneration', 'failureSignature', 'hash',
   ], 'FaultRecord stateVersion')
   const normalized = faultStateVersion(fields)

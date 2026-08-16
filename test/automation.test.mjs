@@ -17,7 +17,6 @@ import {
   resolveRepositoryWorker,
   run,
   trustedAssociation,
-  validateConfigSchemaVersion,
   validateClaudeCodeWorkerConfig,
   validateCodexWorkerConfig,
   validateDshWorkerConfig,
@@ -144,11 +143,6 @@ test('DSH model and session preset configuration is complete and fails closed', 
   assert.throws(() => validateDshWorkerConfig({ workers: {
     dsh: { adapter: 'dsh-web', baseUrl: 'http://127.0.0.1:3080', ...dshModel, agentPreset: 'standard' },
   } }), /workers\.dsh.*permissionPreset/)
-})
-
-test('the controller rejects the removed configuration schema before starting a worker', () => {
-  assert.doesNotThrow(() => validateConfigSchemaVersion({ schemaVersion: 4, operations: { schemaVersion: 4 } }))
-  assert.throws(() => validateConfigSchemaVersion({ schemaVersion: 3, operations: { schemaVersion: 3 } }), /schemaVersion must be 4/)
 })
 
 test('DSH Web session is titled, prompted once, and observed to completion', async () => {
@@ -913,16 +907,17 @@ test('only the controller identity can reuse a durable marker comment', () => {
 test('each repository resolves its worker only from one exact local role mapping', () => {
   const config = {
     workers: { change: { adapter: 'fake' }, review: { adapter: 'fake' } },
-    operations: { repositoryMappings: [{
-      repository: 'owner/repository', changeWorker: 'change', reviewWorker: 'review',
-    }] },
+    operations: {
+      roles: { change: { workers: ['change'] }, review: { workers: ['review'] } },
+      repositoryMappings: [{ repository: 'owner/repository' }],
+    },
   }
   assert.equal(resolveRepositoryWorker(config, 'owner/repository', 'change'), 'change')
   assert.equal(resolveRepositoryWorker(config, 'owner/repository', 'review'), 'review')
   assert.throws(() => resolveRepositoryWorker(config, 'owner/other', 'change'), /exactly one mapping/)
   assert.throws(() => resolveRepositoryWorker(config, 'owner/repository', 'other'), /Unknown agent role/)
   assert.throws(() => resolveRepositoryWorker({
-    ...config, operations: { repositoryMappings: [{ ...config.operations.repositoryMappings[0], changeWorker: 'missing' }] },
+    ...config, operations: { ...config.operations, roles: { ...config.operations.roles, change: { workers: ['missing'] } } },
   }, 'owner/repository', 'change'), /unknown worker/)
 })
 
@@ -1390,7 +1385,7 @@ test('GitHub review fields reject non-English prose and Markdown path injection'
   })), /invalid blocking finding/)
 })
 
-test('repository mappings fail closed on missing skills or soft review isolation', () => {
+test('role Worker bindings fail closed on missing skills or soft review isolation', () => {
   const maintenanceCredentialDirectory = join(tmpdir(), 'credentials', 'maintenance')
   const changeCapabilities = { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: 'change' }
   const reviewCapabilities = { skills: ['github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'], hardReadOnlyReview: true, trustDomain: 'review' }
@@ -1405,10 +1400,12 @@ test('repository mappings fail closed on missing skills or soft review isolation
         credentialIsolationDir: maintenanceCredentialDirectory, githubLogin: 'maintenance-bot',
       },
     },
-    maintenanceWorkers: ['maintenance'],
-    operations: { repositoryMappings: [{
-      repository: 'owner/repository', changeWorker: 'change', reviewWorker: 'review',
-    }] },
+    operations: {
+      roles: {
+        change: { workers: ['change'] }, review: { workers: ['review'] }, maintenance: { workers: ['maintenance'] },
+      },
+      repositoryMappings: [{ repository: 'owner/repository' }],
+    },
   }
   assert.doesNotThrow(() => validateWorkerCapabilities(config))
   assert.doesNotThrow(() => validateMaintenanceWorkerCredentials(config))
