@@ -141,6 +141,9 @@ try {
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
   Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR CI Repair, Agent PR Review\]\r?$') 'Agent Recovery must include each trusted model-backed entry workflow.'
   Assert-True ($recoveryWorkflow -match [Regex]::Escape('contains(fromJSON(''["failure", "cancelled", "timed_out", "startup_failure", "stale"]''), github.event.workflow_run.conclusion)')) 'Agent Recovery must retain every terminal infrastructure conclusion.'
+  foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: write', 'pull-requests: write')) {
+    Assert-True ($recoveryWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent Recovery omitted caller permission $permission."
+  }
 
   & git -C $temp add .github
   & git -C $temp -c user.name=Bootstrap -c user.email=bootstrap@example.invalid commit -qm 'bootstrap fixtures'

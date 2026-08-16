@@ -683,11 +683,14 @@ test('a completed BLOCK publishes repair without being mistaken for reviewer inf
 
 test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispatch path', async () => {
   const source = await readFile(new URL('../src/recover-backlog.mjs', import.meta.url), 'utf8')
+  const workflow = await readFile(new URL('../.github/workflows/recover-backlog.yml', import.meta.url), 'utf8')
   assert.match(source, /async function wakeExactReview/)
   assert.match(source, /--add-label', 'automation\/review-ready/)
   assert.match(source, /REVIEW_DISPATCH_TYPE/)
   assert.match(source, /client_payload\[base_sha\]/)
   assert.match(source, /client_payload\[head_sha\]/)
+  assert.match(workflow, /checks: read/)
+  assert.match(workflow, /pull-requests: write/)
 })
 
 test('review checkout contains the exact base and head before the Agent reads their diff', async () => {

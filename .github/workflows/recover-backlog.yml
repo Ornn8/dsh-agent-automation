@@ -18,9 +18,10 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: read
+      checks: read
       contents: write
       issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - name: Check out automation controller
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
