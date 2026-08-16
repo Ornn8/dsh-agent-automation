@@ -12,6 +12,7 @@ import {
   pullRequestGovernorSubject,
   trustedGovernorRecords,
 } from './governor-state.mjs'
+import { reviewRepairTransition } from './work-request.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
@@ -93,7 +94,9 @@ if (reviewRoute !== 'repair' && reviewRoute !== 'retry') {
   process.stdout.write(`Review route ${reviewRoute} paused product change work.\n`)
   process.exit(0)
 }
-const transition = reviewRoute === 'repair' ? 'review-repair' : 'workflow-recovery'
+const transition = reviewRoute === 'repair'
+  ? reviewRepairTransition(`run-${runId}`)
+  : 'workflow-recovery'
 const decision = governorDecision({
   transition,
   subject,

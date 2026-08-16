@@ -1,9 +1,4 @@
-import { reviewMarker, reviewRepairRequestId } from './review-authority.mjs'
-
-/** Return the durable idempotency key for one exact blocked review pair. */
-export function automaticRepairRequestId(base, head) {
-  return reviewRepairRequestId(base, head)
-}
+import { reviewMarker } from './review-authority.mjs'
 
 /** Return whether GitHub already records an automated verdict for this exact head. */
 export function hasExactReviewVerdict(comments, head, authorLogin = 'github-actions[bot]') {

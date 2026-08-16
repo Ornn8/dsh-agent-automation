@@ -18,6 +18,8 @@ import {
   attestedGovernorRecordBody,
   trustedGovernorRecords,
 } from '../src/governor-state.mjs'
+import { ciRepairTransition } from '../src/dispatch-policy.mjs'
+import { reviewRepairTransition } from '../src/work-request.mjs'
 
 const issue = {
   type: 'issue',
@@ -162,6 +164,87 @@ test('independent subject repair budgets survive controller upgrades', () => {
   })
   assert.equal(ci.action, 'attempt')
   assert.equal(ci.record.attempt, 1)
+})
+
+test('same-head review generations admit independently but share one repair budget', () => {
+  const pullRequest = {
+    type: 'pull-request', number: 10, state: 'open', draft: false,
+    base: 'a'.repeat(40), head: 'b'.repeat(40), labels: [],
+  }
+  const stateVersion = subjectStateVersion(pullRequest)
+  const firstTransition = reviewRepairTransition('run-100')
+  const secondTransition = reviewRepairTransition('run-200')
+  const firstCandidate = governorDecision({
+    transition: firstTransition, subject: pullRequest, stateVersion,
+    observationId: 'run-100', records: [],
+  }).record
+  const firstAdmission = governorDecision({
+    transition: firstTransition, subject: pullRequest, stateVersion,
+    observationId: 'reconcile-101', records: [firstCandidate],
+  })
+  assert.equal(firstAdmission.action, 'admit')
+  const firstApplied = {
+    version: 1, status: 'applied', transition: firstTransition,
+    subject: { type: 'pull-request', number: 10 }, stateVersion,
+    observationId: 'reconcile-101',
+  }
+  const secondCandidate = governorDecision({
+    transition: secondTransition, subject: pullRequest, stateVersion,
+    observationId: 'run-200', records: [firstCandidate, firstAdmission.record, firstApplied],
+  })
+  assert.equal(secondCandidate.action, 'record-candidate')
+
+  const firstBudget = governorBudgetDecision({
+    transition: 'review-repair', subject: { type: 'pull-request', number: 10 },
+    workIdentity: 'branch:agent/issue-1', observationId: 'reconcile-101', limit: 2, records: [],
+  })
+  const secondBudget = governorBudgetDecision({
+    transition: 'review-repair', subject: { type: 'pull-request', number: 10 },
+    workIdentity: 'branch:agent/issue-1', observationId: 'reconcile-201', limit: 2,
+    records: [firstBudget.record],
+  })
+  assert.equal(firstBudget.record.attempt, 1)
+  assert.equal(secondBudget.record.attempt, 2)
+})
+
+test('CI workflow runs admit independently while rerun attempts share one transition and budget', () => {
+  const pullRequest = {
+    type: 'pull-request', number: 11, state: 'open', draft: false,
+    base: 'a'.repeat(40), head: 'b'.repeat(40), labels: ['automation/ci-failed'],
+  }
+  const stateVersion = subjectStateVersion(pullRequest)
+  const firstTransition = ciRepairTransition(300)
+  const secondTransition = ciRepairTransition(400)
+  const firstCandidate = governorDecision({
+    transition: firstTransition, subject: pullRequest, stateVersion,
+    observationId: 'repair-run-1:1', records: [],
+  }).record
+  const firstAdmission = governorDecision({
+    transition: firstTransition, subject: pullRequest, stateVersion,
+    observationId: 'repair-run-2:1', records: [firstCandidate],
+  })
+  assert.equal(firstAdmission.action, 'admit')
+  const firstApplied = {
+    version: 1, status: 'applied', transition: firstTransition,
+    subject: { type: 'pull-request', number: 11 }, stateVersion,
+    observationId: 'repair-run-2:1',
+  }
+  assert.equal(governorDecision({
+    transition: secondTransition, subject: pullRequest, stateVersion,
+    observationId: 'repair-run-3:1', records: [firstCandidate, firstAdmission.record, firstApplied],
+  }).action, 'record-candidate')
+
+  const firstBudget = governorBudgetDecision({
+    transition: 'ci-repair', subject: { type: 'pull-request', number: 11 },
+    workIdentity: 'branch:agent/issue-1', observationId: 'repair-run-2:1', limit: 3, records: [],
+  })
+  const secondBudget = governorBudgetDecision({
+    transition: 'ci-repair', subject: { type: 'pull-request', number: 11 },
+    workIdentity: 'branch:agent/issue-1', observationId: 'repair-run-4:1', limit: 3,
+    records: [firstBudget.record],
+  })
+  assert.equal(firstBudget.record.attempt, 1)
+  assert.equal(secondBudget.record.attempt, 2)
 })
 
 test('replaying one recovery observation consumes its independent budget once', () => {

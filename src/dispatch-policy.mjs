@@ -38,6 +38,14 @@ export function ciRepairRequest(value) {
   return null
 }
 
+/** Return the distinct Governor transition for one failed CI workflow run. */
+export function ciRepairTransition(runId) {
+  if (!Number.isSafeInteger(runId) || runId < 1) {
+    throw new Error('CI repair transition requires a positive workflow run id')
+  }
+  return `ci-repair:run-${runId}`
+}
+
 /** Return whether a completed workflow run is exact failed CI evidence for a commit head. */
 export function trustedCiFailure({ run, pullRequestNumber, expectedHead, workflowName }) {
   return typeof workflowName === 'string'

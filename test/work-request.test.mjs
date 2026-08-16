@@ -6,12 +6,14 @@ import {
   createStageWorkRequest,
   isReviewRepairRequestId,
   parseAgentWorkRequest,
+  reviewRepairTransition,
   repositoryDispatchBody,
 } from '../src/work-request.mjs'
 import { loadWorkflowProfile } from '../src/workflow-profile.mjs'
 
 const base = 'a'.repeat(40)
 const head = 'b'.repeat(40)
+const reviewObservationId = 'run-31944175917'
 const profile = await loadWorkflowProfile()
 
 test('review repair is an immutable Stage request rather than an agent command', () => {
@@ -21,11 +23,12 @@ test('review repair is an immutable Stage request rather than an agent command',
     pullRequestNumber: 12,
     base,
     head,
+    reviewObservationId,
   })
 
   assert.deepEqual(request, {
     version: 2,
-    requestId: `review-repair-${base}-${head}`,
+    requestId: `review-repair-${head}-${reviewObservationId}`,
     profileId: 'github-pr-cycle',
     workflowId: 'repair',
     stageId: 'change',
@@ -40,6 +43,7 @@ test('review repair is an immutable Stage request rather than an agent command',
   assert.equal(request.procedure, undefined)
   assert.equal(isReviewRepairRequestId(request.requestId, head), true)
   assert.equal(isReviewRepairRequestId(request.requestId, base), false)
+  assert.equal(reviewRepairTransition(reviewObservationId), `review-repair:${reviewObservationId}`)
 })
 
 test('Issue requests resolve their root Stage and bind the Profile hash', () => {
@@ -60,7 +64,7 @@ test('Issue requests resolve their root Stage and bind the Profile hash', () => 
 
 test('repository dispatch transports the complete WorkRequest', () => {
   const request = createReviewRepairRequest({
-    ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head,
+    ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head, reviewObservationId,
   })
   assert.deepEqual(repositoryDispatchBody(request), {
     event_type: 'agent_work_requested',
@@ -70,7 +74,7 @@ test('repository dispatch transports the complete WorkRequest', () => {
 
 test('WorkRequest parsing fails closed on unknown fields and mutable identities', () => {
   const request = createReviewRepairRequest({
-    ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head,
+    ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head, reviewObservationId,
   })
   assert.throws(() => parseAgentWorkRequest({ ...request, command: 'npm test' }), /unknown field command/)
   assert.throws(() => parseAgentWorkRequest({ ...request, revision: { base, head: 'main' } }), /revision/)

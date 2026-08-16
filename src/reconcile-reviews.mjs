@@ -98,7 +98,7 @@ async function writeGovernorRecord(number, record) {
   })
 }
 
-async function governTransition(pullRequest, transition, { limit, workIdentity } = {}) {
+async function governTransition(pullRequest, transition, { limit, workIdentity, budgetTransition = transition } = {}) {
   const subject = pullRequestGovernorSubject(pullRequest)
   const stateVersion = subjectStateVersion(subject)
   const records = await pullRequestGovernorRecords(pullRequest.number)
@@ -109,7 +109,7 @@ async function governTransition(pullRequest, transition, { limit, workIdentity }
   if (!decision.execute) return { execute: false, action: decision.action }
   if (limit) {
     const budget = governorBudgetDecision({
-      transition,
+      transition: budgetTransition,
       subject: { type: subject.type, number: subject.number },
       workIdentity,
       observationId: governorObservationId,
@@ -238,13 +238,14 @@ for (const summary of summaries.flat()) {
   const stateVersion = subjectStateVersion(subject)
   const governorRecords = await pullRequestGovernorRecords(pullRequest.number)
   const pendingRecord = governorRecords.find(record => record.status === 'candidate'
-    && ['review-repair', 'workflow-recovery'].includes(record.transition)
+    && (record.transition === 'workflow-recovery' || record.transition.startsWith('review-repair:run-'))
     && record.subject.type === 'pull-request'
     && record.subject.number === pullRequest.number
     && record.stateVersion === stateVersion)
   const pendingTransition = pendingRecord?.transition
   if (pendingTransition) {
-    const repairProfile = pendingTransition === 'review-repair'
+    const reviewRepair = pendingTransition.startsWith('review-repair:run-')
+    const repairProfile = reviewRepair
       ? await targetProfile('github-pr-cycle', pullRequest.base.sha)
       : null
     const repairLimit = repairProfile
@@ -254,10 +255,11 @@ for (const summary of summaries.flat()) {
     const governed = await governTransition(pullRequest, pendingTransition, {
       limit: repairLimit,
       workIdentity: `branch:${pullRequest.head.ref}`,
+      ...(reviewRepair ? { budgetTransition: 'review-repair' } : {}),
     })
     if (!governed.execute) continue
     await markGovernorApplied(pullRequest, pendingTransition, governed)
-    if (pendingTransition === 'review-repair') {
+    if (reviewRepair) {
       if (pendingRecord.observationId.startsWith('comment-')) {
         await run(githubExecutable, [
           'api', '--method', 'POST', `repos/${repository}/dispatches`,
@@ -273,6 +275,7 @@ for (const summary of summaries.flat()) {
           pullRequestNumber: pullRequest.number,
           base: pullRequest.base.sha,
           head: pullRequest.head.sha,
+          reviewObservationId: pendingTransition.slice('review-repair:'.length),
         })
         await run(githubExecutable, [
           'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',

@@ -36,18 +36,29 @@ function generatedRequestId(value) {
   return `work-${createHash('sha256').update(canonicalJson(value)).digest('hex').slice(0, 40)}`
 }
 
-/** Return the safe durable request id for one exact blocked review pair. */
-export function reviewRepairRequestId(base, head) {
-  if (!FULL_SHA.test(base) || !FULL_SHA.test(head)) {
-    throw new Error('review repair request id requires full lowercase commit SHAs')
+function reviewObservationId(value) {
+  const text = requiredText(value, 'review repair observation id', 32)
+  if (!/^run-[1-9][0-9]{0,19}$/.test(text)) {
+    throw new Error('review repair observation id must identify one GitHub Actions run')
   }
-  return `review-repair-${base}-${head}`
+  return text
 }
 
-/** Return whether a request id binds the supplied exact review head. */
+/** Return the distinct Governor transition for one authoritative review generation. */
+export function reviewRepairTransition(observationId) {
+  return `review-repair:${reviewObservationId(observationId)}`
+}
+
+/** Return the safe durable request id for one blocked review generation. */
+export function reviewRepairRequestId(head, observationId) {
+  if (!FULL_SHA.test(head)) throw new Error('review repair request id requires a full lowercase head SHA')
+  return `review-repair-${head}-${reviewObservationId(observationId)}`
+}
+
+/** Return whether a request id binds the supplied exact review head and one review generation. */
 export function isReviewRepairRequestId(value, expectedHead) {
-  const match = /^review-repair-([0-9a-f]{40})-([0-9a-f]{40})$/.exec(String(value || ''))
-  return Boolean(match && FULL_SHA.test(expectedHead) && match[2] === expectedHead)
+  const match = /^review-repair-([0-9a-f]{40})-(run-[1-9][0-9]{0,19})$/.exec(String(value || ''))
+  return Boolean(match && FULL_SHA.test(expectedHead) && match[1] === expectedHead)
 }
 
 /** Validate and return one immutable WorkRequest. */
@@ -161,6 +172,7 @@ export function createReviewRepairRequest({
   pullRequestNumber,
   base,
   head,
+  reviewObservationId,
 }) {
   const workflowId = 'repair'
   const stage = resolveIssueEntryStage(definition, workflowId)
@@ -173,7 +185,7 @@ export function createReviewRepairRequest({
     subject: { type: 'pull-request', number: pullRequestNumber },
     revision: { base, head },
     coordinationKey: `${repository}:${definition.profileId}:${workflowId}`,
-    requestId: reviewRepairRequestId(base, head),
+    requestId: reviewRepairRequestId(head, reviewObservationId),
   })
 }
 

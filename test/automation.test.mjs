@@ -25,6 +25,7 @@ import {
 } from '../src/common.mjs'
 import {
   ciRepairRequest,
+  ciRepairTransition,
   explicitReworkCommand,
   issueDependencies,
   selectBacklogWork,
@@ -33,7 +34,6 @@ import {
   trustedCiRerunSuccess,
 } from '../src/dispatch-policy.mjs'
 import {
-  automaticRepairRequestId,
   githubReviewBody,
   hasExactReviewVerdict,
   parseReviewMessage,
@@ -1138,6 +1138,8 @@ test('CI repair requests bind one failed workflow run across bounded recovery at
   assert.equal(ciRepairRequest(`ci-head-${'a'.repeat(40)}`), null)
   assert.equal(ciRepairRequest('ci-run-not-a-number-1'), null)
   assert.equal(ciRepairRequest('ci-head-main'), null)
+  assert.equal(ciRepairTransition(31767661165), 'ci-repair:run-31767661165')
+  assert.throws(() => ciRepairTransition(0), /positive workflow run id/)
 })
 
 test('only exact failed configured CI evidence for the current head may wake DSH', () => {
@@ -1379,13 +1381,6 @@ test('githubReviewBody stays English and binds the reviewed commits', () => {
   })
   assert.match(body, /Agent review: PASS/)
   assert.match(body, /head456.*base123/)
-})
-
-test('automatic repair requests are idempotent for one exact review pair', () => {
-  const base = 'a'.repeat(40)
-  const head = 'b'.repeat(40)
-  assert.equal(automaticRepairRequestId(base, head), `agent-review-${base}-${head}`)
-  assert.throws(() => automaticRepairRequestId('main', head), /full commit SHA/)
 })
 
 test('an interrupted running repair request can be reclaimed exactly once', () => {

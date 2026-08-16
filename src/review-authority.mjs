@@ -18,16 +18,3 @@ export function reviewMarker(head) {
   if (!/^[0-9a-f]{40}$/i.test(head)) throw new Error('Review markers require a full commit SHA')
   return `<!-- agent-review:${head.toLowerCase()} -->`
 }
-
-/**
- * Return the durable idempotency key for one exact blocked review pair.
- * @param {string} base
- * @param {string} head
- * @returns {string}
- */
-export function reviewRepairRequestId(base, head) {
-  if (![base, head].every(value => /^[0-9a-f]{40}$/i.test(value))) {
-    throw new Error('Automatic repair requests require full commit SHAs')
-  }
-  return `agent-review-${base.toLowerCase()}-${head.toLowerCase()}`
-}
