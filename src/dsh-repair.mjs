@@ -18,6 +18,7 @@ import {
 } from './common.mjs'
 import {
   ciRepairRequest,
+  ciRepairTransition,
   explicitReworkCommand,
   trustedCiFailure,
   trustedCiRerunSuccess,
@@ -308,7 +309,7 @@ if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
   throw new Error(`Pull request #${pullRequestNumber} is paused and requires an authorized resume`)
 }
 const governedTransition = ciRequest
-  ? 'ci-repair'
+  ? ciRepairTransition(ciRequest.runId)
   : reviewObservationId
     ? reviewRepairTransition(reviewObservationId)
     : 'review-repair'

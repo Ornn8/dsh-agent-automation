@@ -25,6 +25,7 @@ import {
 } from '../src/common.mjs'
 import {
   ciRepairRequest,
+  ciRepairTransition,
   explicitReworkCommand,
   issueDependencies,
   selectBacklogWork,
@@ -1137,6 +1138,8 @@ test('CI repair requests bind one failed workflow run across bounded recovery at
   assert.equal(ciRepairRequest(`ci-head-${'a'.repeat(40)}`), null)
   assert.equal(ciRepairRequest('ci-run-not-a-number-1'), null)
   assert.equal(ciRepairRequest('ci-head-main'), null)
+  assert.equal(ciRepairTransition(31767661165), 'ci-repair:run-31767661165')
+  assert.throws(() => ciRepairTransition(0), /positive workflow run id/)
 })
 
 test('only exact failed configured CI evidence for the current head may wake DSH', () => {
