@@ -3,7 +3,7 @@ name: Agent Pipeline Health
 on:
   workflow_dispatch:
   schedule:
-    - cron: '11 * * * *'
+    - cron: '11-59/15 * * * *'
     - cron: '29 3 * * *'
 
 permissions:
@@ -11,23 +11,20 @@ permissions:
   contents: read
 
 jobs:
-  review-worker:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '29 3 * * *'
-    name: review worker
+  replica:
+    name: ${{ matrix.role }} / ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(vars.AGENT_AUTOMATION_REPLICA_HEALTH) }}
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/pipeline-health.yml@{{CONTROLLER_SHA}}
     with:
-      role: review
-      readiness_canary: ${{ github.event.schedule == '29 3 * * *' }}
-
-  change-worker:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '29 3 * * *'
-    name: change worker
-    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/pipeline-health.yml@{{CONTROLLER_SHA}}
-    with:
-      role: change
-      readiness_canary: ${{ github.event.schedule == '29 3 * * *' }}
+      role: ${{ matrix.role }}
+      replica_id: ${{ matrix.label }}
+      readiness_canary: ${{ github.event.schedule == '29 3 * * *' && matrix.primary }}
 
   hosted-watchdog:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: hosted queue watchdog
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/runner-watchdog.yml@{{CONTROLLER_SHA}}
+    with:
+      controller_repository: {{CONTROLLER_REPOSITORY}}

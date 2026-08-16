@@ -287,13 +287,21 @@ test('operations directory creation uses a supported New-Item path parameter', a
   assert.doesNotMatch(directoryFunction, /New-Item[^\n]+-LiteralPath/)
 })
 
-test('scheduled tasks use the installer-resolved absolute PowerShell host', async () => {
+test('scheduled tasks use the managed Role Process Host for every Agent process tree', async () => {
   const installer = await readFile(new URL('../scripts/install.ps1', import.meta.url), 'utf8')
+  const operations = await readFile(new URL('../ops/Automation.Operations.psm1', import.meta.url), 'utf8')
+  await assert.rejects(stat(new URL('../ops/RoleProcessHost.exe', import.meta.url)), { code: 'ENOENT' })
   assert.match(installer, /\$pwshExecutable = \(Get-Command pwsh\.exe -ErrorAction Stop\)\.Source/)
-  assert.equal((installer.match(/New-ScheduledTaskAction -Execute \$pwshExecutable/g) ?? []).length, 2)
+  assert.equal((installer.match(/New-ScheduledTaskAction -Execute \$roleHost/g) ?? []).length, 2)
+  assert.match(installer, /RoleProcessHost\.exe/)
+  assert.match(installer, /--executable/)
   assert.doesNotMatch(installer, /New-ScheduledTaskAction -Execute 'pwsh\.exe'/)
   assert.match(installer, /\$action\.PSObject\.Properties\['Arguments'\]/)
   assert.doesNotMatch(installer, /\[string\]\$_\.Arguments/)
+  assert.match(operations, /'RoleProcessHost\.cs' = 'role-process-host\\RoleProcessHost\.cs'/)
+  assert.match(operations, /Build-RoleProcessHost -SourcePath/)
+  assert.match(operations, /compilerSha256/)
+  assert.match(operations, /snapshot manifest has no generated runtime file hashes/)
 })
 
 test('DSH Web session interruption fails the controller', async () => {

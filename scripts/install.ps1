@@ -56,11 +56,10 @@ function Get-RunnerArchive {
 
 function Register-InstanceTask {
   param([Parameter(Mandatory)]$Instance)
-  $processHost = Join-Path $runtimeSnapshot.root 'windows-role-process-host.ps1'
   $supervisor = Join-Path $runtimeSnapshot.root 'runner-supervisor.ps1'
-  $targetArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $supervisor, '-Configuration', $loaded.Path, '-InstanceId', $Instance.Id))))
-  $arguments = "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$processHost`" -TargetExecutable `"$pwshExecutable`" -TargetArgumentsBase64 $targetArguments -WorkingDirectory `"$($runtimeSnapshot.root)`""
-  $action = New-ScheduledTaskAction -Execute $pwshExecutable -Argument $arguments
+  $roleHost = Join-Path $runtimeSnapshot.root 'RoleProcessHost.exe'
+  $arguments = "--executable `"$pwshExecutable`" --cwd `"$($Instance.WorkDirectory)`" --log `"$($Instance.LogFile)`" -- -NoProfile -ExecutionPolicy Bypass -File `"$supervisor`" -Configuration `"$($loaded.Path)`" -InstanceId $($Instance.Id)"
+  $action = New-ScheduledTaskAction -Execute $roleHost -Argument $arguments
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -Hidden -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
@@ -68,11 +67,10 @@ function Register-InstanceTask {
 }
 
 function Register-DshWebTask {
-  $processHost = Join-Path $runtimeSnapshot.root 'windows-role-process-host.ps1'
   $supervisor = Join-Path $runtimeSnapshot.root 'dsh-web-host-supervisor.ps1'
-  $targetArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $supervisor, '-Configuration', $loaded.Path))))
-  $arguments = "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$processHost`" -TargetExecutable `"$pwshExecutable`" -TargetArgumentsBase64 $targetArguments -WorkingDirectory `"$($runtimeSnapshot.root)`""
-  $action = New-ScheduledTaskAction -Execute $pwshExecutable -Argument $arguments
+  $roleHost = Join-Path $runtimeSnapshot.root 'RoleProcessHost.exe'
+  $arguments = "--executable `"$pwshExecutable`" --cwd `"$($ops.dshWebHost.workingDirectory)`" --log `"$(Join-Path $ops.logsRoot 'dsh-web-host.log')`" -- -NoProfile -ExecutionPolicy Bypass -File `"$supervisor`" -Configuration `"$($loaded.Path)`""
+  $action = New-ScheduledTaskAction -Execute $roleHost -Argument $arguments
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -Hidden -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
@@ -196,6 +194,9 @@ if (-not $manifest) { $manifest = New-InstallManifest -Loaded $loaded -RuntimeSn
 foreach ($repositoryPlan in @($plan.repositories)) {
   $ciWorkflowsJson = $repositoryPlan.variables.DSH_AUTOMATION_CI_WORKFLOWS
   $requiredChecksJson = $repositoryPlan.variables.DSH_AUTOMATION_REQUIRED_CHECKS
+  $replicaHealthJson = ConvertTo-Json -InputObject ([ordered]@{ include = @($instances | Where-Object {
+    $_.role -in @('change', 'review') -and ($null -eq $_.repository -or $_.repository -eq $repositoryPlan.repository)
+  } | ForEach-Object { [ordered]@{ role = $_.role; label = $_.id; primary = ($_.replica -eq 1) } }) }) -Compress -Depth 4
   $protectionMapping = [pscustomobject]@{
     repository = $repositoryPlan.repository
     requiredChecks = @($repositoryPlan.branchProtection.requiredChecks | ForEach-Object { $_.name } | Where-Object { $_ -ne 'agent/review' })
@@ -205,6 +206,8 @@ foreach ($repositoryPlan in @($plan.repositories)) {
     if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_CI_WORKFLOWS for $($repositoryPlan.repository)" }
     & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_REQUIRED_CHECKS --repo $repositoryPlan.repository --body $requiredChecksJson 1>$null 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_REQUIRED_CHECKS for $($repositoryPlan.repository)" }
+    & $loaded.Config.ghExecutable variable set AGENT_AUTOMATION_REPLICA_HEALTH --repo $repositoryPlan.repository --body $replicaHealthJson 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set AGENT_AUTOMATION_REPLICA_HEALTH for $($repositoryPlan.repository)" }
   }
   Invoke-InstallAction "ensure strict app-bound required checks, bootstrapping an unprotected default branch of $($repositoryPlan.repository)" {
     Set-RepositoryRequiredStatusChecks -Mapping $protectionMapping -GhExecutable $loaded.Config.ghExecutable
@@ -320,8 +323,9 @@ Invoke-InstallAction 'create private runtime, state, logs, and fault directories
   foreach ($path in @($plan.paths)) { Initialize-PrivateDirectory -Path $path.path }
 }
 Invoke-InstallAction "deploy immutable operations runtime snapshot $($runtimeSnapshot.id)" {
-  Install-OperationsRuntimeSnapshot -Snapshot $runtimeSnapshot -SourceRoot $runtimeSourceRoot
-  if ($manifest.psobject.Properties.Name -contains 'operationsRuntime') { $manifest.operationsRuntime = $runtimeSnapshot } else { $manifest | Add-Member -NotePropertyName operationsRuntime -NotePropertyValue $runtimeSnapshot }
+  $existingRuntime = if ($manifest.psobject.Properties.Name -contains 'operationsRuntime') { $manifest.operationsRuntime } else { $null }
+  $installedRuntime = Install-OperationsRuntimeSnapshot -Snapshot $runtimeSnapshot -SourceRoot $runtimeSourceRoot -ExistingSnapshot $existingRuntime
+  if ($manifest.psobject.Properties.Name -contains 'operationsRuntime') { $manifest.operationsRuntime = $installedRuntime } else { $manifest | Add-Member -NotePropertyName operationsRuntime -NotePropertyValue $installedRuntime }
   Write-InstallManifest -Loaded $loaded -Manifest $manifest
 }
 if ($ops.dshWebHost.enabled) {

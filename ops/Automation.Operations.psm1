@@ -6,7 +6,14 @@ $script:GitHubActionsAppId = 15368
 $script:ReviewRequiredCheckName = 'agent/review'
 $script:LegacyReviewRequiredCheckName = 'codex/review'
 $script:MinimumRunnerVersion = [Version]'2.334.0'
-$script:OperationsRuntimeFiles = @('Automation.Operations.psm1', 'config.defaults.json', 'runner-supervisor.ps1', 'dsh-web-host-supervisor.ps1', 'windows-role-process-host.ps1')
+$script:OperationsRuntimeSources = [ordered]@{
+  'Automation.Operations.psm1' = 'Automation.Operations.psm1'
+  'config.defaults.json' = 'config.defaults.json'
+  'runner-supervisor.ps1' = 'runner-supervisor.ps1'
+  'dsh-web-host-supervisor.ps1' = 'dsh-web-host-supervisor.ps1'
+  'RoleProcessHost.cs' = 'role-process-host\RoleProcessHost.cs'
+}
+$script:OperationsRuntimeFiles = @('Automation.Operations.psm1', 'config.defaults.json', 'runner-supervisor.ps1', 'dsh-web-host-supervisor.ps1', 'RoleProcessHost.cs', 'RoleProcessHost.exe')
 
 function Get-JsonPropertyLineMap {
   param([Parameter(Mandatory)][string]$Path)
@@ -602,7 +609,7 @@ function Get-RunnerInstances {
           RegistrationKind = 'organization'
           RegistrationOwner = $ops.controller.organization
           RunnerName = $runnerName
-          Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.$roleName.labels) -Platform $hostPlatform)
+          Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.$roleName.labels + @($id)) -Platform $hostPlatform)
           RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
           WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
           TaskName = "DSH-Agent-Automation-$id"
@@ -628,7 +635,7 @@ function Get-RunnerInstances {
             RegistrationKind = 'repository'
             RegistrationOwner = $mapping.repository
             RunnerName = $runnerName
-            Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.$roleName.labels) -Platform $hostPlatform)
+            Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.$roleName.labels + @($id)) -Platform $hostPlatform)
             RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
             WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
             TaskName = "DSH-Agent-Automation-$id"
@@ -764,7 +771,7 @@ function New-InstallationPlan {
           registrationKind = $target.registrationKind
           registrationOwner = $target.registrationOwner
           runnerName = Get-InstallationPlanRunnerName -Prefix $role.runnerNamePrefix -RepositoryKey $target.key -HostName $HostName -Replica $replica
-          labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($role.labels) -Platform $profile)
+          labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($role.labels + @($id)) -Platform $profile)
           runnerRoot = $runnerRoot
           workDirectory = $workDirectory
           serviceManager = $profile.serviceManager
@@ -1236,28 +1243,79 @@ function Start-ManagedComponent {
   throw "Managed component $InstanceId did not start with a verified owned process within $TimeoutSeconds seconds"
 }
 
-function New-RecordedOperationsRuntimeSnapshotDefinition {
-  param([Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)]$Files)
-  $records = @($Files | Sort-Object name)
-  if (-not $records.Count) { throw 'Recorded operations runtime snapshot must contain files' }
-  $names = @($records.name)
-  if (@($names | Select-Object -Unique).Count -ne $names.Count -or @($names | Where-Object { $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$' }).Count) { throw 'Recorded operations runtime snapshot contains an invalid or duplicate file name' }
-  foreach ($record in $records) {
-    if ($record.sha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw "Invalid operations runtime file hash: $($record.name)" }
+function Get-RoleProcessHostCompiler {
+  if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    $identity = [Text.Encoding]::UTF8.GetBytes('windows-role-process-host-compiler-unavailable-plan-only')
+    return [pscustomobject]@{
+      path = $null
+      sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($identity)).ToLowerInvariant()
+      available = $false
+    }
   }
-  $canonical = @($records | ForEach-Object { "$($_.name):$(([string]$_.sha256).ToLowerInvariant())" }) -join "`n"
-  $id = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))).ToLowerInvariant()
-  $root = Join-Path $InstallRoot (Join-Path 'operations-runtime' $id)
-  Assert-PathInside -Child $root -Parent $InstallRoot -Name 'operations runtime snapshot root'
-  return [pscustomobject][ordered]@{ id = $id; root = $root; files = @($records | ForEach-Object { [pscustomobject][ordered]@{ name = [string]$_.name; sha256 = ([string]$_.sha256).ToLowerInvariant() } }) }
+  $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+  if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows .NET Framework C# compiler is required to build Role Process Host.' }
+  return [pscustomobject]@{ path = $compiler; sha256 = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash.ToLowerInvariant(); available = $true }
+}
+
+function Build-RoleProcessHost {
+  param(
+    [Parameter(Mandatory)][string]$SourcePath,
+    [Parameter(Mandatory)][string]$OutputPath,
+    [string]$ExpectedCompilerSha256
+  )
+  if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { throw "Role Process Host source is missing: $SourcePath" }
+  $compiler = Get-RoleProcessHostCompiler
+  if (-not $compiler.available) { throw 'Role Process Host compilation is available only on Windows.' }
+  if ($ExpectedCompilerSha256 -and -not $compiler.sha256.Equals($ExpectedCompilerSha256, [StringComparison]::OrdinalIgnoreCase)) { throw 'Role Process Host compiler hash changed before installation.' }
+  $output = [IO.Path]::GetFullPath($OutputPath)
+  [IO.Directory]::CreateDirectory((Split-Path -Parent $output)) | Out-Null
+  & $compiler.path /nologo /target:winexe /optimize+ /platform:x64 "/out:$output" $SourcePath
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $output -PathType Leaf)) { throw 'Role Process Host compilation failed.' }
+  return $output
 }
 
 function New-OperationsRuntimeSnapshotDefinition {
-  param([Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)]$Files)
-  $definition = New-RecordedOperationsRuntimeSnapshotDefinition -InstallRoot $InstallRoot -Files $Files
-  $recordNames = @($definition.files.name | Sort-Object) -join ','
-  $requiredNames = @($script:OperationsRuntimeFiles | Sort-Object) -join ','
-  if (@($definition.files).Count -ne $script:OperationsRuntimeFiles.Count -or $recordNames -cne $requiredNames) { throw 'Operations runtime snapshot must contain the exact current runtime file set' }
+  param(
+    [Parameter(Mandatory)][string]$InstallRoot,
+    [Parameter(Mandatory)]$Sources,
+    [Parameter(Mandatory)][string]$CompilerSha256,
+    $Files
+  )
+  $sourceRecords = @($Sources | Sort-Object name)
+  $sourceNames = @($sourceRecords.name | Sort-Object) -join ','
+  $requiredSourceNames = @($script:OperationsRuntimeSources.Keys | Sort-Object) -join ','
+  if ($sourceRecords.Count -ne $script:OperationsRuntimeSources.Count -or $sourceNames -cne $requiredSourceNames) { throw 'Operations runtime snapshot must contain the exact reviewed source set' }
+  if ($CompilerSha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw 'Operations runtime compiler hash is invalid' }
+  foreach ($record in $sourceRecords) {
+    if ($record.sha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw "Invalid operations runtime source hash: $($record.name)" }
+  }
+  $canonical = @($sourceRecords | ForEach-Object { "$($_.name):$(([string]$_.sha256).ToLowerInvariant())" }) -join "`n"
+  $canonical = "$canonical`ncompiler:$($CompilerSha256.ToLowerInvariant())"
+  $id = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))).ToLowerInvariant()
+  $root = Join-Path $InstallRoot (Join-Path 'operations-runtime' $id)
+  Assert-PathInside -Child $root -Parent $InstallRoot -Name 'operations runtime snapshot root'
+  $definition = [pscustomobject][ordered]@{
+    id = $id
+    root = $root
+    sources = @($sourceRecords | ForEach-Object { [pscustomobject][ordered]@{ name = [string]$_.name; sha256 = ([string]$_.sha256).ToLowerInvariant() } })
+    compilerSha256 = $CompilerSha256.ToLowerInvariant()
+  }
+  if ($null -ne $Files) {
+    $records = @($Files | Sort-Object name)
+    $recordNames = @($records.name | Sort-Object) -join ','
+    $requiredNames = @($script:OperationsRuntimeFiles | Sort-Object) -join ','
+    if ($records.Count -ne $script:OperationsRuntimeFiles.Count -or $recordNames -cne $requiredNames) { throw 'Operations runtime snapshot must contain the exact installed runtime file set' }
+    foreach ($record in $records) {
+      if ($record.sha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw "Invalid operations runtime file hash: $($record.name)" }
+    }
+    foreach ($source in $sourceRecords) {
+      $installedSource = @($records | Where-Object name -CEQ $source.name)
+      if ($installedSource.Count -ne 1 -or -not ([string]$installedSource[0].sha256).Equals([string]$source.sha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Installed operations source does not match its reviewed hash: $($source.name)"
+      }
+    }
+    $definition | Add-Member -NotePropertyName files -NotePropertyValue @($records | ForEach-Object { [pscustomobject][ordered]@{ name = [string]$_.name; sha256 = ([string]$_.sha256).ToLowerInvariant() } })
+  }
   return $definition
 }
 
@@ -1267,18 +1325,20 @@ function Get-OperationsRuntimeSnapshotDefinition {
   $sourceItem = Get-Item -LiteralPath $SourceRoot -Force
   if ($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Operations runtime source directory is a reparse point: $SourceRoot" }
   $records = @()
-  foreach ($name in $script:OperationsRuntimeFiles) {
-    $path = Join-Path $SourceRoot $name
+  foreach ($name in $script:OperationsRuntimeSources.Keys) {
+    $path = Join-Path $SourceRoot $script:OperationsRuntimeSources[$name]
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Operations runtime source file is missing: $path" }
     $item = Get-Item -LiteralPath $path -Force
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Operations runtime source file is a reparse point: $path" }
     $records += [pscustomobject]@{ name = $name; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
   }
-  return New-OperationsRuntimeSnapshotDefinition -InstallRoot $InstallRoot -Files $records
+  $compiler = Get-RoleProcessHostCompiler
+  return New-OperationsRuntimeSnapshotDefinition -InstallRoot $InstallRoot -Sources $records -CompilerSha256 $compiler.sha256
 }
 
 function Test-OperationsRuntimeSnapshot {
   param([Parameter(Mandatory)]$Snapshot)
+  if (-not ($Snapshot.psobject.Properties.Name -contains 'files')) { return [pscustomobject]@{ Ok = $false; Detail = 'snapshot manifest has no generated runtime file hashes' } }
   if (-not (Test-Path -LiteralPath $Snapshot.root -PathType Container)) { return [pscustomobject]@{ Ok = $false; Detail = 'snapshot directory is missing' } }
   $rootItem = Get-Item -LiteralPath $Snapshot.root -Force
   if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { return [pscustomobject]@{ Ok = $false; Detail = 'snapshot directory is a reparse point' } }
@@ -1294,25 +1354,35 @@ function Test-OperationsRuntimeSnapshot {
 }
 
 function Install-OperationsRuntimeSnapshot {
-  param([Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)][string]$SourceRoot)
-  $existing = Test-OperationsRuntimeSnapshot -Snapshot $Snapshot
-  if ($existing.Ok) { return }
+  param([Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)][string]$SourceRoot, $ExistingSnapshot)
+  if ($ExistingSnapshot -and $ExistingSnapshot.id -ceq $Snapshot.id) {
+    $existing = Test-OperationsRuntimeSnapshot -Snapshot $ExistingSnapshot
+    if ($existing.Ok) { return $ExistingSnapshot }
+  }
   if (Test-Path -LiteralPath $Snapshot.root) { throw "Refusing to overwrite invalid operations runtime snapshot: $($Snapshot.root)" }
   $parent = Split-Path -Parent $Snapshot.root
   Initialize-PrivateDirectory -Path $parent
   $temporary = Join-Path $parent ".snapshot.$([Guid]::NewGuid().ToString('N')).tmp"
   try {
     Initialize-PrivateDirectory -Path $temporary
-    foreach ($file in @($Snapshot.files)) { Copy-Item -LiteralPath (Join-Path $SourceRoot $file.name) -Destination (Join-Path $temporary $file.name) }
-    $temporarySnapshot = [pscustomobject]@{ id = $Snapshot.id; root = $temporary; files = @($Snapshot.files) }
+    foreach ($source in @($Snapshot.sources)) {
+      Copy-Item -LiteralPath (Join-Path $SourceRoot $script:OperationsRuntimeSources[$source.name]) -Destination (Join-Path $temporary $source.name)
+    }
+    Build-RoleProcessHost -SourcePath (Join-Path $temporary 'RoleProcessHost.cs') -OutputPath (Join-Path $temporary 'RoleProcessHost.exe') -ExpectedCompilerSha256 $Snapshot.compilerSha256 | Out-Null
+    $runtimeFiles = @($script:OperationsRuntimeFiles | ForEach-Object {
+      [pscustomobject]@{ name = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $temporary $_) -Algorithm SHA256).Hash }
+    })
+    $installedSnapshot = New-OperationsRuntimeSnapshotDefinition -InstallRoot (Split-Path -Parent (Split-Path -Parent $Snapshot.root)) -Sources $Snapshot.sources -CompilerSha256 $Snapshot.compilerSha256 -Files $runtimeFiles
+    $temporarySnapshot = [pscustomobject]@{ id = $installedSnapshot.id; root = $temporary; sources = $installedSnapshot.sources; compilerSha256 = $installedSnapshot.compilerSha256; files = $installedSnapshot.files }
     $verified = Test-OperationsRuntimeSnapshot -Snapshot $temporarySnapshot
     if (-not $verified.Ok) { throw "Staged operations runtime snapshot failed verification: $($verified.Detail)" }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     & icacls.exe $temporary /inheritance:r /grant:r ($identity + ':(OI)(CI)RX') /grant:r 'SYSTEM:(OI)(CI)RX' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not make the operations runtime snapshot read-only' }
     Move-Item -LiteralPath $temporary -Destination $Snapshot.root
-    $final = Test-OperationsRuntimeSnapshot -Snapshot $Snapshot
+    $final = Test-OperationsRuntimeSnapshot -Snapshot $installedSnapshot
     if (-not $final.Ok) { throw "Installed operations runtime snapshot failed verification: $($final.Detail)" }
+    return $installedSnapshot
   } finally {
     if (Test-Path -LiteralPath $temporary) {
       $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -1338,29 +1408,12 @@ function Remove-OperationsRuntimeSnapshot {
 function Test-ScheduledTaskRuntimePath {
   param([Parameter(Mandatory)]$Task, [Parameter(Mandatory)][string]$ExpectedScript)
   $actions = @($Task.Actions)
-  if ($actions.Count -ne 1 -or [string]$actions[0].Execute -notmatch '(?i)(^|\\)pwsh\.exe$') { return [pscustomobject]@{ Ok = $false; Detail = 'task action is not the expected PowerShell host' } }
-  $arguments = [string]$actions[0].Arguments
-  $hostMatches = [regex]::Matches($arguments, '(?i)(?:^|\s)-File\s+"([^"]+)"')
-  $executableMatches = [regex]::Matches($arguments, '(?i)(?:^|\s)-TargetExecutable\s+"([^"]+)"')
-  $payloadMatches = [regex]::Matches($arguments, '(?i)(?:^|\s)-TargetArgumentsBase64\s+(\S+)')
-  $workingMatches = [regex]::Matches($arguments, '(?i)(?:^|\s)-WorkingDirectory\s+"([^"]+)"')
-  if ($hostMatches.Count -ne 1 -or $executableMatches.Count -ne 1 -or $payloadMatches.Count -ne 1 -or $workingMatches.Count -ne 1) { return [pscustomobject]@{ Ok = $false; Detail = 'task action has no unique process host specification' } }
-  $hostMatch = $hostMatches[0]
-  $executableMatch = $executableMatches[0]
-  $payloadMatch = $payloadMatches[0]
-  $workingMatch = $workingMatches[0]
-  $expectedHost = Join-Path (Split-Path -Parent $ExpectedScript) 'windows-role-process-host.ps1'
-  $hostOk = ([IO.Path]::GetFullPath($hostMatch.Groups[1].Value)).Equals([IO.Path]::GetFullPath($expectedHost), [StringComparison]::OrdinalIgnoreCase)
-  $targetExecutableOk = ([IO.Path]::GetFullPath($executableMatch.Groups[1].Value)).Equals([IO.Path]::GetFullPath([string]$actions[0].Execute), [StringComparison]::OrdinalIgnoreCase)
-  $workingOk = ([IO.Path]::GetFullPath($workingMatch.Groups[1].Value)).Equals([IO.Path]::GetFullPath((Split-Path -Parent $ExpectedScript)), [StringComparison]::OrdinalIgnoreCase)
-  try {
-    $targetArguments = @(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payloadMatch.Groups[1].Value)) | ConvertFrom-Json))
-    $fileIndexes = @(for ($index = 0; $index -lt $targetArguments.Count; $index++) { if ($targetArguments[$index] -ceq '-File') { $index } })
-    $targetOk = -not @($targetArguments | Where-Object { $_ -isnot [string] }).Count -and $fileIndexes.Count -eq 1 -and $fileIndexes[0] + 1 -lt $targetArguments.Count -and ([IO.Path]::GetFullPath([string]$targetArguments[$fileIndexes[0] + 1])).Equals([IO.Path]::GetFullPath($ExpectedScript), [StringComparison]::OrdinalIgnoreCase)
-  } catch { $targetOk = $false }
-  $hidden = $arguments -match '(?i)(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)'
-  $ok = $hostOk -and $targetExecutableOk -and $targetOk -and $workingOk -and $hidden
-  return [pscustomobject]@{ Ok = $ok; Detail = if ($ok) { 'task uses the managed runtime snapshot' } else { 'task references a different runtime path' } }
+  $expectedHost = Join-Path (Split-Path -Parent $ExpectedScript) 'RoleProcessHost.exe'
+  if ($actions.Count -ne 1 -or -not ([IO.Path]::GetFullPath([string]$actions[0].Execute)).Equals([IO.Path]::GetFullPath($expectedHost), [StringComparison]::OrdinalIgnoreCase)) { return [pscustomobject]@{ Ok = $false; Detail = 'task action is not the managed Role Process Host' } }
+  $match = [regex]::Match([string]$actions[0].Arguments, '(?i)(?:^|\s)-File\s+"([^"]+)"')
+  if (-not $match.Success) { return [pscustomobject]@{ Ok = $false; Detail = 'task action has no quoted runtime script path' } }
+  $ok = ([IO.Path]::GetFullPath($match.Groups[1].Value)).Equals([IO.Path]::GetFullPath($ExpectedScript), [StringComparison]::OrdinalIgnoreCase)
+  return [pscustomobject]@{ Ok = $ok; Detail = if ($ok) { 'task uses the managed Role Process Host and runtime snapshot' } else { 'task references a different runtime path' } }
 }
 
 function ConvertTo-ManifestEntry {
@@ -1423,10 +1476,12 @@ function Read-InstallManifest {
   if ($manifest.dshWebManaged -isnot [bool]) { throw 'Install manifest dshWebManaged must be boolean' }
   if ($manifest.psobject.Properties.Name -contains 'operationsRuntime' -and $null -ne $manifest.operationsRuntime) {
     $runtime = $manifest.operationsRuntime
+    $runtimeFields = @($runtime.psobject.Properties.Name | Sort-Object) -join ','
+    if ($runtimeFields -cne 'compilerSha256,files,id,root,sources') { throw 'Install manifest operations runtime fields are invalid' }
     if ($runtime.id -notmatch '^[a-f0-9]{64}$') { throw 'Install manifest operations runtime id is invalid' }
     $expectedRuntimeRoot = Join-Path $manifestInstallRoot (Join-Path 'operations-runtime' $runtime.id)
     if (-not ([IO.Path]::GetFullPath($runtime.root)).Equals([IO.Path]::GetFullPath($expectedRuntimeRoot), [StringComparison]::OrdinalIgnoreCase)) { throw 'Install manifest operations runtime path does not match its content id' }
-    $runtimeDefinition = New-RecordedOperationsRuntimeSnapshotDefinition -InstallRoot $manifestInstallRoot -Files $runtime.files
+    $runtimeDefinition = New-OperationsRuntimeSnapshotDefinition -InstallRoot $manifestInstallRoot -Sources $runtime.sources -CompilerSha256 $runtime.compilerSha256 -Files $runtime.files
     if ($runtimeDefinition.id -cne $runtime.id) { throw 'Install manifest operations runtime id does not match its file hashes' }
   }
   $ids = @()
@@ -1737,29 +1792,39 @@ function Invoke-OperationsSelfTest {
   $fakeOps.runner.version = '1.0.0'
   $unexpectedState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id + 'target-orphan-change') -DiscoveredRunnerIds @($targetInstances.Id) -DiscoveredProcessRecordIds @('target-orphan-review') -DshWebTaskPresent $false -DshWebProcessRecordPresent $false
   $results += [pscustomobject]@{ Name = 'manifest reconciliation detects untracked artifacts'; Passed = ($unexpectedState.UnexpectedTaskIds -contains 'target-orphan-change' -and $unexpectedState.UnexpectedProcessRecordIds -contains 'target-orphan-review') }
-  $runtimeFilesA = @(
+  $runtimeSourcesA = @(
     [pscustomobject]@{ name = 'Automation.Operations.psm1'; sha256 = ('1' * 64) },
     [pscustomobject]@{ name = 'config.defaults.json'; sha256 = ('6' * 64) },
     [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('2' * 64) },
     [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) },
-    [pscustomobject]@{ name = 'windows-role-process-host.ps1'; sha256 = ('4' * 64) }
+    [pscustomobject]@{ name = 'RoleProcessHost.cs'; sha256 = ('4' * 64) }
   )
-  $runtimeFilesB = @(
+  $runtimeSourcesB = @(
     [pscustomobject]@{ name = 'Automation.Operations.psm1'; sha256 = ('1' * 64) },
     [pscustomobject]@{ name = 'config.defaults.json'; sha256 = ('6' * 64) },
-    [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('5' * 64) },
+    [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('9' * 64) },
     [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) },
-    [pscustomobject]@{ name = 'windows-role-process-host.ps1'; sha256 = ('4' * 64) }
+    [pscustomobject]@{ name = 'RoleProcessHost.cs'; sha256 = ('4' * 64) }
   )
-  $runtimeA = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files $runtimeFilesA
-  $runtimeARepeat = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files @($runtimeFilesA | Sort-Object name -Descending)
-  $runtimeB = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files $runtimeFilesB
-  $legacyRuntime = New-RecordedOperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files @($runtimeFilesA | Where-Object { $_.name -ne 'windows-role-process-host.ps1' })
-  $currentBuilderRejectedLegacy = $false
-  try { New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Files $legacyRuntime.files | Out-Null } catch { $currentBuilderRejectedLegacy = $true }
-  $results += [pscustomobject]@{ Name = 'runtime reader accepts a content-verified prior snapshot only for migration'; Passed = ($legacyRuntime.id -match '^[a-f0-9]{64}$' -and $currentBuilderRejectedLegacy) }
+  $runtimeFiles = @(
+    [pscustomobject]@{ name = 'Automation.Operations.psm1'; sha256 = ('1' * 64) },
+    [pscustomobject]@{ name = 'config.defaults.json'; sha256 = ('6' * 64) },
+    [pscustomobject]@{ name = 'runner-supervisor.ps1'; sha256 = ('2' * 64) },
+    [pscustomobject]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = ('3' * 64) },
+    [pscustomobject]@{ name = 'RoleProcessHost.cs'; sha256 = ('4' * 64) },
+    [pscustomobject]@{ name = 'RoleProcessHost.exe'; sha256 = ('5' * 64) }
+  )
+  $runtimeFilesB = @($runtimeFiles | ForEach-Object {
+    if ($_.name -ceq 'runner-supervisor.ps1') { [pscustomobject]@{ name = $_.name; sha256 = ('9' * 64) } } else { $_ }
+  })
+  $runtimeA = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Sources $runtimeSourcesA -CompilerSha256 ('6' * 64) -Files $runtimeFiles
+  $runtimeARepeat = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Sources @($runtimeSourcesA | Sort-Object name -Descending) -CompilerSha256 ('6' * 64) -Files @($runtimeFiles | Sort-Object name -Descending)
+  $runtimeB = New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Sources $runtimeSourcesB -CompilerSha256 ('6' * 64) -Files $runtimeFilesB
   $results += [pscustomobject]@{ Name = 'operations runtime snapshot identity is deterministic'; Passed = ($runtimeA.id -ceq $runtimeARepeat.id -and $runtimeA.root -ceq $runtimeARepeat.root) }
   $results += [pscustomobject]@{ Name = 'operations runtime content change creates a new snapshot'; Passed = ($runtimeA.id -cne $runtimeB.id -and $runtimeA.root -cne $runtimeB.root) }
+  $sourceMismatchRejected = $false
+  try { New-OperationsRuntimeSnapshotDefinition -InstallRoot $fakeOps.installRoot -Sources $runtimeSourcesA -CompilerSha256 ('6' * 64) -Files $runtimeFilesB | Out-Null } catch { $sourceMismatchRejected = $_.Exception.Message -match 'does not match its reviewed hash' }
+  $results += [pscustomobject]@{ Name = 'operations runtime rejects deployed source outside its reviewed identity'; Passed = $sourceMismatchRejected }
   $runtimeManifest = $manifest | ConvertTo-Json -Depth 12 | ConvertFrom-Json -Depth 12
   $runtimeManifest | Add-Member -NotePropertyName operationsRuntime -NotePropertyValue $runtimeA
   $runtimeExactState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $runtimeManifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DiscoveredProcessRecordIds @() -DiscoveredRuntimeSnapshotIds @($runtimeA.id) -DshWebTaskPresent $false -DshWebProcessRecordPresent $false -RuntimeSnapshot $runtimeA -RuntimeSnapshotValid $true
@@ -1772,14 +1837,10 @@ function Invoke-OperationsSelfTest {
   $runtimeOrphanState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $runtimeManifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DiscoveredProcessRecordIds @() -DiscoveredRuntimeSnapshotIds @($runtimeA.id, $orphanRuntimeId) -DshWebTaskPresent $false -DshWebProcessRecordPresent $false -RuntimeSnapshot $runtimeA -RuntimeSnapshotValid $true
   $results += [pscustomobject]@{ Name = 'runtime reconciliation detects an orphan snapshot'; Passed = ($runtimeOrphanState.UnexpectedRuntimeSnapshotIds -contains $orphanRuntimeId) }
   $expectedRuntimeScript = Join-Path $runtimeA.root 'runner-supervisor.ps1'
-  $expectedProcessHost = Join-Path $runtimeA.root 'windows-role-process-host.ps1'
-  $selfTestTargetArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject @('-NoProfile', '-File', $expectedRuntimeScript, '-Configuration', $selfTestConfigPath))))
-  $snapshotTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'C:\Program Files\PowerShell\7\pwsh.exe'; Arguments = "-WindowStyle Hidden -NoProfile -File `"$expectedProcessHost`" -TargetExecutable `"C:\Program Files\PowerShell\7\pwsh.exe`" -TargetArgumentsBase64 $selfTestTargetArguments -WorkingDirectory `"$($runtimeA.root)`"" }) }
+  $snapshotTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = (Join-Path $runtimeA.root 'RoleProcessHost.exe'); Arguments = "--executable `"C:\Program Files\PowerShell\7\pwsh.exe`" --cwd `"$selfTestRoot`" --log `"$selfTestRoot\host.log`" -- -NoProfile -File `"$expectedRuntimeScript`" -Configuration `"$selfTestConfigPath`"" }) }
   $checkoutScript = Join-Path $selfTestRoot 'checkout\ops\runner-supervisor.ps1'
   $checkoutTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'pwsh.exe'; Arguments = "-NoProfile -File `"$checkoutScript`" -Configuration `"$selfTestConfigPath`"" }) }
-  $checkoutWorkingDirectoryTask = [pscustomobject]@{ Actions = @([pscustomobject]@{ Execute = 'C:\Program Files\PowerShell\7\pwsh.exe'; Arguments = "-WindowStyle Hidden -NoProfile -File `"$expectedProcessHost`" -TargetExecutable `"C:\Program Files\PowerShell\7\pwsh.exe`" -TargetArgumentsBase64 $selfTestTargetArguments -WorkingDirectory `"$selfTestRoot`"" }) }
   $results += [pscustomobject]@{ Name = 'task runtime validation accepts only the manifest snapshot path'; Passed = ((Test-ScheduledTaskRuntimePath -Task $snapshotTask -ExpectedScript $expectedRuntimeScript).Ok -and -not (Test-ScheduledTaskRuntimePath -Task $checkoutTask -ExpectedScript $expectedRuntimeScript).Ok) }
-  $results += [pscustomobject]@{ Name = 'task runtime validation rejects a mutable working directory'; Passed = -not (Test-ScheduledTaskRuntimePath -Task $checkoutWorkingDirectoryTask -ExpectedScript $expectedRuntimeScript).Ok }
   $fakeOps.controller.registrationScope = 'organization'
   $fakeOps.controller.organization = 'owner'
   $organizationInstances = @(Get-RunnerInstances -Loaded $fakeLoaded)
@@ -1876,6 +1937,7 @@ Export-ModuleMember -Function @(
   'Get-DshWebTaskName', 'Get-OwnedProcessRecordPath', 'Write-OwnedProcessRecord', 'Read-OwnedProcessRecord',
   'Test-OwnedProcessIdentity', 'Test-OwnedProcessRecord', 'Remove-OwnedProcessRecord', 'Stop-OwnedProcessTree',
   'Stop-ManagedComponent', 'Start-ManagedComponent',
+  'Build-RoleProcessHost',
   'New-OperationsRuntimeSnapshotDefinition', 'Get-OperationsRuntimeSnapshotDefinition',
   'Test-OperationsRuntimeSnapshot', 'Install-OperationsRuntimeSnapshot', 'Remove-OperationsRuntimeSnapshot',
   'Test-ScheduledTaskRuntimePath',
