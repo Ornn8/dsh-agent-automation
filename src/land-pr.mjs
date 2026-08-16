@@ -7,6 +7,7 @@ import {
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
+import { parseReviewCheckIdentity } from './review-check.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const expectedHead = requiredEnv('HEAD_SHA')
@@ -15,7 +16,6 @@ const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const githubEnvironment = actionsCredentialEnvironment()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const profileId = requiredEnv('PROFILE_ID')
-const workflowId = requiredEnv('WORKFLOW_ID')
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
@@ -116,15 +116,24 @@ if (pullRequest.baseRefName !== defaultBranch) {
   process.exit(0)
 }
 const profile = await targetProfile(pullRequest.baseRefOid)
+const checkRuns = await readCheckRuns()
+const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)
+const reviewIdentity = parseReviewCheckIdentity(reviewProof?.checkRun)
+if (!reviewIdentity
+  || reviewIdentity.definitionHash !== profile.definitionHash) {
+  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: the trusted review does not identify this Profile revision.\n`)
+  process.exit(0)
+}
+const workflowId = reviewIdentity.workflowId
 const cycle = resolveGithubPrCycle(profile.definition, workflowId)
+if (cycle.review.id !== reviewIdentity.stageId) {
+  throw new Error(`Trusted review Stage ${reviewIdentity.stageId} does not match Workflow ${workflowId}`)
+}
 if (cycle.merge.mode !== 'auto') {
   process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: Profile requires manual merge.\n`)
   process.exit(0)
 }
 const requiredChecks = await protectedChecks(cycle.checks)
-
-const checkRuns = await readCheckRuns()
-const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)
 
 const decision = evaluateLanding({ pullRequest, expectedHead, requiredChecks, checkRuns, reviewProof, trustedReview })
 if (!decision.ready) {
@@ -148,6 +157,7 @@ if (current.baseRefName !== defaultBranch) {
 }
 const currentCheckRuns = await readCheckRuns()
 const currentReviewProof = await readLatestReviewProof(current, currentCheckRuns)
+const currentReviewIdentity = parseReviewCheckIdentity(currentReviewProof?.checkRun)
 const currentDecision = evaluateLanding({
   pullRequest: current,
   expectedHead,
@@ -156,7 +166,11 @@ const currentDecision = evaluateLanding({
   reviewProof: currentReviewProof,
   trustedReview,
 })
-if (current.baseRefOid !== pullRequest.baseRefOid || !currentDecision.ready) {
+if (current.baseRefOid !== pullRequest.baseRefOid
+  || currentReviewIdentity?.workflowId !== reviewIdentity.workflowId
+  || currentReviewIdentity?.stageId !== reviewIdentity.stageId
+  || currentReviewIdentity?.definitionHash !== reviewIdentity.definitionHash
+  || !currentDecision.ready) {
   throw new Error(`Pull request or landing evidence changed before merge: ${currentDecision.reason}`)
 }
 

@@ -132,6 +132,8 @@ try {
   Assert-True ($reviewWorkflow -match '(?m)^  checks: write\r?$') 'Agent PR Review cannot create its exact-head CheckRun.'
   Assert-True ($reviewWorkflow -match '(?m)^  repository_dispatch:\r?$') 'Agent PR Review lacks the GitHub-token recursion-safe review trigger.'
   Assert-True ($reviewWorkflow -match '(?m)^    types: \[agent-review\]\r?$') 'Agent PR Review lacks the exact agent-review dispatch type.'
+  Assert-True ($reviewWorkflow -match "github\.event\.client_payload\.workflow_id \|\| 'default'") 'Agent PR Review does not preserve the dispatched Profile workflow.'
+  Assert-True ($reviewWorkflow -match "!contains\(github\.event\.pull_request\.labels\.\*\.name, 'automation/repairing'\)") 'Agent PR Review does not suppress the duplicate default review during repair.'
   Assert-True ($reviewWorkflow -notmatch 'statuses: write|dsh-review') 'Agent PR Review retained an obsolete review trigger or permission.'
   Assert-True ($issuesWorkflow -match '(?m)^    types: \[agent_work_requested, agent_backlog_reconcile, automation_fault_recovered\]\r?$') 'Agent Issues lacks the generic WorkRequest, reconciliation, and fault-resume triggers.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
