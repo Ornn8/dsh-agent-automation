@@ -10,10 +10,14 @@ on:
       head_sha:
         required: true
         type: string
-      required_checks_json:
+      profile_id:
         required: false
         type: string
-        default: '["all checks passed"]'
+        default: github-pr-cycle
+      workflow_id:
+        required: false
+        type: string
+        default: default
 
 concurrency:
   group: dsh-land-${{ github.repository }}-${{ inputs.pull_request_number }}-${{ inputs.head_sha }}
@@ -45,7 +49,8 @@ jobs:
           PR_NUMBER: ${{ inputs.pull_request_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          REQUIRED_CHECKS_JSON: ${{ inputs.required_checks_json }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          WORKFLOW_ID: ${{ inputs.workflow_id }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml

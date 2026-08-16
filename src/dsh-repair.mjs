@@ -2,6 +2,7 @@ import { mkdtemp } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import {
+  actionsCredentialEnvironment,
   hostCredentialEnvironment,
   githubLogin,
   authenticatedMarker,
@@ -24,10 +25,7 @@ import {
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import {
-  automaticRepairAttemptCount,
-  automaticRepairLimitReached,
   interruptedRepairMayRetry,
-  MAX_AUTOMATIC_REPAIR_ATTEMPTS,
   recordedRepairState,
 } from './repair-state.mjs'
 import {
@@ -35,10 +33,18 @@ import {
   nonBaselineBlockFromReceipt,
   trustedBaselineIssue,
 } from './baseline-issue.mjs'
-import { isReviewRepairRequestId } from './work-request.mjs'
+import { isReviewRepairRequestId, parseAgentWorkRequest } from './work-request.mjs'
 import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
 import { hasNewReviewCheck, trustedReviewCheckIds } from './review-check.mjs'
+import { governorBudgetDecision, governorDecision, subjectStateVersion } from './governor-policy.mjs'
+import {
+  attestedGovernorRecordBody,
+  GOVERNOR_WORKFLOW_PATHS,
+  pullRequestGovernorSubject,
+  trustedGovernorRecords,
+} from './governor-state.mjs'
+import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -47,14 +53,32 @@ const repository = requiredEnv('TARGET_REPOSITORY')
 let pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
 const expectedHead = requiredEnv('HEAD_SHA')
 const requestId = process.env.REPAIR_REQUEST_ID?.trim() || ''
+const transportedRequest = process.env.WORK_REQUEST_JSON?.trim()
+  ? parseAgentWorkRequest(parseJson(process.env.WORK_REQUEST_JSON, 'WorkRequest'))
+  : null
 const ciWorkflowName = process.env.CI_WORKFLOW_NAME?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const workerId = resolveRepositoryWorker(config, repository, requiredEnv('AGENT_ROLE'))
+const workerId = resolveRepositoryWorker(config, repository, transportedRequest?.role || requiredEnv('AGENT_ROLE'))
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
 const controllerSha = requiredEnv('CONTROLLER_SHA').toLowerCase()
+const controllerRepository = requiredEnv('CONTROLLER_REPOSITORY')
+const governorRunId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
+const governorObservationId = `${governorRunId}:${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+const actionsEnvironment = actionsCredentialEnvironment()
+const governorTrust = {
+  repository,
+  controllerRepository,
+  workflowPaths: GOVERNOR_WORKFLOW_PATHS,
+}
+const governorWriterTrust = {
+  repository,
+  controllerRepository,
+  controllerSha,
+  workflowPath: '.github/workflows/dsh-repair.yml',
+}
 if (requestId && !/^[A-Za-z0-9._-]{1,100}$/.test(requestId)) throw new Error('Invalid REPAIR_REQUEST_ID')
 if (!/^[0-9a-f]{40}$/.test(controllerSha)) throw new Error('CONTROLLER_SHA must be a full lowercase commit SHA')
 const marker = requestId
@@ -64,14 +88,21 @@ const ciRequest = ciRepairRequest(requestId)
 const explicitRequest = Boolean(ciRequest)
   || (!isReviewRepairRequestId(requestId, expectedHead)
     && requestId.startsWith('comment-'))
+const recoveryRequest = /(?:^recovery-|\.recovery-\d+$)/.test(requestId)
 const repairClass = ciRequest
   ? 'automatic-ci'
   : explicitRequest
     ? 'explicit-human'
     : 'automatic-review'
-const automaticRepair = repairClass !== 'explicit-human'
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
+if (transportedRequest && (transportedRequest.repository !== repository
+  || transportedRequest.subject.type !== 'pull-request'
+  || transportedRequest.subject.number !== pullRequestNumber
+  || transportedRequest.revision.head !== expectedHead
+  || transportedRequest.requestId !== requestId)) {
+  throw new Error('Transported WorkRequest does not match the repair invocation')
+}
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 0) {
   throw new Error(`Invalid PR_NUMBER: ${process.env.PR_NUMBER}`)
 }
@@ -79,6 +110,39 @@ if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 0) {
 async function ghJson(args, description) {
   const result = await run(config.ghExecutable, args, { env: hostCredentialEnvironment() })
   return parseJson(result.stdout, description)
+}
+
+async function actionsJson(args, description) {
+  const result = await run(config.ghExecutable, args, { env: actionsEnvironment })
+  return parseJson(result.stdout, description)
+}
+
+async function targetProfile(request) {
+  return loadTrustedWorkflowProfile({
+    repository,
+    revision: request.revision.base,
+    profileId: request.profileId,
+    loadContent: async ({ path, revision }) => {
+      const content = await ghJson([
+        'api', '--method', 'GET', `repos/${repository}/contents/${path}`, '-f', `ref=${revision}`,
+      ], `Profile ${request.profileId} at ${revision}`)
+      if (content?.encoding !== 'base64' || typeof content.content !== 'string') {
+        throw new Error(`Profile ${request.profileId} is not a GitHub file`)
+      }
+      return Buffer.from(content.content.replace(/\s/g, ''), 'base64').toString('utf8')
+    },
+  })
+}
+
+async function writeGovernorRecord(record) {
+  await run(config.ghExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/issues/${pullRequestNumber}/comments`, '--input', '-',
+  ], {
+    env: actionsEnvironment,
+    input: JSON.stringify({
+      body: attestedGovernorRecordBody(record, { ...governorWriterTrust, runId: governorRunId }),
+    }),
+  })
 }
 
 await verifyGithubIdentity({ config })
@@ -114,9 +178,9 @@ async function upsertStatus(status, branch, detail, failureClass) {
     '',
     '_DSH owns the technical response and any implementation changes._',
   ].join('\n')
-  const comments = await ghJson([
-    'api', `repos/${repository}/issues/${pullRequestNumber}/comments`, '--paginate',
-  ], 'pull request comments')
+  const comments = (await ghJson([
+    'api', `repos/${repository}/issues/${pullRequestNumber}/comments?per_page=100`, '--paginate', '--slurp',
+  ], 'pull request comments')).flat()
   const prior = comments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
   if (prior) {
     await run(config.ghExecutable, [
@@ -136,6 +200,7 @@ async function setRepairLabels({ add = [], remove = [] }) {
     ['automation/ci-baseline', 'The failed CI condition is tracked by a separate default-branch Issue', '1D76DB'],
     ['automation/repair-blocked', 'DSH ended this repair with a valid blocked outcome', 'B60205'],
     ['automation/repairing', 'DSH is addressing the current blocking review', 'FBCA04'],
+    ['automation/paused', 'Automatic controller work is paused until an authorized resume', 'D93F0B'],
     ['agent/dsh-failed', 'DSH execution failed; an explicit recovery request is required', 'D93F0B'],
   ]) {
     if (add.includes(name)) {
@@ -176,6 +241,26 @@ async function sameHeadRereviewRequested(current, priorCheckIds) {
 }
 
 const pullRequest = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request')
+let repairProcedure = AGENT_REPAIR_SKILL
+if (transportedRequest) {
+  if (pullRequest.base?.sha !== transportedRequest.revision.base) {
+    throw new Error('Transported WorkRequest base no longer matches the pull request')
+  }
+  const profile = await targetProfile(transportedRequest)
+  if (profile.definitionHash !== transportedRequest.definitionHash) {
+    throw new Error('Transported WorkRequest Profile hash does not match the trusted pull request base')
+  }
+  const stage = resolveWorkflowStage(
+    profile.definition,
+    transportedRequest.workflowId,
+    transportedRequest.stageId,
+    'worker',
+  )
+  if (stage.role !== transportedRequest.role) {
+    throw new Error('Transported WorkRequest role does not match the trusted repair Stage')
+  }
+  repairProcedure = stage.procedure
+}
 if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNumber} is not open`)
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach the DSH repair agent')
@@ -206,9 +291,76 @@ if (!explicitRequest && !pullRequest.labels.some(label => label.name === 'automa
   throw new Error('The pull request no longer has the automation/review-blocked label')
 }
 
-const priorComments = await ghJson([
-  'api', `repos/${repository}/issues/${pullRequestNumber}/comments`, '--paginate',
-], 'pull request comments')
+const priorComments = (await ghJson([
+  'api', `repos/${repository}/issues/${pullRequestNumber}/comments?per_page=100`, '--paginate', '--slurp',
+], 'pull request comments')).flat()
+const governorRecords = await trustedGovernorRecords({
+  comments: priorComments,
+  trust: governorTrust,
+  loadRun: runId => actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], `governor workflow run ${runId}`),
+})
+const governorSubject = pullRequestGovernorSubject(pullRequest)
+const governorStateVersion = subjectStateVersion(governorSubject)
+if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
+  throw new Error(`Pull request #${pullRequestNumber} is paused and requires an authorized resume`)
+}
+const governedTransition = ciRequest ? 'ci-repair' : 'review-repair'
+if (ciRequest && !recoveryRequest) {
+  const admission = governorDecision({
+    transition: governedTransition,
+    subject: governorSubject,
+    stateVersion: governorStateVersion,
+    observationId: governorObservationId,
+    records: governorRecords,
+  })
+  if (admission.record) await writeGovernorRecord(admission.record)
+  if (!admission.execute) {
+    if (admission.action === 'record-candidate') {
+      await run(config.ghExecutable, [
+        'run', 'rerun', String(ciRun.id), '--repo', repository,
+      ], { env: hostCredentialEnvironment() })
+      process.stdout.write(`Recorded CI repair candidate and requested one deterministic rerun of workflow ${ciRun.id}.\n`)
+    } else {
+      process.stdout.write(`Governor ${admission.action}; CI repair did not start a model.\n`)
+    }
+    cancellation.dispose()
+    process.exit(0)
+  }
+  const budget = governorBudgetDecision({
+    transition: governedTransition,
+    subject: { type: governorSubject.type, number: governorSubject.number },
+    workIdentity: `branch:${pullRequest.head.ref}`,
+    observationId: governorObservationId,
+    limit: 3,
+    records: governorRecords,
+  })
+  if (budget.record) await writeGovernorRecord(budget.record)
+  if (!budget.execute) {
+    if (budget.action !== 'pause') {
+      cancellation.dispose()
+      process.stdout.write(`Governor ${budget.action}; CI repair did not start a model.\n`)
+      process.exit(0)
+    }
+    await setRepairLabels({ add: ['automation/paused'], remove: ['automation/ci-failed', 'automation/repairing'] })
+    cancellation.dispose()
+    process.stdout.write(`CI repair budget exhausted for pull request #${pullRequestNumber}; no model was started.\n`)
+    process.exit(0)
+  }
+  await writeGovernorRecord({
+    version: 1,
+    status: 'applied',
+    transition: governedTransition,
+    subject: { type: governorSubject.type, number: governorSubject.number },
+    stateVersion: governorStateVersion,
+    observationId: governorObservationId,
+  })
+} else if (!governorRecords.some(record => record.status === 'applied'
+  && (record.transition === governedTransition || (recoveryRequest && record.transition === 'workflow-recovery'))
+  && record.subject.type === 'pull-request'
+  && record.subject.number === pullRequestNumber
+  && record.stateVersion === governorStateVersion)) {
+  throw new Error(`Pull request #${pullRequestNumber} has no current controller-attested repair admission`)
+}
 const priorRun = priorComments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
 if (priorRun) {
   const recorded = recordedRepairState(priorRun.body)
@@ -226,23 +378,6 @@ if (priorRun) {
 const branch = pullRequest.head.ref
 const baseBranch = pullRequest.base.ref
 if (baseBranch !== defaultBranch) throw new Error(`Pull request base ${baseBranch} is not the configured default branch ${defaultBranch}`)
-if (automaticRepair) {
-  const automaticAttempts = automaticRepairAttemptCount(priorComments, {
-    authorLogin: markerAuthor,
-    controllerSha,
-  })
-  if (automaticRepairLimitReached(automaticAttempts)) {
-    await upsertStatus('dead-letter', branch,
-      `Automatic repair limit reached: ${MAX_AUTOMATIC_REPAIR_ATTEMPTS} attempts under controller ${controllerSha}. A trusted explicit rework command may still request repair.`)
-    await setRepairLabels({
-      add: ['agent/dsh-failed'],
-      remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing'],
-    })
-    cancellation.dispose()
-    process.stdout.write(`Automatic repair limit reached for pull request #${pullRequestNumber}; wrote dead-letter status without starting a model.\n`)
-    process.exit(0)
-  }
-}
 await upsertStatus('running', branch, explicitRequest
   ? ciRequest
     ? `Failed CI request ${requestId} started a fresh DSH repair session.`
@@ -274,7 +409,7 @@ try {
   ])).stdout.trim()
   if (checkedOutHead !== expectedHead) throw new Error(`Repair checkout is ${checkedOutHead}, expected ${expectedHead}`)
 
-  const prompt = agentWorkPrompt(AGENT_REPAIR_SKILL, {
+  const prompt = agentWorkPrompt(repairProcedure, {
     kind: 'pull-request-repair',
     repository,
     pullRequestNumber,
@@ -294,7 +429,7 @@ try {
       cwd: checkoutPath,
       title: `[Agent: ${workerId}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
       prompt,
-      requiredSkill: AGENT_REPAIR_SKILL,
+      requiredSkill: repairProcedure,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
       onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible ${workerId} session: ${sessionId}.`),

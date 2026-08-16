@@ -38,7 +38,7 @@ function issue(overrides = {}) {
     body: `${marker}\n\nThe default branch reproduces the failure.`,
     state: 'open',
     author_association: 'OWNER',
-    labels: [{ name: 'agent/dsh' }],
+    labels: [],
     ...overrides,
   }
 }
@@ -81,7 +81,7 @@ test('a valid non-baseline DSH block is terminal state rather than an infrastruc
   assert.throws(() => nonBaselineBlockFromReceipt(receipt()), /unexpected fields/)
 })
 
-test('a baseline Issue must carry a matching first-line marker, English title, trusted owner, and agent label', () => {
+test('a baseline Issue must be a trusted unlabeled candidate with a matching marker and English title', () => {
   const verified = trustedBaselineIssue({
     issue: issue(), repository, reference: { number, url }, workflowName,
     branch: 'feature/fix-ci', pullRequestBody: '', trustedAssociation: value => value === 'OWNER',
@@ -95,9 +95,9 @@ test('a baseline Issue must carry a matching first-line marker, English title, t
     branch: 'feature/fix-ci', pullRequestBody: '', trustedAssociation: value => value === 'OWNER',
   }), /title/)
   assert.throws(() => trustedBaselineIssue({
-    issue: issue({ labels: [] }), repository, reference: { number, url }, workflowName,
+    issue: issue({ labels: [{ name: 'agent/dsh' }] }), repository, reference: { number, url }, workflowName,
     branch: 'feature/fix-ci', pullRequestBody: '', trustedAssociation: value => value === 'OWNER',
-  }), /agent\/dsh/)
+  }), /bypass controller admission/)
 })
 
 test('a baseline repair cannot redispatch the Issue the current pull request already implements', () => {

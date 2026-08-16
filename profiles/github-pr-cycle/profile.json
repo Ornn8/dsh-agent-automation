@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "profileId": "github-pr-cycle",
+  "workflows": {
+    "default": {
+      "description": "Implement an Issue, review the resulting pull request, wait for configured checks, and merge the exact reviewed revision.",
+      "stages": [
+        {
+          "id": "change",
+          "uses": "worker",
+          "role": "change",
+          "procedure": "github-issue-work",
+          "after": []
+        },
+        {
+          "id": "review",
+          "uses": "worker",
+          "role": "review",
+          "procedure": "github-pr-review",
+          "after": [
+            "change"
+          ]
+        },
+        {
+          "id": "checks",
+          "uses": "checks",
+          "source": "branch-protection",
+          "after": [
+            "review"
+          ]
+        },
+        {
+          "id": "merge",
+          "uses": "merge",
+          "mode": "auto",
+          "strategy": "squash",
+          "deleteBranch": true,
+          "after": [
+            "checks"
+          ]
+        }
+      ],
+      "coordination": {
+        "limit": 1
+      }
+    },
+    "repair": {
+      "description": "Repair a blocked pull request, repeat independent review and required checks, and merge the exact reviewed revision.",
+      "stages": [
+        {
+          "id": "change",
+          "uses": "worker",
+          "role": "change",
+          "procedure": "github-pr-repair",
+          "after": [],
+          "retry": {
+            "limit": 6,
+            "backoffSeconds": [60, 120, 300, 600, 1200, 1800]
+          }
+        },
+        {
+          "id": "review",
+          "uses": "worker",
+          "role": "review",
+          "procedure": "github-pr-review",
+          "after": [
+            "change"
+          ]
+        },
+        {
+          "id": "checks",
+          "uses": "checks",
+          "source": "branch-protection",
+          "after": [
+            "review"
+          ]
+        },
+        {
+          "id": "merge",
+          "uses": "merge",
+          "mode": "auto",
+          "strategy": "squash",
+          "deleteBranch": true,
+          "after": [
+            "checks"
+          ]
+        }
+      ],
+      "coordination": {
+        "limit": 4
+      }
+    }
+  }
+}

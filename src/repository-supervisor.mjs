@@ -215,6 +215,11 @@ try {
     environment: githubEnvironment,
     targetCheckout,
     applyChanges,
+    governorContext: {
+      runId: Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10),
+      controllerRepository: requiredEnv('CONTROLLER_REPOSITORY'),
+      controllerSha: requiredEnv('CONTROLLER_SHA').toLowerCase(),
+    },
   })
   await writeSupervisionSummary({ proposal, plan, repository, applyChanges })
   process.stdout.write(`Repository supervision ${applyChanges ? 'applied' : 'dry run planned'} ${plan.mutationCount} mutation(s).\n`)

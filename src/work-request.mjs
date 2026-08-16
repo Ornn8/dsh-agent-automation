@@ -1,14 +1,42 @@
-const FULL_SHA = /^[0-9a-f]{40}$/
-const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
-const ROLES = new Set(['change', 'review'])
-const KINDS = new Set(['issue-implementation', 'review-repair', 'ci-repair', 'review'])
+import { createHash } from 'node:crypto'
+import { workflowDefinitionHash } from './workflow-definition.mjs'
+import { resolveIssueEntryStage, resolveWorkflowStage } from './workflow-profile.mjs'
 
-function requiredText(value, name) {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} must be a non-empty string`)
+const FULL_SHA = /^[0-9a-f]{40}$/
+const SHA256 = /^[0-9a-f]{64}$/
+const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+const ALLOWED_FIELDS = new Set([
+  'version', 'requestId', 'profileId', 'workflowId', 'stageId', 'definitionHash',
+  'role', 'repository', 'subject', 'revision', 'coordinationKey',
+])
+
+function requiredText(value, name, maximum = 300) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > maximum || /[\r\n]/.test(value)) {
+    throw new Error(`${name} must be non-empty one-line text of at most ${maximum} characters`)
+  }
   return value.trim()
 }
 
-/** Return the safe, durable request id for one exact blocked review pair. */
+function identifier(value, name) {
+  const text = requiredText(value, name, 64)
+  if (!ID.test(text)) throw new Error(`${name} must be an identifier`)
+  return text
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function generatedRequestId(value) {
+  return `work-${createHash('sha256').update(canonicalJson(value)).digest('hex').slice(0, 40)}`
+}
+
+/** Return the safe durable request id for one exact blocked review pair. */
 export function reviewRepairRequestId(base, head) {
   if (!FULL_SHA.test(base) || !FULL_SHA.test(head)) {
     throw new Error('review repair request id requires full lowercase commit SHAs')
@@ -22,64 +50,134 @@ export function isReviewRepairRequestId(value, expectedHead) {
   return Boolean(match && FULL_SHA.test(expectedHead) && match[2] === expectedHead)
 }
 
-/** Validate and return one immutable agent work request. */
+/** Validate and return one immutable WorkRequest. */
 export function parseAgentWorkRequest(value) {
-  if (!value || value.version !== 1) throw new Error('work request version must be 1')
-  const requestId = requiredText(value.requestId, 'work request requestId')
-  const role = requiredText(value.role, 'work request role')
-  const kind = requiredText(value.kind, 'work request kind')
-  const repository = requiredText(value.repository, 'work request repository')
-  if (!ROLES.has(role)) throw new Error(`Unknown work request role ${role}`)
-  if (!KINDS.has(kind)) throw new Error(`Unknown work request kind ${kind}`)
-  if (!REPOSITORY.test(repository)) throw new Error('work request repository is invalid')
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 2) {
+    throw new Error('WorkRequest version must be 2')
+  }
+  for (const key of Object.keys(value)) {
+    if (!ALLOWED_FIELDS.has(key)) throw new Error(`WorkRequest has unknown field ${key}`)
+  }
+  for (const key of ALLOWED_FIELDS) {
+    if (!Object.hasOwn(value, key)) throw new Error(`WorkRequest is missing required field ${key}`)
+  }
+
+  const requestId = requiredText(value.requestId, 'WorkRequest requestId', 120)
+  const profileId = identifier(value.profileId, 'WorkRequest profileId')
+  const workflowId = identifier(value.workflowId, 'WorkRequest workflowId')
+  const stageId = identifier(value.stageId, 'WorkRequest stageId')
+  const role = identifier(value.role, 'WorkRequest role')
+  const repository = requiredText(value.repository, 'WorkRequest repository', 200)
+  const coordinationKey = requiredText(value.coordinationKey, 'WorkRequest coordinationKey')
+  if (!SHA256.test(value.definitionHash || '')) throw new Error('WorkRequest definitionHash must be a SHA-256 digest')
+  if (!REPOSITORY.test(repository)) throw new Error('WorkRequest repository is invalid')
   if (!['issue', 'pull-request'].includes(value.subject?.type)
     || !Number.isSafeInteger(value.subject.number)
-    || value.subject.number < 1) {
-    throw new Error('work request subject must identify an issue or pull request')
+    || value.subject.number < 1
+    || Object.keys(value.subject).length !== 2) {
+    throw new Error('WorkRequest subject must identify an issue or pull request')
   }
-  const expectedSubject = kind === 'issue-implementation' ? 'issue' : 'pull-request'
-  if (value.subject.type !== expectedSubject) throw new Error(`work request kind ${kind} requires a ${expectedSubject} subject`)
-  if (!FULL_SHA.test(value.revision?.base) || !FULL_SHA.test(value.revision?.head)) {
-    throw new Error('work request revision must contain full lowercase commit SHAs')
+  if (!FULL_SHA.test(value.revision?.base) || !FULL_SHA.test(value.revision?.head)
+    || Object.keys(value.revision).length !== 2) {
+    throw new Error('WorkRequest revision must contain full lowercase commit SHAs')
   }
   return {
-    version: 1,
+    version: 2,
     requestId,
+    profileId,
+    workflowId,
+    stageId,
+    definitionHash: value.definitionHash,
     role,
-    kind,
     repository,
     subject: { type: value.subject.type, number: value.subject.number },
     revision: { base: value.revision.base, head: value.revision.head },
+    coordinationKey,
   }
 }
 
-/** Create the durable change-role request for an eligible Issue. */
-export function createIssueImplementationRequest({ repository, issueNumber, base }) {
+/** Create one WorkRequest after resolving its worker Stage from a trusted Profile. */
+export function createStageWorkRequest({
+  definition,
+  definitionHash,
+  workflowId,
+  stageId,
+  repository,
+  subject,
+  revision,
+  coordinationKey,
+  requestId,
+}) {
+  const actualHash = workflowDefinitionHash(definition)
+  if (definitionHash !== actualHash) throw new Error('WorkRequest definitionHash does not match the Profile')
+  const stage = resolveWorkflowStage(definition, workflowId, stageId, 'worker')
+  const unsigned = {
+    version: 2,
+    profileId: definition.profileId,
+    workflowId,
+    stageId,
+    definitionHash,
+    role: stage.role,
+    repository,
+    subject,
+    revision,
+    coordinationKey,
+  }
   return parseAgentWorkRequest({
-    version: 1,
-    requestId: `issue-implementation:${issueNumber}:${base}`,
-    role: 'change',
-    kind: 'issue-implementation',
+    ...unsigned,
+    requestId: requestId || generatedRequestId(unsigned),
+  })
+}
+
+/** Create the root worker request selected by one ready Issue declaration. */
+export function createIssueImplementationRequest({
+  definition,
+  definitionHash,
+  workflowId,
+  repository,
+  issueNumber,
+  base,
+  requestId,
+}) {
+  const stage = resolveIssueEntryStage(definition, workflowId)
+  return createStageWorkRequest({
+    definition,
+    definitionHash,
+    workflowId,
+    stageId: stage.id,
     repository,
     subject: { type: 'issue', number: issueNumber },
     revision: { base, head: base },
+    coordinationKey: `${repository}:${definition.profileId}:${workflowId}`,
+    requestId,
   })
 }
 
-/** Create the durable change-role request produced by a blocking exact-pair review. */
-export function createReviewRepairRequest({ repository, pullRequestNumber, base, head }) {
-  return parseAgentWorkRequest({
-    version: 1,
-    requestId: reviewRepairRequestId(base, head),
-    role: 'change',
-    kind: 'review-repair',
+/** Create the default Profile's root pull-request repair request. */
+export function createReviewRepairRequest({
+  definition,
+  definitionHash,
+  repository,
+  pullRequestNumber,
+  base,
+  head,
+}) {
+  const workflowId = 'repair'
+  const stage = resolveIssueEntryStage(definition, workflowId)
+  return createStageWorkRequest({
+    definition,
+    definitionHash,
+    workflowId,
+    stageId: stage.id,
     repository,
     subject: { type: 'pull-request', number: pullRequestNumber },
     revision: { base, head },
+    coordinationKey: `${repository}:${definition.profileId}:${workflowId}`,
+    requestId: reviewRepairRequestId(base, head),
   })
 }
 
-/** Wrap a validated work request for GitHub repository_dispatch transport. */
+/** Wrap a validated WorkRequest for GitHub repository_dispatch transport. */
 export function repositoryDispatchBody(request) {
   return {
     event_type: 'agent_work_requested',

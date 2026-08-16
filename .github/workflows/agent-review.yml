@@ -12,6 +12,18 @@ on:
       head_sha:
         required: true
         type: string
+      profile_id:
+        required: false
+        type: string
+        default: github-pr-cycle
+      workflow_id:
+        required: false
+        type: string
+        default: default
+      stage_id:
+        required: false
+        type: string
+        default: review
 concurrency:
   group: agent-review-${{ github.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: true
@@ -22,6 +34,7 @@ jobs:
     runs-on: [self-hosted, agent-reviewer]
     timeout-minutes: 255
     permissions:
+      actions: read
       contents: write
       checks: write
       issues: write
@@ -44,7 +57,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Review exact PR head with Agent
+      - name: Review exact PR head with the configured Agent
         id: review
         continue-on-error: true
         env:
@@ -52,11 +65,13 @@ jobs:
           PR_NUMBER: ${{ inputs.pull_request_number }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          WORKFLOW_ID: ${{ inputs.workflow_id }}
+          STAGE_ID: ${{ inputs.stage_id }}
           REVIEW_CHECKOUT: ${{ github.workspace }}/review
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           CONTROLLER_SHA: ${{ job.workflow_sha }}
-          AGENT_ROLE: review
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/agent-review.mjs
 
@@ -68,6 +83,14 @@ jobs:
           PR_NUMBER: ${{ inputs.pull_request_number }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          WORKFLOW_ID: ${{ inputs.workflow_id }}
+          STAGE_ID: ${{ inputs.stage_id }}
+          REVIEW_ROUTE: ${{ steps.review.outputs.review_route }}
+          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROLLER_SHA: ${{ job.workflow_sha }}
+          GOVERNOR_WORKFLOW_PATH: .github/workflows/agent-review.yml
+          RUN_ID: ${{ github.run_id }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/publish-work-request.mjs
 
@@ -85,9 +108,9 @@ jobs:
       - name: Preserve the blocking review conclusion
         if: steps.review.outputs.verdict == 'block'
         shell: pwsh
-        run: throw 'Agent returned a BLOCK verdict'
+        run: throw 'The review Worker returned a BLOCK verdict'
 
       - name: Preserve reviewer infrastructure failure
         if: steps.review.outcome == 'failure'
         shell: pwsh
-        run: throw 'Agent review infrastructure did not return a verdict'
+        run: throw 'Review infrastructure did not return a verdict'

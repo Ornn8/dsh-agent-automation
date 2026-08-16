@@ -3,16 +3,20 @@ import test from 'node:test'
 import {
   createReviewRepairRequest,
   createIssueImplementationRequest,
+  createStageWorkRequest,
   isReviewRepairRequestId,
   parseAgentWorkRequest,
   repositoryDispatchBody,
 } from '../src/work-request.mjs'
+import { loadWorkflowProfile } from '../src/workflow-profile.mjs'
 
 const base = 'a'.repeat(40)
 const head = 'b'.repeat(40)
+const profile = await loadWorkflowProfile()
 
-test('review repair is an immutable role request rather than an agent command', () => {
+test('review repair is an immutable Stage request rather than an agent command', () => {
   const request = createReviewRepairRequest({
+    ...profile,
     repository: 'owner/repository',
     pullRequestNumber: 12,
     base,
@@ -20,30 +24,43 @@ test('review repair is an immutable role request rather than an agent command', 
   })
 
   assert.deepEqual(request, {
-    version: 1,
+    version: 2,
     requestId: `review-repair-${base}-${head}`,
+    profileId: 'github-pr-cycle',
+    workflowId: 'repair',
+    stageId: 'change',
+    definitionHash: profile.definitionHash,
     role: 'change',
-    kind: 'review-repair',
     repository: 'owner/repository',
     subject: { type: 'pull-request', number: 12 },
     revision: { base, head },
+    coordinationKey: 'owner/repository:github-pr-cycle:repair',
   })
   assert.equal(request.workerId, undefined)
-  assert.match(request.requestId, /^[A-Za-z0-9._-]{1,100}$/)
+  assert.equal(request.procedure, undefined)
   assert.equal(isReviewRepairRequestId(request.requestId, head), true)
   assert.equal(isReviewRepairRequestId(request.requestId, base), false)
 })
 
-test('issue implementation requests use the same typed subject format as pull request work', () => {
-  const request = createIssueImplementationRequest({ repository: 'owner/repository', issueNumber: 7, base })
+test('Issue requests resolve their root Stage and bind the Profile hash', () => {
+  const request = createIssueImplementationRequest({
+    ...profile,
+    workflowId: 'default',
+    repository: 'owner/repository',
+    issueNumber: 7,
+    base,
+    requestId: 'agent-work-1234',
+  })
+  assert.equal(request.profileId, 'github-pr-cycle')
+  assert.equal(request.workflowId, 'default')
+  assert.equal(request.stageId, 'change')
+  assert.equal(request.definitionHash, profile.definitionHash)
   assert.deepEqual(request.subject, { type: 'issue', number: 7 })
-  assert.equal(request.kind, 'issue-implementation')
-  assert.throws(() => parseAgentWorkRequest({ ...request, subject: { type: 'pull-request', number: 7 } }), /subject/)
 })
 
-test('repository dispatch transports the complete work request', () => {
+test('repository dispatch transports the complete WorkRequest', () => {
   const request = createReviewRepairRequest({
-    repository: 'owner/repository', pullRequestNumber: 12, base, head,
+    ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head,
   })
   assert.deepEqual(repositoryDispatchBody(request), {
     event_type: 'agent_work_requested',
@@ -51,10 +68,33 @@ test('repository dispatch transports the complete work request', () => {
   })
 })
 
-test('work request parsing fails closed on an unknown role or mutable revision', () => {
+test('WorkRequest parsing fails closed on unknown fields and mutable identities', () => {
   const request = createReviewRepairRequest({
-    repository: 'owner/repository', pullRequestNumber: 12, base, head,
+    ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head,
   })
-  assert.throws(() => parseAgentWorkRequest({ ...request, role: 'dsh' }), /role/)
+  assert.throws(() => parseAgentWorkRequest({ ...request, command: 'npm test' }), /unknown field command/)
   assert.throws(() => parseAgentWorkRequest({ ...request, revision: { base, head: 'main' } }), /revision/)
+  assert.throws(() => parseAgentWorkRequest({ ...request, definitionHash: '0'.repeat(63) }), /definitionHash/)
+})
+
+test('Stage requests reject Profile hashes or Adapter kinds that do not match trusted data', () => {
+  assert.throws(() => createStageWorkRequest({
+    definition: profile.definition,
+    definitionHash: '0'.repeat(64),
+    workflowId: 'default',
+    stageId: 'change',
+    repository: 'owner/repository',
+    subject: { type: 'issue', number: 7 },
+    revision: { base, head: base },
+    coordinationKey: 'owner/repository:github-pr-cycle:default',
+  }), /does not match/)
+  assert.throws(() => createStageWorkRequest({
+    ...profile,
+    workflowId: 'default',
+    stageId: 'checks',
+    repository: 'owner/repository',
+    subject: { type: 'issue', number: 7 },
+    revision: { base, head: base },
+    coordinationKey: 'owner/repository:github-pr-cycle:default',
+  }), /expected worker/)
 })

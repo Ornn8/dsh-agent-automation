@@ -1,7 +1,7 @@
 import { parseJson, run } from './common.mjs'
 import { REVIEW_CHECK_NAME } from './review-authority.mjs'
 
-export { REVIEW_CHECK_NAME } from './review-authority.mjs'
+export { REVIEW_CHECK_NAME }
 const GITHUB_ACTIONS_APP_ID = 15368
 
 function checkArguments(method, repository, checkId, fields) {
