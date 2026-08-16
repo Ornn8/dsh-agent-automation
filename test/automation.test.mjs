@@ -1388,6 +1388,7 @@ test('GitHub review fields reject non-English prose and Markdown path injection'
 })
 
 test('repository mappings fail closed on missing skills or soft review isolation', () => {
+  const maintenanceCredentialDirectory = join(tmpdir(), 'credentials', 'maintenance')
   const changeCapabilities = { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: 'change' }
   const reviewCapabilities = { skills: ['github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'], hardReadOnlyReview: true, trustDomain: 'review' }
   const maintenanceCapabilities = { skills: ['controller-maintenance-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: 'maintenance' }
@@ -1398,7 +1399,7 @@ test('repository mappings fail closed on missing skills or soft review isolation
       review: { adapter: 'codex-app', capabilities: reviewCapabilities },
       maintenance: {
         adapter: 'opencode-cli', mode: 'maintenance', capabilities: maintenanceCapabilities,
-        credentialIsolationDir: 'F:\\credentials\\maintenance', githubLogin: 'maintenance-bot',
+        credentialIsolationDir: maintenanceCredentialDirectory, githubLogin: 'maintenance-bot',
       },
     },
     maintenanceWorkers: ['maintenance'],
@@ -1427,10 +1428,11 @@ test('repository mappings fail closed on missing skills or soft review isolation
 })
 
 test('maintenance workers use a dedicated GitHub credential store', () => {
-  const environment = maintenanceCredentialEnvironment({ credentialIsolationDir: 'F:\\credentials\\maintenance' }, {}, {
+  const maintenanceCredentialDirectory = join(tmpdir(), 'credentials', 'maintenance')
+  const environment = maintenanceCredentialEnvironment({ credentialIsolationDir: maintenanceCredentialDirectory }, {}, {
     PATH: 'path', GH_TOKEN: 'actions', GITHUB_TOKEN: 'actions', GH_CONFIG_DIR: 'shared',
   })
-  assert.equal(environment.GH_CONFIG_DIR, 'F:\\credentials\\maintenance')
+  assert.equal(environment.GH_CONFIG_DIR, maintenanceCredentialDirectory)
   assert.equal(environment.GH_TOKEN, undefined)
   assert.equal(environment.GITHUB_TOKEN, undefined)
   assert.equal(environment.GH_PROMPT_DISABLED, '1')
