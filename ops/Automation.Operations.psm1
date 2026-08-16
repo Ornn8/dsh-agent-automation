@@ -1577,7 +1577,7 @@ function New-InstallManifest {
 }
 
 function Read-InstallManifest {
-  param([Parameter(Mandatory)]$Loaded)
+  param([Parameter(Mandatory)]$Loaded, [switch]$AllowLegacyRuntime)
   $path = Get-InstallManifestPath -Operations $Loaded.Operations
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
   $item = Get-Item -LiteralPath $path -Force
@@ -1595,12 +1595,19 @@ function Read-InstallManifest {
   if ($manifest.psobject.Properties.Name -contains 'operationsRuntime' -and $null -ne $manifest.operationsRuntime) {
     $runtime = $manifest.operationsRuntime
     $runtimeFields = @($runtime.psobject.Properties.Name | Sort-Object) -join ','
-    if ($runtimeFields -cne 'compilerSha256,files,id,root,sources') { throw 'Install manifest operations runtime fields are invalid' }
+    $legacyRuntime = $runtimeFields -ceq 'files,id,root'
+    if ($runtimeFields -cne 'compilerSha256,files,id,root,sources' -and -not ($AllowLegacyRuntime -and $legacyRuntime)) { throw 'Install manifest operations runtime fields are invalid' }
     if ($runtime.id -notmatch '^[a-f0-9]{64}$') { throw 'Install manifest operations runtime id is invalid' }
     $expectedRuntimeRoot = Join-Path $manifestInstallRoot (Join-Path 'operations-runtime' $runtime.id)
     if (-not ([IO.Path]::GetFullPath($runtime.root)).Equals([IO.Path]::GetFullPath($expectedRuntimeRoot), [StringComparison]::OrdinalIgnoreCase)) { throw 'Install manifest operations runtime path does not match its content id' }
-    $runtimeDefinition = New-OperationsRuntimeSnapshotDefinition -InstallRoot $manifestInstallRoot -Sources $runtime.sources -CompilerSha256 $runtime.compilerSha256 -Files $runtime.files
-    if ($runtimeDefinition.id -cne $runtime.id) { throw 'Install manifest operations runtime id does not match its file hashes' }
+    if ($legacyRuntime) {
+      $legacyNames = @($runtime.files.name | Sort-Object) -join ','
+      if ($legacyNames -cne 'Automation.Operations.psm1,dsh-web-host-supervisor.ps1,runner-supervisor.ps1') { throw 'Legacy install manifest operations runtime files are invalid' }
+      if (@($runtime.files | Where-Object { $_.sha256 -notmatch '^[A-Fa-f0-9]{64}$' }).Count) { throw 'Legacy install manifest operations runtime hashes are invalid' }
+    } else {
+      $runtimeDefinition = New-OperationsRuntimeSnapshotDefinition -InstallRoot $manifestInstallRoot -Sources $runtime.sources -CompilerSha256 $runtime.compilerSha256 -Files $runtime.files
+      if ($runtimeDefinition.id -cne $runtime.id) { throw 'Install manifest operations runtime id does not match its file hashes' }
+    }
   }
   $ids = @()
   foreach ($entry in @($manifest.instances)) {

@@ -50,6 +50,49 @@ Describe 'Branch protection authority migration' {
 }
 
 Describe 'Installer and uninstaller fail-closed guards' {
+  It 'accepts the exact legacy runtime manifest only during explicit migration' {
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
+    $dataRoot = Join-Path (Split-Path -Parent $script:RepositoryRoot) "dsh-agent-automation-pester-$([Guid]::NewGuid().ToString('N'))"
+    $stateRoot = Join-Path $dataRoot 'state'
+    $installRoot = Join-Path $dataRoot 'runtime'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue $installRoot
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue $stateRoot
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $stateRoot 'logs')
+    $configuration = Join-Path $TestDrive 'legacy-runtime-config.json'
+    [IO.File]::WriteAllText($configuration, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+    $loaded = Read-OperationsConfig -Configuration $configuration -AllowExamplePlaceholders
+    [IO.Directory]::CreateDirectory($stateRoot) | Out-Null
+    $runtimeId = 'a' * 64
+    $runtimeRoot = Join-Path $installRoot (Join-Path 'operations-runtime' $runtimeId)
+    $manifest = [ordered]@{
+      schemaVersion = 1
+      configPath = $configuration
+      registrationScope = 'target-repositories'
+      runnerVersion = '2.336.0'
+      runnerSha256 = 'B' * 64
+      installRoot = $installRoot
+      stateRoot = $stateRoot
+      logsRoot = (Join-Path $stateRoot 'logs')
+      operationsRuntime = [ordered]@{
+        id = $runtimeId
+        root = $runtimeRoot
+        files = @(
+          [ordered]@{ name = 'Automation.Operations.psm1'; sha256 = '1' * 64 },
+          [ordered]@{ name = 'dsh-web-host-supervisor.ps1'; sha256 = '2' * 64 },
+          [ordered]@{ name = 'runner-supervisor.ps1'; sha256 = '3' * 64 }
+        )
+      }
+      instances = @()
+      dshWebManaged = $false
+      updatedAtUtc = '2026-08-16T00:00:00Z'
+    }
+    [IO.File]::WriteAllText((Join-Path $stateRoot 'install-manifest.json'), ($manifest | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+
+    { Read-InstallManifest -Loaded $loaded } | Should -Throw '*operations runtime fields are invalid*'
+    (Read-InstallManifest -Loaded $loaded -AllowLegacyRuntime).operationsRuntime.id | Should -BeExactly $runtimeId
+    Remove-Item -LiteralPath $dataRoot -Recurse -Force
+  }
+
   It 'rejects runner versions that predate job.workflow_*' {
     $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
     $config.operations.runner.version = '2.333.0'

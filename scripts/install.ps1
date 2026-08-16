@@ -170,7 +170,7 @@ if (-not $DryRun) {
   if (-not $principal.Ok) { throw 'The authenticated GitHub CLI principal does not match github.login' }
 }
 
-$manifest = Read-InstallManifest -Loaded $loaded
+$manifest = Read-InstallManifest -Loaded $loaded -AllowLegacyRuntime:$Migrate
 $managedState = Get-ManagedArtifactState -Loaded $loaded -Manifest $manifest -RuntimeSnapshot $runtimeSnapshot
 $unexpectedIds = @($managedState.UnexpectedTaskIds + $managedState.UnexpectedRunnerIds + $managedState.UnexpectedProcessRecordIds | Select-Object -Unique)
 $unexpectedRuntimeIds = @($managedState.UnexpectedRuntimeSnapshotIds)
