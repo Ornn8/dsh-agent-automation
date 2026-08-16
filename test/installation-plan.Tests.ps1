@@ -44,6 +44,9 @@ BeforeAll {
     $config.operations.installRoot = Join-Path $fixtureRoot 'runtime'
     $config.operations.stateRoot = Join-Path $fixtureRoot 'state'
     $config.operations.logsRoot = Join-Path $fixtureRoot 'state/logs'
+    foreach ($workerId in @($config.maintenanceWorkers)) {
+      $config.workers.$workerId.credentialIsolationDir = Join-Path $fixtureRoot "credentials/$workerId"
+    }
     $config.repositories = @('example/plan-fixture')
     $config.operations.repositoryMappings[0].repository = 'example/plan-fixture'
     foreach ($platform in @('windows-arm64', 'linux-x64', 'linux-arm64', 'macos-x64', 'macos-arm64')) {
