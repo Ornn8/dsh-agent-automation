@@ -100,10 +100,11 @@ function closesIssue(pullRequest, issueNumber) {
 }
 
 /** Return active Issue numbers for one Profile workflow coordination key. */
-export function activeWorkflowIssueNumbers({ issues, pullRequests, profileId, workflowId }) {
+export function activeWorkflowIssueNumbers({ issues, pullRequests, profileId, workflowId, excludeIssueNumber = null }) {
   const active = new Set()
   for (const issue of issues) {
     if (issue.state !== 'open') continue
+    if (issue.number === excludeIssueNumber) continue
     let declaration
     try {
       declaration = parseAgentWork(issue.body)
@@ -120,8 +121,19 @@ export function activeWorkflowIssueNumbers({ issues, pullRequests, profileId, wo
 }
 
 /** Select one safe unit of backlog work, preferring blocked PR repairs. */
-export function selectBacklogWork({ repository, pullRequests, issues, trustedBlockedRepairNumbers = new Set(), includeRepairs = true }) {
-  const repair = includeRepairs && [...pullRequests]
+export function selectBacklogWork({
+  repository,
+  pullRequests,
+  issues,
+  trustedBlockedRepairNumbers = new Set(),
+  includeRepairs = true,
+  requestedIssueNumber = null,
+}) {
+  if (requestedIssueNumber !== null
+    && (!Number.isSafeInteger(requestedIssueNumber) || requestedIssueNumber < 1)) {
+    throw new Error('requestedIssueNumber must be null or a positive safe integer')
+  }
+  const repair = requestedIssueNumber === null && includeRepairs && [...pullRequests]
     .filter(pullRequest => !pullRequest.draft
       && pullRequest.head?.repo?.full_name === repository
       && labelNames(pullRequest).has('automation/review-blocked')
@@ -137,12 +149,14 @@ export function selectBacklogWork({ repository, pullRequests, issues, trustedBlo
     .filter(issue => issue.state === 'open')
     .map(issue => issue.number))
   const candidates = [...issues]
-    .filter(candidate => candidate.state === 'open' && trustedAssociation(candidate.author_association))
+    .filter(candidate => candidate.state === 'open'
+      && trustedAssociation(candidate.author_association)
+      && (requestedIssueNumber === null || candidate.number === requestedIssueNumber))
     .sort((left, right) => left.number - right.number)
   for (const candidate of candidates) {
     if (labelNames(candidate).has('agent/dsh-failed')
       || labelNames(candidate).has('agent/dsh-blocked')
-      || labelNames(candidate).has('agent/dsh')
+      || (labelNames(candidate).has('agent/dsh') && candidate.number !== requestedIssueNumber)
       || labelNames(candidate).has('automation/paused')
       || pullRequests.some(pullRequest => closesIssue(pullRequest, candidate.number))) continue
     const dispatch = issueDispatch(candidate)

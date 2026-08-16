@@ -38,8 +38,10 @@ jobs:
       || (github.event_name == 'issues' && contains(fromJSON('["opened","reopened","edited","closed"]'), github.event.action))
       || (github.event_name == 'issues'
         && github.event.action == 'labeled'
-        && github.event.label.name == 'agent/dsh-failed')
+        && contains(fromJSON('["agent/dsh","agent/dsh-failed"]'), github.event.label.name))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dispatch-backlog.yml@{{CONTROLLER_SHA}}
+    with:
+      requested_issue_number: ${{ (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'agent/dsh' && github.event.issue.number) || (github.event_name == 'repository_dispatch' && github.event.action == 'agent_backlog_reconcile' && github.event.client_payload.issue_number) || 0 }}
 
   fault-resume:
     if: >-

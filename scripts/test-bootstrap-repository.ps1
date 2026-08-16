@@ -136,6 +136,8 @@ try {
   Assert-True ($reviewWorkflow -match "!contains\(github\.event\.pull_request\.labels\.\*\.name, 'automation/repairing'\)") 'Agent PR Review does not suppress the duplicate default review during repair.'
   Assert-True ($reviewWorkflow -notmatch 'statuses: write|dsh-review') 'Agent PR Review retained an obsolete review trigger or permission.'
   Assert-True ($issuesWorkflow -match '(?m)^    types: \[agent_work_requested, agent_backlog_reconcile, automation_fault_recovered\]\r?$') 'Agent Issues lacks the generic WorkRequest, reconciliation, and fault-resume triggers.'
+  Assert-True ($issuesWorkflow -match [Regex]::Escape('contains(fromJSON(''["agent/dsh","agent/dsh-failed"]''), github.event.label.name)')) 'Agent Issues does not preserve the agent/dsh label wake.'
+  Assert-True ($issuesWorkflow -match 'requested_issue_number:.*github\.event\.issue\.number.*github\.event\.client_payload\.issue_number') 'Agent Issues does not preserve the exact Issue across independent wake observations.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
   Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR CI Repair, Agent PR Review\]\r?$') 'Agent Recovery must include each trusted model-backed entry workflow.'
   Assert-True ($recoveryWorkflow -match [Regex]::Escape('contains(fromJSON(''["failure", "cancelled", "timed_out", "startup_failure", "stale"]''), github.event.workflow_run.conclusion)')) 'Agent Recovery must retain every terminal infrastructure conclusion.'

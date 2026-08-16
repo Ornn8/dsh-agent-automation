@@ -24,6 +24,7 @@ import {
   verifyGithubIdentity,
 } from '../src/common.mjs'
 import {
+  activeWorkflowIssueNumbers,
   ciRepairRequest,
   ciRepairTransition,
   explicitReworkCommand,
@@ -829,6 +830,8 @@ test('Codex review results do not depend on task metadata housekeeping', async (
 test('backlog Issue dispatch is not lost to GitHub token recursion suppression', async () => {
   const source = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
   assert.match(source, /repositoryDispatchBody\(work\.request\)/)
+  assert.match(source, /event_type: 'agent_backlog_reconcile'/)
+  assert.match(source, /client_payload: \{ issue_number: number \}/)
   assert.doesNotMatch(source, /event_type=dsh-issue/)
 })
 
@@ -1112,6 +1115,80 @@ test('backlog dispatch selects a ready agent-work declaration after its dependen
   assert.equal(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [dependency, workIssue],
   }), null)
+})
+
+test('an exact label wake re-reads only that eligible Issue without consuming its own coordination slot', () => {
+  const declaration = workflow => `<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify({
+    version: 2, dispatch: 'ready', workflow, dependsOn: [],
+  })}\n\`\`\``
+  const issues = [
+    {
+      number: 4,
+      state: 'open',
+      title: 'Earlier ready work',
+      body: declaration('default'),
+      author_association: 'OWNER',
+      labels: [],
+    },
+    {
+      number: 7,
+      state: 'open',
+      title: 'Explicitly woken work',
+      body: declaration('default'),
+      author_association: 'MEMBER',
+      labels: [{ name: 'agent/dsh' }],
+    },
+  ]
+
+  assert.deepEqual(selectBacklogWork({
+    repository: 'owner/repository',
+    pullRequests: [],
+    issues,
+    requestedIssueNumber: 7,
+  }), { type: 'issue', number: 7, work: parseAgentWork(issues[1].body) })
+  assert.deepEqual([...activeWorkflowIssueNumbers({
+    issues,
+    pullRequests: [],
+    profileId: 'github-pr-cycle',
+    workflowId: 'default',
+  })], [7])
+  assert.deepEqual([...activeWorkflowIssueNumbers({
+    issues,
+    pullRequests: [],
+    profileId: 'github-pr-cycle',
+    workflowId: 'default',
+    excludeIssueNumber: 7,
+  })], [])
+})
+
+test('an exact label wake remains bounded by trust, declaration, dependency, and pull-request state', () => {
+  const body = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"default","dependsOn":[3]}\n```'
+  const requested = {
+    number: 7,
+    state: 'open',
+    title: 'Requested work',
+    body,
+    author_association: 'NONE',
+    labels: [{ name: 'agent/dsh' }],
+  }
+  const select = overrides => selectBacklogWork({
+    repository: 'owner/repository',
+    pullRequests: [],
+    issues: [requested, { number: 3, state: 'open', author_association: 'OWNER', labels: [] }],
+    requestedIssueNumber: 7,
+    ...overrides,
+  })
+
+  assert.equal(select(), null)
+  requested.author_association = 'COLLABORATOR'
+  assert.equal(select(), null)
+  assert.equal(select({
+    issues: [requested, { number: 3, state: 'closed', author_association: 'OWNER', labels: [] }],
+    pullRequests: [{ body: 'Closes #7' }],
+  }), null)
+  assert.throws(() => selectBacklogWork({
+    repository: 'owner/repository', pullRequests: [], issues: [], requestedIssueNumber: 0,
+  }), /positive safe integer/)
 })
 
 test('a later malformed work declaration cannot block an earlier ready Issue', () => {
