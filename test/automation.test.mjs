@@ -644,6 +644,14 @@ test('a completed repair routes review and landing through the same trusted Prof
   assert.doesNotMatch(reconcileWorkflow, /workflow_id:|WORKFLOW_ID:/)
 })
 
+test('landing uses the exact-head REST merge endpoint without GraphQL pull request expansion', async () => {
+  const source = await readFile(new URL('../src/land-pr.mjs', import.meta.url), 'utf8')
+  assert.match(source, /pulls\/\$\{pullRequestNumber\}\/merge/)
+  assert.match(source, /sha: expectedHead/)
+  assert.match(source, /merge_method: cycle\.merge\.strategy/)
+  assert.doesNotMatch(source, /'pr', 'merge'/)
+})
+
 test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {
   for (const name of ['dsh-repair.yml', 'pipeline-health.yml']) {
     const workflow = await readFile(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8')

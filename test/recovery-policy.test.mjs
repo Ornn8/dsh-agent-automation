@@ -97,14 +97,14 @@ test('a trusted intentional review BLOCK never schedules a second review, while 
   const subject = { type: 'pull-request', number: 12, base, head }
   const intentionalBlock = [{
     name: 'agent-review / agent/review', conclusion: 'failure', steps: [
-      { name: 'Review exact PR head with Codex', conclusion: 'success' },
+      { name: 'Review exact PR head with the configured Agent', conclusion: 'success' },
       { name: 'Publish an independent change work request', conclusion: 'success' },
       { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
     ],
   }]
   const reviewerInfrastructureFailure = [{
     name: 'agent-review / agent/review', conclusion: 'failure', steps: [
-      { name: 'Review exact PR head with Codex', conclusion: 'failure' },
+      { name: 'Review exact PR head with the configured Agent', conclusion: 'failure' },
     ],
   }]
   const arguments_ = {
