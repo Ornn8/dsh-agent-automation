@@ -58,12 +58,12 @@ jobs:
   dsh-issue:
     if: >-
       github.event_name == 'repository_dispatch'
-      && github.event.client_payload.version == 2
-      && github.event.client_payload.repository == github.repository
-      && github.event.client_payload.subject.type == 'issue'
+      && github.event.client_payload.work_request.version == 2
+      && github.event.client_payload.work_request.repository == github.repository
+      && github.event.client_payload.work_request.subject.type == 'issue'
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-issue.yml@{{CONTROLLER_SHA}}
     with:
-      work_request: ${{ toJSON(github.event.client_payload) }}
+      work_request: ${{ toJSON(github.event.client_payload.work_request) }}
 
   reconcile-reviews:
     if: >-

@@ -649,7 +649,25 @@ test('landing uses the exact-head REST merge endpoint without GraphQL pull reque
   assert.match(source, /pulls\/\$\{pullRequestNumber\}\/merge/)
   assert.match(source, /sha: expectedHead/)
   assert.match(source, /merge_method: cycle\.merge\.strategy/)
+  assert.match(source, /reviewProof\.checkRun\.conclusion !== 'success'/)
   assert.doesNotMatch(source, /'pr', 'merge'/)
+})
+
+test('WorkRequest repository dispatch uses one extensible payload envelope', async () => {
+  const reconcileSource = await readFile(new URL('../src/reconcile-reviews.mjs', import.meta.url), 'utf8')
+  const issueCaller = await readFile(new URL('../templates/target/.github/workflows/agent-issues.yml', import.meta.url), 'utf8')
+  const repairCaller = await readFile(new URL('../templates/target/.github/workflows/agent-pr-rework.yml', import.meta.url), 'utf8')
+
+  for (const caller of [issueCaller, repairCaller]) {
+    assert.match(caller, /github\.event\.client_payload\.work_request/)
+  }
+  assert.match(issueCaller, /toJSON\(github\.event\.client_payload\.work_request\)/)
+  assert.match(repairCaller, /toJSON\(github\.event\.client_payload\.work_request\)/)
+  assert.ok(
+    reconcileSource.indexOf('JSON.stringify(repositoryDispatchBody(request))')
+      < reconcileSource.lastIndexOf('await markGovernorApplied(pullRequest, pendingTransition, governed)'),
+    'the durable applied record must follow successful dispatch',
+  )
 })
 
 test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {

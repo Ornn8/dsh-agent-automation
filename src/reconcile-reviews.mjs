@@ -265,7 +265,6 @@ for (const summary of summaries.flat()) {
       ...(reviewRepair ? { budgetTransition: 'review-repair' } : {}),
     })
     if (!governed.execute) continue
-    await markGovernorApplied(pullRequest, pendingTransition, governed)
     if (reviewRepair) {
       if (pendingRecord.observationId.startsWith('comment-')) {
         await run(githubExecutable, [
@@ -291,6 +290,7 @@ for (const summary of summaries.flat()) {
     } else {
       await requestReview(pullRequest)
     }
+    await markGovernorApplied(pullRequest, pendingTransition, governed)
     reconciled += 1
     continue
   }

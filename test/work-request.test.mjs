@@ -68,8 +68,9 @@ test('repository dispatch transports the complete WorkRequest', () => {
   })
   assert.deepEqual(repositoryDispatchBody(request), {
     event_type: 'agent_work_requested',
-    client_payload: request,
+    client_payload: { work_request: request },
   })
+  assert.deepEqual(Object.keys(repositoryDispatchBody(request).client_payload), ['work_request'])
 })
 
 test('WorkRequest parsing fails closed on unknown fields and mutable identities', () => {

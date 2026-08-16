@@ -193,6 +193,6 @@ export function createReviewRepairRequest({
 export function repositoryDispatchBody(request) {
   return {
     event_type: 'agent_work_requested',
-    client_payload: parseAgentWorkRequest(request),
+    client_payload: { work_request: parseAgentWorkRequest(request) },
   }
 }
