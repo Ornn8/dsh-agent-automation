@@ -1,6 +1,7 @@
 // @ts-check
 
 import { REVIEW_CHECK_NAME } from './review-authority.mjs'
+import { parseReviewCheckIdentity } from './review-check.mjs'
 
 const GITHUB_ACTIONS_APP_ID = 15368
 
@@ -53,7 +54,8 @@ export function reviewRunIdFromDetailsUrl(value, repository) {
 /** Return the trusted workflow candidate encoded by a controller-created CheckRun. */
 /** @param {RepositoryCheck} checkRun @param {string} repository @returns {number | null} */
 export function reviewRunIdFromCheckRun(checkRun, repository) {
-  return reviewRunIdFromDetailsUrl(checkRun?.external_id, repository)
+  return parseReviewCheckIdentity(checkRun)?.runId
+    || reviewRunIdFromDetailsUrl(checkRun?.external_id, repository)
     || reviewRunIdFromDetailsUrl(checkRun?.details_url, repository)
 }
 

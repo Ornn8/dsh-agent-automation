@@ -19,6 +19,7 @@ const identity = {
   stageId: 'review',
   definitionHash: 'b'.repeat(64),
 }
+const identityWithRun = { ...identity, runId: 17 }
 
 function recorder(stdout = '{}') {
   const calls = []
@@ -37,7 +38,7 @@ test('the controller creates and completes its exact-head review CheckRun', asyn
   assert.equal(checkId, 91)
   assert.deepEqual(created.calls[0][1], [
     'api', '--method', 'POST', `repos/${repository}/check-runs`,
-    '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=in_progress', '-f', `details_url=${runUrl}`, '-f', `external_id=${reviewCheckIdentity(identity)}`,
+    '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=in_progress', '-f', `details_url=${runUrl}`, '-f', `external_id=${reviewCheckIdentity(identityWithRun)}`,
     '-f', 'output[title]=Agent review in progress', '-f', 'output[summary]=Reviewing this exact pull request head.',
   ])
 
@@ -51,11 +52,25 @@ test('the controller creates and completes its exact-head review CheckRun', asyn
 })
 
 test('review CheckRun identity binds the trusted Profile workflow and rejects malformed metadata', () => {
-  const external_id = reviewCheckIdentity(identity)
-  assert.deepEqual(parseReviewCheckIdentity({ external_id }), identity)
+  const external_id = reviewCheckIdentity(identityWithRun)
+  assert.deepEqual(parseReviewCheckIdentity({ external_id }), identityWithRun)
   assert.equal(parseReviewCheckIdentity({ external_id: `${external_id}:extra` }), null)
   assert.equal(parseReviewCheckIdentity({ external_id: 'https://github.com/owner/repository/actions/runs/17' }), null)
-  assert.throws(() => reviewCheckIdentity({ ...identity, workflowId: 'bad workflow' }), /incomplete/)
+  assert.throws(() => reviewCheckIdentity({ ...identityWithRun, workflowId: 'bad workflow' }), /incomplete/)
+  assert.throws(() => reviewCheckIdentity(identity), /incomplete/)
+})
+
+test('review CheckRun creation rejects an unrelated or malformed Actions run URL', async () => {
+  const created = recorder('{"id":91}')
+  await assert.rejects(
+    startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl: 'https://github.com/other/repository/actions/runs/17', identity, execute: created.execute }),
+    /does not identify/,
+  )
+  await assert.rejects(
+    startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl: `https://github.com/${repository}/runs/17`, identity, execute: created.execute }),
+    /does not identify/,
+  )
+  assert.equal(created.calls.length, 0)
 })
 
 test('an infrastructure failure creates a terminal exact-head review CheckRun', async () => {

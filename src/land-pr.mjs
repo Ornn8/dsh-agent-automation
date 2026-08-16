@@ -118,6 +118,10 @@ if (pullRequest.baseRefName !== defaultBranch) {
 const profile = await targetProfile(pullRequest.baseRefOid)
 const checkRuns = await readCheckRuns()
 const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)
+if (!reviewProof) {
+  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: no trusted exact-pair review run is available.\n`)
+  process.exit(0)
+}
 const reviewIdentity = parseReviewCheckIdentity(reviewProof?.checkRun)
 if (!reviewIdentity
   || reviewIdentity.definitionHash !== profile.definitionHash) {

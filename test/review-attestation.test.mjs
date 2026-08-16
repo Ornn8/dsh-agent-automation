@@ -129,3 +129,14 @@ test('review check provenance survives GitHub normalizing its visible details UR
   assert.equal(reviewRunIdFromCheckRun(normalized.checkRun, repository), 17)
   assert.equal(hasTrustedExactReviewProof({ pullRequest: pullRequest(), reviewProof: normalized, trustedReview }), true)
 })
+
+test('review check provenance remains bound when identity metadata replaces the visible run URL', () => {
+  const normalized = proof({ checkRun: {
+    ...proof().checkRun,
+    details_url: 'https://github.com/owner/repository/runs/91',
+    external_id: `agent-review-v2:default:review:${'d'.repeat(64)}:17`,
+  } })
+  const trustedReview = { controllerRepository, controllerSha, workflowPath: '.github/workflows/agent-review.yml' }
+  assert.equal(reviewRunIdFromCheckRun(normalized.checkRun, repository), 17)
+  assert.equal(hasTrustedExactReviewProof({ pullRequest: pullRequest(), reviewProof: normalized, trustedReview }), true)
+})
