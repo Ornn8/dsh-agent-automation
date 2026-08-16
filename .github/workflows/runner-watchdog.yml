@@ -2,6 +2,10 @@ name: Agent Runner Queue Watchdog
 
 on:
   workflow_call:
+    inputs:
+      controller_repository:
+        required: true
+        type: string
 
 jobs:
   watchdog:
@@ -23,5 +27,6 @@ jobs:
       - name: Fail when Agent jobs remain queued too long
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
+          CONTROLLER_REPOSITORY: ${{ inputs.controller_repository }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/runner-watchdog.mjs

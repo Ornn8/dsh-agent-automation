@@ -31,3 +31,5 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: hosted queue watchdog
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/runner-watchdog.yml@{{CONTROLLER_SHA}}
+    with:
+      controller_repository: {{CONTROLLER_REPOSITORY}}
