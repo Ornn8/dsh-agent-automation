@@ -23,8 +23,10 @@ test('reusable workflow commands declare a shell unless their syntax is shell-ne
     if (!source.includes('workflow_call:')) continue
     const steps = source.split(/(?=^\s{6}- name:)/m)
     for (const step of steps) {
-      const command = step.match(/^\s+run:\s*([^|>].*)$/m)?.[1]?.trim()
-      if (!command || /^(?:node\b.*|exit\s+\d+)$/.test(command)) continue
+      const run = step.match(/^\s+run:\s*(.*)$/m)?.[1]?.trim()
+      if (!run) continue
+      const command = /^[|>][-+]?\d*$/.test(run) ? '<block scalar>' : run
+      if (/^(?:node\b.*|exit\s+\d+)$/.test(command)) continue
       assert.match(step, /^\s+shell:\s*\S+/m, `${name} must declare the shell for: ${command}`)
     }
   }
