@@ -26,6 +26,7 @@ BeforeAll {
       roles = [pscustomobject]@{
         change = [pscustomobject]@{ runnerNamePrefix = 'change'; replicas = 2; labels = @('self-hosted', 'Windows', 'X64', 'agent-change') }
         review = [pscustomobject]@{ runnerNamePrefix = 'review'; replicas = 1; labels = @('self-hosted', 'Windows', 'X64', 'agent-reviewer') }
+        maintenance = [pscustomobject]@{ runnerNamePrefix = 'maint'; replicas = 1; labels = @('self-hosted', 'Windows', 'X64', 'agent-maintenance') }
       }
       dshWebHost = [pscustomobject]@{ enabled = $false }
     }
@@ -69,7 +70,7 @@ Describe 'Portable installation plan' {
     [IO.Path]::GetPathRoot($loaded.Operations.installRoot) |
       Should -BeExactly ([IO.Path]::GetPathRoot($script:RepositoryRoot))
     $plan.paths[0].path | Should -BeExactly $loaded.Operations.installRoot
-    $instances | Should -HaveCount 5
+    $instances | Should -HaveCount 6
     foreach ($instance in $instances) {
       @($instance.Labels) | Should -Contain $plan.platform.osLabel
       @($instance.Labels) | Should -Contain $plan.platform.architectureLabel
@@ -105,7 +106,7 @@ Describe 'Portable installation plan' {
       '/srv/agent-automation/state/logs',
       '/srv/agent-automation/state/faults'
     )
-    @($plan.runnerInstances) | Should -HaveCount 3
+    @($plan.runnerInstances) | Should -HaveCount 4
     foreach ($instance in @($plan.runnerInstances)) {
       @($instance.labels) | Should -Contain 'Linux'
       @($instance.labels) | Should -Contain 'X64'

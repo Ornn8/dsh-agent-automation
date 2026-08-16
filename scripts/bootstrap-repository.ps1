@@ -15,6 +15,10 @@ param(
   [Parameter(Mandatory)]
   [string]$UpstreamRepository,
 
+  [string]$PromotionRecordPath = (Join-Path $PSScriptRoot '..\controller-release.json'),
+
+  [string]$FaultRecordPath,
+
   [switch]$Update,
   [switch]$DryRun
 )
@@ -61,6 +65,41 @@ if ($UpstreamRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
 }
 if ($ControllerSha -notmatch '^[0-9a-f]{40}$') {
   throw 'ControllerSha must be a lowercase full 40-character commit SHA.'
+}
+if (-not (Test-Path -LiteralPath $PromotionRecordPath -PathType Leaf)) {
+  throw 'PromotionRecordPath must identify a controller release record.'
+}
+try { $promotion = Get-Content -LiteralPath $PromotionRecordPath -Raw | ConvertFrom-Json -ErrorAction Stop } catch {
+  throw 'PromotionRecordPath must contain valid controller release JSON.'
+}
+if ((@($promotion.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'pendingRevisions,stableRevision,version' `
+  -or ($promotion.version -ne 1) `
+  -or ($promotion.stableRevision -notmatch '^[0-9a-f]{40}$') `
+  -or ($promotion.pendingRevisions -isnot [System.Array]) `
+  -or @($promotion.pendingRevisions | Where-Object { $_ -notmatch '^[0-9a-f]{40}$' }).Count `
+  -or @($promotion.pendingRevisions | Select-Object -Unique).Count -ne @($promotion.pendingRevisions).Count `
+  -or @($promotion.pendingRevisions | Where-Object { $_ -ceq $promotion.stableRevision }).Count) {
+  throw 'Controller release record is invalid.'
+}
+if ($ControllerSha -cne $promotion.stableRevision) {
+  if ([string]::IsNullOrWhiteSpace($FaultRecordPath) -or -not (Test-Path -LiteralPath $FaultRecordPath -PathType Leaf)) {
+    throw "ControllerSha is not the explicitly promoted stable revision $($promotion.stableRevision), and no fault-bound release record was supplied."
+  }
+  try { $fault = Get-Content -LiteralPath $FaultRecordPath -Raw | ConvertFrom-Json -ErrorAction Stop } catch {
+    throw 'FaultRecordPath must contain valid FaultRecord JSON.'
+  }
+  $activeEpoch = @($fault.epochs)[-1].number
+  $activeAttempts = @($fault.attempts | Where-Object epoch -eq $activeEpoch)
+  $validFaultRelease = $fault.version -eq 1 `
+    -and $fault.status -in @('verifying', 'recovered') `
+    -and $fault.publishedSha -ceq $ControllerSha `
+    -and [int]$fault.repairPullRequest -ge 1 `
+    -and @($activeAttempts | Where-Object { $_.kind -eq 'review' -and $_.outcome -eq 'succeeded' }).Count -eq 1 `
+    -and @($activeAttempts | Where-Object { $_.kind -eq 'ci' -and $_.outcome -eq 'succeeded' }).Count -eq 1 `
+    -and @($activeAttempts | Where-Object { $_.kind -eq 'promotion' -and $_.outcome -eq 'succeeded' }).Count -eq 1
+  if (-not $validFaultRelease) { throw 'FaultRecordPath does not authorize this one fault-bound Controller revision.' }
+} elseif (-not [string]::IsNullOrWhiteSpace($FaultRecordPath)) {
+  throw 'FaultRecordPath is only valid when rendering a fault-bound revision outside the stable release record.'
 }
 if (@($CiWorkflowNames | Where-Object { $_ -match '[\r\n\x00]' }).Count) {
   throw 'CiWorkflowNamesJson must contain one-line names without NUL.'
@@ -175,7 +214,7 @@ if ($DryRun) {
     'unknown'
   }
   $hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-  $workflowPlan = @($plan | ForEach-Object {
+  $workflowPlan = @($plan | Where-Object { $_.RelativePath -like '.github/workflows/*' } | ForEach-Object {
     $hashBytes = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($_.Content))
     [pscustomobject][ordered]@{
       path = $_.RelativePath

@@ -106,7 +106,7 @@ if (subjectType === 'issue') {
     '-f', 'event_type=agent_backlog_reconcile'], { env: environment })
 } else {
   await run(githubExecutable, ['api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=codex-review',
+    '-f', 'event_type=agent-review',
     '-F', `client_payload[pull_request_number]=${subjectNumber}`,
     '-f', `client_payload[base_sha]=${current.base.sha}`,
     '-f', `client_payload[head_sha]=${current.head.sha}`,

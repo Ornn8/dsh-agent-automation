@@ -661,7 +661,7 @@ test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispat
   const source = await readFile(new URL('../src/recover-backlog.mjs', import.meta.url), 'utf8')
   assert.match(source, /async function wakeExactReview/)
   assert.match(source, /--add-label', 'automation\/review-ready/)
-  assert.match(source, /event_type=agent-review/)
+  assert.match(source, /REVIEW_DISPATCH_TYPE/)
   assert.match(source, /client_payload\[base_sha\]/)
   assert.match(source, /client_payload\[head_sha\]/)
 })

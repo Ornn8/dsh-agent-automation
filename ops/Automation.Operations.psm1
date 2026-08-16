@@ -112,8 +112,8 @@ function Assert-AgentWorkerConfiguration {
   foreach ($property in @($Workers.psobject.Properties)) {
     $worker = $property.Value
     $capabilities = $worker.capabilities
-    if (-not $capabilities -or @($capabilities.skills).Count -eq 0 -or @($capabilities.skills | Select-Object -Unique).Count -ne @($capabilities.skills).Count -or @($capabilities.skills | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -or $capabilities.hardReadOnlyReview -isnot [bool]) {
-      throw "workers.$($property.Name).capabilities must declare unique skills and hardReadOnlyReview"
+    if (-not $capabilities -or @($capabilities.skills).Count -eq 0 -or @($capabilities.skills | Select-Object -Unique).Count -ne @($capabilities.skills).Count -or @($capabilities.skills | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -or $capabilities.hardReadOnlyReview -isnot [bool] -or $capabilities.trustDomain -notin @('change', 'review', 'maintenance')) {
+      throw "workers.$($property.Name).capabilities must declare unique skills, hardReadOnlyReview, and trustDomain"
     }
     $implementedSkills = @()
     $implementedReadOnly = $false
@@ -123,14 +123,16 @@ function Assert-AgentWorkerConfiguration {
     } elseif ($worker.adapter -eq 'dsh-web') {
       $implementedSkills = @('github-issue-work', 'github-pr-repair', 'github-pr-review', 'agent-readiness-canary')
     } elseif ($worker.adapter -in @('opencode-cli', 'claude-code-cli')) {
-      if ($worker.mode -eq 'review') {
+      if ($worker.mode -eq 'maintenance') {
+        $implementedSkills = @('controller-maintenance-repair', 'agent-readiness-canary')
+      } elseif ($worker.mode -eq 'review') {
         $implementedSkills = @('github-pr-review', 'github-repository-supervision', 'agent-readiness-canary')
         $implementedReadOnly = $true
       } else {
         $implementedSkills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary')
       }
     } elseif ($worker.adapter -eq 'command-json') {
-      $implementedSkills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary')
+      $implementedSkills = if ($worker.mode -eq 'maintenance') { @('controller-maintenance-repair', 'agent-readiness-canary') } else { @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary') }
     }
     foreach ($skill in @($capabilities.skills)) {
       if ($skill -notin $implementedSkills) { throw "workers.$($property.Name) Adapter does not implement declared skill $skill" }
@@ -166,7 +168,7 @@ function Assert-AgentWorkerConfiguration {
       if ($worker.effort -notin @('low', 'medium', 'high', 'xhigh', 'max', 'ultracode')) {
         throw "workers.$($property.Name).effort is not supported"
       }
-      if ($worker.mode -notin @('change', 'review')) { throw "workers.$($property.Name).mode must be change or review" }
+      if ($worker.mode -notin @('change', 'review', 'maintenance')) { throw "workers.$($property.Name).mode must be change, review, or maintenance" }
       if ($worker.mode -eq 'review' -and ($worker.gitExecutable -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.gitExecutable))) {
         throw "workers.$($property.Name).gitExecutable is required for review"
       }
@@ -174,7 +176,7 @@ function Assert-AgentWorkerConfiguration {
     }
     if ($worker.adapter -eq 'command-json') {
       if ($worker.executable -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.executable)) { throw "workers.$($property.Name).executable is required for a command-json worker" }
-      if ($worker.mode -notin @('change', 'review')) { throw "workers.$($property.Name).mode must be change or review" }
+      if ($worker.mode -notin @('change', 'review', 'maintenance')) { throw "workers.$($property.Name).mode must be change, review, or maintenance" }
       continue
     }
     if ($worker.adapter -ne 'opencode-cli') { continue }
@@ -184,7 +186,7 @@ function Assert-AgentWorkerConfiguration {
       }
     }
     if ($worker.model -notmatch '^[^/\s]+/[^/\s]+$') { throw "workers.$($property.Name).model must be provider/model" }
-    if ($worker.mode -notin @('change', 'review')) { throw "workers.$($property.Name).mode must be change or review" }
+    if ($worker.mode -notin @('change', 'review', 'maintenance')) { throw "workers.$($property.Name).mode must be change, review, or maintenance" }
     if ($worker.mode -eq 'review' -and ($worker.gitExecutable -isnot [string] -or [string]::IsNullOrWhiteSpace($worker.gitExecutable))) {
       throw "workers.$($property.Name).gitExecutable is required for review"
     }
@@ -206,6 +208,19 @@ function Read-OperationsConfig {
   foreach ($repository in @($config.repositories)) { if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid repository mapping: $repository" } }
   if (-not $config.workers -or @($config.workers.psobject.Properties).Count -eq 0) { throw 'workers must not be empty' }
   Assert-AgentWorkerConfiguration -Workers $config.workers
+  foreach ($field in 'configRevision', 'credentialRevision') {
+    if ($config.$field -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "$field must be a non-secret revision identifier" }
+  }
+  $maintenanceWorkers = @($config.maintenanceWorkers)
+  if (-not $maintenanceWorkers.Count -or $maintenanceWorkers.Count -gt 8 -or @($maintenanceWorkers | Select-Object -Unique).Count -ne $maintenanceWorkers.Count) { throw 'maintenanceWorkers must contain between 1 and 8 unique worker ids' }
+  foreach ($workerId in $maintenanceWorkers) {
+    $worker = $config.workers.$workerId
+    if (-not $worker -or $worker.capabilities.trustDomain -ne 'maintenance' -or 'controller-maintenance-repair' -notin @($worker.capabilities.skills) -or 'agent-readiness-canary' -notin @($worker.capabilities.skills)) { throw "maintenanceWorkers entry is not a maintenance-capable worker: $workerId" }
+    if ([string]::IsNullOrWhiteSpace($worker.credentialIsolationDir) -or -not [IO.Path]::IsPathRooted($worker.credentialIsolationDir)) { throw "maintenance Worker $workerId requires an absolute credentialIsolationDir" }
+    if ($worker.githubLogin -notmatch '^[A-Za-z0-9-]{1,39}$') { throw "maintenance Worker $workerId requires githubLogin" }
+  }
+  $maintenanceReview = $config.workers.($config.maintenanceReviewWorker)
+  if (-not $maintenanceReview -or $maintenanceReview.capabilities.trustDomain -ne 'review' -or -not [bool]$maintenanceReview.capabilities.hardReadOnlyReview -or 'github-pr-review' -notin @($maintenanceReview.capabilities.skills) -or $config.maintenanceReviewWorker -in $maintenanceWorkers) { throw 'maintenanceReviewWorker must name an independent hard read-only review Worker' }
   foreach ($field in 'ghExecutable', 'gitExecutable') { if ([string]::IsNullOrWhiteSpace($config.$field)) { throw "$field is required" } }
   if ($config.github.login -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$') { throw 'github.login must be a GitHub login name' }
   if ($config.github.login -like 'REPLACE-*' -and -not $AllowExamplePlaceholders) { throw 'github.login must name the expected host GitHub principal' }
@@ -252,6 +267,8 @@ function Read-OperationsConfig {
   }
   if ($ops.roles.change.labels -notcontains 'agent-change') { throw 'change role must have the agent-change label' }
   if ($ops.roles.review.labels -notcontains 'agent-reviewer') { throw 'review role must have the agent-reviewer label' }
+  if ($ops.roles.maintenance.labels -notcontains 'agent-maintenance') { throw 'maintenance role must have the agent-maintenance label' }
+  if ([int]$ops.roles.maintenance.replicas -ne 1) { throw 'maintenance role must have exactly one replica' }
 
   $mappings = @($ops.repositoryMappings)
   if (-not $mappings.Count -or $mappings.Count -gt 32) { throw 'repositoryMappings must contain between 1 and 32 entries' }
@@ -269,6 +286,8 @@ function Read-OperationsConfig {
     if (@($mapping.requiredChecks | Where-Object { $_ -in @($script:ReviewRequiredCheckName, $script:LegacyReviewRequiredCheckName) }).Count) { throw 'repositoryMappings.requiredChecks must not contain a controller review authority' }
     if (-not $config.workers.($mapping.changeWorker)) { throw "repositoryMappings changeWorker is unknown: $($mapping.changeWorker)" }
     if (-not $config.workers.($mapping.reviewWorker)) { throw "repositoryMappings reviewWorker is unknown: $($mapping.reviewWorker)" }
+    if ($mapping.changeWorker -in $maintenanceWorkers -or $mapping.reviewWorker -in $maintenanceWorkers) { throw 'maintenance Workers cannot also serve a product repository role' }
+    if ($config.workers.($mapping.changeWorker).capabilities.trustDomain -ne 'change' -or $config.workers.($mapping.reviewWorker).capabilities.trustDomain -ne 'review') { throw 'repositoryMappings must preserve change and review trust domains' }
     foreach ($skill in @('github-issue-work', 'github-pr-repair')) {
       if ($skill -notin @($config.workers.($mapping.changeWorker).capabilities.skills)) { throw "repositoryMappings changeWorker lacks $skill" }
     }
@@ -307,10 +326,11 @@ function Get-RunnerInstances {
     if ($unknown.Count) { throw "Unknown repository selection: $($unknown -join ', ')" }
   }
   $instances = [Collections.Generic.List[object]]::new()
+  $productRoles = @($roleSet | Where-Object { $_ -in @('change', 'review') })
   if ($ops.controller.registrationScope -eq 'organization') {
     if ($repositorySet.Count) { throw '-Repositories is not valid in organization mode because each role runner is shared by every allowlisted target' }
     $organizationKey = Get-RepositoryKey -Repository "$($ops.controller.organization)/organization"
-    foreach ($roleName in $roleSet) {
+    foreach ($roleName in $productRoles) {
       for ($replica = 1; $replica -le [int]$ops.roles.$roleName.replicas; $replica += 1) {
         $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
         $id = "organization-$($roleName)$replicaSuffix"
@@ -336,7 +356,7 @@ function Get-RunnerInstances {
     $selectedMappings = @($ops.repositoryMappings | Where-Object { -not $repositorySet.Count -or $_.repository -in $repositorySet })
     foreach ($mapping in $selectedMappings) {
       $key = Get-RepositoryKey -Repository $mapping.repository
-      foreach ($roleName in $roleSet) {
+      foreach ($roleName in $productRoles) {
         for ($replica = 1; $replica -le [int]$ops.roles.$roleName.replicas; $replica += 1) {
           $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
           $id = "target-$key-$($roleName)$replicaSuffix"
@@ -358,6 +378,28 @@ function Get-RunnerInstances {
           })
         }
       }
+    }
+  }
+  if ('maintenance' -in $roleSet) {
+    $controllerKey = Get-RepositoryKey -Repository $ops.controller.repository
+    for ($replica = 1; $replica -le [int]$ops.roles.maintenance.replicas; $replica += 1) {
+      $replicaSuffix = if ($replica -eq 1) { '' } else { "-r$replica" }
+      $id = "controller-$controllerKey-maintenance$replicaSuffix"
+      $instances.Add([pscustomobject]@{
+        Id = $id
+        Role = 'maintenance'
+        Replica = $replica
+        Repository = $ops.controller.repository
+        RegistrationKind = 'repository'
+        RegistrationOwner = $ops.controller.repository
+        RunnerName = Get-RunnerName -Prefix $ops.roles.maintenance.runnerNamePrefix -RepositoryKey $controllerKey -Replica $replica
+        Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.maintenance.labels + @($id)) -Platform $hostPlatform)
+        RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
+        WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
+        TaskName = "DSH-Agent-Automation-$id"
+        LogFile = Join-Path $ops.logsRoot "$id-supervisor.log"
+        FaultFile = Join-Path $ops.stateRoot (Join-Path 'faults' "$id.restart")
+      })
     }
   }
   foreach ($instance in $instances) {
@@ -450,6 +492,7 @@ function New-InstallationPlan {
   }
   $ops = $Loaded.Operations
   $roleSet = @($Roles | Select-Object -Unique | Sort-Object)
+  $productRoles = @($roleSet | Where-Object { $_ -in @('change', 'review') })
   $repositorySet = @($Repositories | Where-Object { $_ } | Select-Object -Unique | Sort-Object)
   if ($repositorySet.Count) {
     $unknown = @($repositorySet | Where-Object { $_ -notin @($Loaded.Config.repositories) })
@@ -469,7 +512,7 @@ function New-InstallationPlan {
       ForEach-Object { [pscustomobject]@{ key = (Get-RepositoryKey -Repository $_.repository); repository = $_.repository; registrationKind = 'repository'; registrationOwner = $_.repository; idPrefix = "target-$(Get-RepositoryKey -Repository $_.repository)" } })
   }
   foreach ($target in $targets) {
-    foreach ($roleName in $roleSet) {
+    foreach ($roleName in $productRoles) {
       $role = $ops.roles.$roleName
       for ($replica = 1; $replica -le [int]$role.replicas; $replica += 1) {
         $suffix = if ($replica -eq 1) { '' } else { "-r$replica" }
@@ -495,6 +538,34 @@ function New-InstallationPlan {
           faultFile = Join-InstallationPlanPath -Root $ops.stateRoot -Child "faults/$id.restart" -Platform $profile
         })
       }
+    }
+  }
+  if ('maintenance' -in $roleSet) {
+    $role = $ops.roles.maintenance
+    $controllerKey = Get-RepositoryKey -Repository $ops.controller.repository
+    for ($replica = 1; $replica -le [int]$role.replicas; $replica += 1) {
+      $suffix = if ($replica -eq 1) { '' } else { "-r$replica" }
+      $id = "controller-$controllerKey-maintenance$suffix"
+      $runnerRoot = Join-InstallationPlanPath -Root $ops.installRoot -Child "runners/$id" -Platform $profile
+      $workDirectory = Join-InstallationPlanPath -Root $ops.stateRoot -Child "work/$id" -Platform $profile
+      $serviceName = if ($profile.serviceManager -eq 'scheduled-task') { "DSH-Agent-Automation-$id" } else { "dsh-agent-automation-$id".ToLowerInvariant() }
+      $instances.Add([pscustomobject][ordered]@{
+        id = $id
+        role = 'maintenance'
+        replica = $replica
+        repository = $ops.controller.repository
+        registrationKind = 'repository'
+        registrationOwner = $ops.controller.repository
+        runnerName = Get-InstallationPlanRunnerName -Prefix $role.runnerNamePrefix -RepositoryKey $controllerKey -HostName $HostName -Replica $replica
+        labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($role.labels + @($id)) -Platform $profile)
+        runnerRoot = $runnerRoot
+        workDirectory = $workDirectory
+        serviceManager = $profile.serviceManager
+        serviceName = $serviceName
+        taskName = $serviceName
+        logFile = Join-InstallationPlanPath -Root $ops.logsRoot -Child "$id-supervisor.log" -Platform $profile
+        faultFile = Join-InstallationPlanPath -Root $ops.stateRoot -Child "faults/$id.restart" -Platform $profile
+      })
     }
   }
 
@@ -621,6 +692,40 @@ function Test-HostGitHubLogin {
   $actual = & $Config.ghExecutable api user --jq '.login' 2>$null
   $ok = $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($actual) -and $actual.Trim().Equals($Config.github.login, [StringComparison]::OrdinalIgnoreCase)
   return [pscustomobject]@{ Ok = $ok; Detail = if ($ok) { 'matches github.login' } else { 'does not match github.login or is unavailable' } }
+}
+
+function Test-MaintenanceGitHubLogin {
+  param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)]$Worker, [Parameter(Mandatory)][string]$ControllerRepository)
+  function Invoke-IsolatedGh {
+    param([string[]]$Arguments)
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Config.ghExecutable
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
+    [void]$start.Environment.Remove('GH_TOKEN')
+    [void]$start.Environment.Remove('GITHUB_TOKEN')
+    $start.Environment['GH_CONFIG_DIR'] = $Worker.credentialIsolationDir
+    $start.Environment['GH_PROMPT_DISABLED'] = '1'
+    $process = [Diagnostics.Process]::Start($start)
+    $output = $process.StandardOutput.ReadToEnd()
+    $process.StandardError.ReadToEnd() | Out-Null
+    $process.WaitForExit()
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $output.Trim() }
+  }
+  try {
+    $identity = Invoke-IsolatedGh -Arguments @('api', 'user', '--jq', '.login')
+    if ($identity.ExitCode -ne 0 -or -not $identity.Output.Equals($Worker.githubLogin, [StringComparison]::OrdinalIgnoreCase)) {
+      return [pscustomobject]@{ Ok = $false; Detail = 'dedicated credential login is unavailable or mismatched' }
+    }
+    $repository = Invoke-IsolatedGh -Arguments @('repo', 'view', $ControllerRepository, '--json', 'nameWithOwner', '--jq', '.nameWithOwner')
+    $ok = $repository.ExitCode -eq 0 -and $repository.Output.Equals($ControllerRepository, [StringComparison]::OrdinalIgnoreCase)
+    return [pscustomobject]@{ Ok = $ok; Detail = if ($ok) { 'dedicated credential can access the Controller repository' } else { 'dedicated credential cannot access the Controller repository' } }
+  } catch {
+    return [pscustomobject]@{ Ok = $false; Detail = 'dedicated credential check failed' }
+  }
 }
 
 function Get-RequiredCheckNames {
@@ -1152,12 +1257,15 @@ function Read-InstallManifest {
   }
   $ids = @()
   foreach ($entry in @($manifest.instances)) {
-    if ($entry.id -notmatch '^(?:target-[A-Za-z0-9_.-]+-(?:change|review)|organization-(?:change|review))(?:-r[2-8])?$') { throw "Invalid manifest instance id: $($entry.id)" }
+    if ($entry.id -notmatch '^(?:target-[A-Za-z0-9_.-]+-(?:change|review)|organization-(?:change|review)|controller-[A-Za-z0-9_.-]+-maintenance)(?:-r[2-8])?$') { throw "Invalid manifest instance id: $($entry.id)" }
     if ($entry.id -in $ids) { throw "Duplicate manifest instance id: $($entry.id)" }
     $ids += $entry.id
     if ($entry.role -notin $script:RoleNames -or $entry.registrationKind -notin @('organization', 'repository')) { throw "Invalid manifest role or registration kind for $($entry.id)" }
     if ($entry.registrationOwner -notmatch '^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?$') { throw "Invalid manifest registration owner for $($entry.id)" }
-    if ($entry.registrationKind -eq 'repository') {
+    if ($entry.role -eq 'maintenance') {
+      $expectedId = "controller-$(Get-RepositoryKey -Repository $Loaded.Operations.controller.repository)-maintenance"
+      if ($entry.registrationKind -ne 'repository' -or $entry.repository -cne $Loaded.Operations.controller.repository -or $entry.registrationOwner -cne $entry.repository -or $entry.id -notmatch "^$([regex]::Escape($expectedId))(?:-r[2-8])?$") { throw "Invalid Controller maintenance registration identity for $($entry.id)" }
+    } elseif ($entry.registrationKind -eq 'repository') {
       if ($entry.repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or $entry.registrationOwner -cne $entry.repository) { throw "Invalid repository registration identity for $($entry.id)" }
       $expectedId = "target-$(Get-RepositoryKey -Repository $entry.repository)-$($entry.role)"
       if ($entry.id -notmatch "^$([regex]::Escape($expectedId))(?:-r[2-8])?$") { throw "Invalid repository registration identity for $($entry.id)" }
@@ -1363,8 +1471,8 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'target repository endpoint'; Passed = ((Get-RegistrationEndpoint -Instance $repoInstance) -eq 'repos/owner/repo/actions/runners/registration-token') }
   $results += [pscustomobject]@{ Name = 'repository keys are stable'; Passed = ((Get-RepositoryKey 'owner/repo') -eq (Get-RepositoryKey 'owner/repo')) }
   $results += [pscustomobject]@{ Name = 'repository keys avoid normalized collision'; Passed = ((Get-RepositoryKey 'owner/a.b') -ne (Get-RepositoryKey 'owner/a-b')) }
-  $changeCapabilities = [pscustomobject]@{ skills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary'); hardReadOnlyReview = $false }
-  $reviewCapabilities = [pscustomobject]@{ skills = @('github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'); hardReadOnlyReview = $true }
+  $changeCapabilities = [pscustomobject]@{ skills = @('github-issue-work', 'github-pr-repair', 'agent-readiness-canary'); hardReadOnlyReview = $false; trustDomain = 'change' }
+  $reviewCapabilities = [pscustomobject]@{ skills = @('github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'); hardReadOnlyReview = $true; trustDomain = 'review' }
   $validDshWorker = [pscustomobject]@{ adapter = 'dsh-web'; agentPreset = 'standard'; permissionPreset = 'danger-full-access'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max'; capabilities = $changeCapabilities }
   $results += [pscustomobject]@{ Name = 'DSH worker requires explicit session presets and model selection'; Passed = $false }
   try { Assert-AgentWorkerConfiguration -Workers ([pscustomobject]@{ dsh = $validDshWorker }); $results[-1].Passed = $true } catch {}
@@ -1388,12 +1496,13 @@ function Invoke-OperationsSelfTest {
     installRoot = $selfTestInstallRoot
     stateRoot = $selfTestStateRoot
     logsRoot = (Join-Path $selfTestStateRoot 'logs')
-    controller = [pscustomobject]@{ registrationScope = 'target-repositories'; organization = $null }
+    controller = [pscustomobject]@{ repository = 'owner/controller'; registrationScope = 'target-repositories'; organization = $null }
     dshWebHost = [pscustomobject]@{ enabled = $false }
     runner = [pscustomobject]@{ version = '1.0.0'; sha256 = ('a' * 64) }
     roles = [pscustomobject]@{
       change = [pscustomobject]@{ runnerNamePrefix = 'change'; replicas = 3; labels = @('agent-change') }
       review = [pscustomobject]@{ runnerNamePrefix = 'review'; replicas = 2; labels = @('agent-reviewer') }
+      maintenance = [pscustomobject]@{ runnerNamePrefix = 'maint'; replicas = 1; labels = @('agent-maintenance') }
     }
     repositoryMappings = @(
       [pscustomobject]@{ repository = 'owner/one' },
@@ -1406,9 +1515,9 @@ function Invoke-OperationsSelfTest {
   Remove-Item -LiteralPath (Join-Path (Join-Path $fakeOps.stateRoot 'heartbeats') 'self-test.json') -Force
   $results += [pscustomobject]@{ Name = 'fresh UTC heartbeat survives a non-UTC host time zone'; Passed = $freshHeartbeat.Ok }
   $targetInstances = @(Get-RunnerInstances -Loaded $fakeLoaded)
-  $results += [pscustomobject]@{ Name = 'target mode creates configured role replicas per repository'; Passed = ($targetInstances.Count -eq 10) }
-  $results += [pscustomobject]@{ Name = 'target replica task names are unique'; Passed = (@($targetInstances.TaskName | Select-Object -Unique).Count -eq 10) }
-  $results += [pscustomobject]@{ Name = 'target replica runner names are unique and fit GitHub limits'; Passed = (@($targetInstances.RunnerName | Select-Object -Unique).Count -eq 10 -and -not @($targetInstances.RunnerName | Where-Object { $_.Length -gt 64 }).Count) }
+  $results += [pscustomobject]@{ Name = 'target mode creates product replicas plus one Controller maintenance replica'; Passed = ($targetInstances.Count -eq 11 -and @($targetInstances | Where-Object Role -eq 'maintenance').Count -eq 1) }
+  $results += [pscustomobject]@{ Name = 'target replica task names are unique'; Passed = (@($targetInstances.TaskName | Select-Object -Unique).Count -eq 11) }
+  $results += [pscustomobject]@{ Name = 'target replica runner names are unique and fit GitHub limits'; Passed = (@($targetInstances.RunnerName | Select-Object -Unique).Count -eq 11 -and -not @($targetInstances.RunnerName | Where-Object { $_.Length -gt 64 }).Count) }
   $results += [pscustomobject]@{ Name = 'replica one retains the original deterministic instance ID'; Passed = ($targetInstances.Id -contains 'target-owner-one-30fa40f53d1e-change') }
   $results += [pscustomobject]@{ Name = 'additional replicas have deterministic suffixed instance IDs'; Passed = ($targetInstances.Id -contains 'target-owner-one-30fa40f53d1e-change-r3') }
   $ownedStart = [DateTime]::SpecifyKind([DateTime]'2026-01-02T03:04:05', [DateTimeKind]::Utc)
@@ -1450,7 +1559,7 @@ function Invoke-OperationsSelfTest {
   $fakeLoaded.Config.repositories = @('owner/one', 'owner/two')
   $fakeOps.installRoot = "$selfTestInstallRoot-moved"
   $changedRootState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
-  $results += [pscustomobject]@{ Name = 'manifest reconciliation detects changed managed paths'; Passed = ($changedRootState.ChangedEntries.Count -eq 10) }
+  $results += [pscustomobject]@{ Name = 'manifest reconciliation detects changed managed paths'; Passed = ($changedRootState.ChangedEntries.Count -eq 11) }
   $fakeOps.installRoot = $selfTestInstallRoot
   $fakeOps.runner.version = '2.0.0'
   $changedPackageState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
@@ -1502,7 +1611,7 @@ function Invoke-OperationsSelfTest {
   $fakeOps.controller.registrationScope = 'organization'
   $fakeOps.controller.organization = 'owner'
   $organizationInstances = @(Get-RunnerInstances -Loaded $fakeLoaded)
-  $results += [pscustomobject]@{ Name = 'organization mode creates configured shared role replicas'; Passed = ($organizationInstances.Count -eq 5) }
+  $results += [pscustomobject]@{ Name = 'organization mode creates shared product replicas plus one Controller maintenance replica'; Passed = ($organizationInstances.Count -eq 6) }
   $scopeState = Get-ManagedArtifactState -Loaded $fakeLoaded -Manifest $manifest -DiscoveredTaskIds @($targetInstances.Id) -DiscoveredRunnerIds @($targetInstances.Id) -DshWebTaskPresent $false
   $results += [pscustomobject]@{ Name = 'manifest reconciliation detects scope migration'; Passed = ($scopeState.ScopeChanged -and $scopeState.StaleEntries.Count -eq 10 -and $scopeState.MissingEntries.Count -eq 5) }
   $requiredMapping = [pscustomobject]@{ requiredChecks = @('all checks passed', 'lint') }
@@ -1587,7 +1696,7 @@ Export-ModuleMember -Function @(
   'Read-OperationsConfig', 'Get-RunnerInstances', 'Get-RunnerInstance',
   'Resolve-InstallationPlatform', 'New-InstallationPlan', 'ConvertTo-InstallationPlanJson',
   'Initialize-PrivateDirectory', 'Test-PrivateDirectoryAcl', 'Assert-ManagedDirectoryForRemoval',
-  'Get-RegistrationEndpoint', 'Get-RegistrationUrl', 'Get-RunnerToken', 'Test-HostGitHubLogin',
+  'Get-RegistrationEndpoint', 'Get-RegistrationUrl', 'Get-RunnerToken', 'Test-HostGitHubLogin', 'Test-MaintenanceGitHubLogin',
   'Get-RequiredCheckNames', 'Merge-RequiredStatusChecks', 'Test-RequiredStatusChecks',
   'Get-GhApiHttpStatus', 'New-BranchProtectionBootstrapPayload', 'Test-BootstrapBranchProtection',
   'Get-RepositoryBranchProtection', 'Get-RepositoryRequiredStatusChecks', 'Set-RepositoryRequiredStatusChecks',
