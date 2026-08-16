@@ -732,7 +732,7 @@ test('base reconciliation updates a behind default-branch pull request before re
   assert.match(source, /client_payload\[head_sha\]/)
   assert.match(workflow, /DEFAULT_BRANCH: \$\{\{ github\.event\.repository\.default_branch \}\}/)
   assert.match(workflow, /runs-on: \[self-hosted, agent-change\]/)
-  assert.match(workflow, /contents: read/)
+  assert.match(workflow, /contents: write/)
   assert.match(workflow, /pull-requests: write/)
   assert.match(workflow, /issues: write/)
   assert.match(workflow, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/)
