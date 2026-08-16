@@ -1,7 +1,7 @@
-/** Return whether the pull request still targets the current default-branch commit. */
-export function needsDefaultBranchUpdate({ defaultBranch, defaultBranchHead, pullRequest }) {
+/** Return whether the pull request head contains the current default-branch commit. */
+export function needsDefaultBranchUpdate({ defaultBranch, defaultBranchHead, mergeBaseSha, pullRequest }) {
   return pullRequest.base?.ref === defaultBranch
-    && pullRequest.base?.sha !== defaultBranchHead
+    && mergeBaseSha !== defaultBranchHead
 }
 
 /** Return whether a default-branch change requires a fresh exact-pair review. */
