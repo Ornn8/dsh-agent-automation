@@ -53,7 +53,7 @@ Acceptance criteria:
 ```
 ````
 
-Opening or editing that Issue queues the repository's configured change Worker. The Worker creates a branch and pull request. CI failures and blocking reviews return to the same change queue.
+Opening or editing that Issue queues the repository's configured change Worker. Adding `agent/dsh` to an existing eligible Issue is also a supported wake signal. The label never authorizes execution: the Controller re-reads the exact Issue, validates its author, declaration, dependencies, Profile, coordination limit, and Governor state, then obtains an independent Actions observation before dispatch. The Worker creates a branch and pull request. CI failures and blocking reviews return to the same change queue.
 
 A pull request merges only after the configured CI checks and the controller-owned `agent/review` CheckRun pass for its current exact head pair.
 

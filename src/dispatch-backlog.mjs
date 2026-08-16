@@ -47,6 +47,15 @@ const governorWriterTrust = {
   workflowPath: '.github/workflows/dispatch-backlog.yml',
 }
 const observationId = `${requiredEnv('GITHUB_RUN_ID')}:${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+const requestedIssueNumber = (() => {
+  const value = process.env.REQUESTED_ISSUE_NUMBER?.trim() || '0'
+  if (!/^\d+$/.test(value)) throw new Error('REQUESTED_ISSUE_NUMBER must be a non-negative integer')
+  const number = Number.parseInt(value, 10)
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error('REQUESTED_ISSUE_NUMBER must be a non-negative safe integer')
+  }
+  return number === 0 ? null : number
+})()
 
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) {
   throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
@@ -143,6 +152,18 @@ async function writeGovernorRecord(number, record) {
   })
 }
 
+async function requestIndependentIssueObservation(number) {
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
+  ], {
+    env: githubEnvironment,
+    input: JSON.stringify({
+      event_type: 'agent_backlog_reconcile',
+      client_payload: { issue_number: number },
+    }),
+  })
+}
+
 async function admittedWork(work, pullRequests, issues) {
   const source = work.type === 'repair'
     ? pullRequests.find(candidate => candidate.number === work.number)
@@ -159,6 +180,12 @@ async function admittedWork(work, pullRequests, issues) {
   const decision = governorDecision({ transition, subject, stateVersion, observationId, records })
   if (decision.record) await writeGovernorRecord(work.number, decision.record)
   if (!decision.execute) {
+    if (work.type === 'issue'
+      && requestedIssueNumber === work.number
+      && decision.action === 'record-candidate') {
+      await requestIndependentIssueObservation(work.number)
+      process.stdout.write(`Requested an independent backlog observation for Issue #${work.number}.\n`)
+    }
     process.stdout.write(`Governor ${decision.action} for ${subject.type} #${work.number}; no work was dispatched.\n`)
     return null
   }
@@ -212,6 +239,7 @@ const work = selectBacklogWork({
   issues,
   trustedBlockedRepairNumbers: await trustedBlockedRepairNumbers(pullRequests),
   includeRepairs: false,
+  requestedIssueNumber,
 })
 
 if (!work) {
@@ -234,6 +262,7 @@ if (work.type === 'issue') {
     pullRequests,
     profileId: profile.definition.profileId,
     workflowId: work.work.workflow,
+    excludeIssueNumber: requestedIssueNumber === work.number ? work.number : null,
   })
   if (active.size >= workflow.coordination.limit) {
     process.stdout.write(`Workflow ${profile.definition.profileId}/${work.work.workflow} is at its coordination limit ${workflow.coordination.limit}.\n`)

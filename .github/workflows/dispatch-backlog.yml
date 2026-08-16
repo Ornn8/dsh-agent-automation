@@ -2,6 +2,12 @@ name: Dispatch DSH Backlog
 
 on:
   workflow_call:
+    inputs:
+      requested_issue_number:
+        description: Exact Issue to re-read after a non-authoritative wake event; zero scans the ordinary backlog.
+        required: false
+        default: 0
+        type: number
 
 concurrency:
   group: dsh-backlog-${{ github.repository }}
@@ -33,5 +39,6 @@ jobs:
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml
+          REQUESTED_ISSUE_NUMBER: ${{ inputs.requested_issue_number }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/dispatch-backlog.mjs
