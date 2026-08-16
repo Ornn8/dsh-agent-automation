@@ -1029,7 +1029,8 @@ function Test-MaintenanceGitHubLogin {
 
 function Get-RequiredCheckNames {
   param([Parameter(Mandatory)]$Mapping)
-  return @(@($Mapping.requiredChecks | ForEach-Object { [string]$_ }), $script:ReviewRequiredCheckName)
+  $configured = @($Mapping.requiredChecks | ForEach-Object { [string]$_ })
+  return @($configured + $script:ReviewRequiredCheckName)
 }
 
 function Merge-RequiredStatusChecks {
@@ -1078,15 +1079,15 @@ function Get-HttpStatusCodeFromHeaders {
 
 function Get-GhApiHttpStatus {
   param([Parameter(Mandatory)][string]$Endpoint, [Parameter(Mandatory)][string]$GhExecutable)
-  $headers = @(& $GhExecutable api $Endpoint --include --silent 2>$null)
+  $response = @(& $GhExecutable api $Endpoint --include --silent 2>&1)
+  $headers = @($response | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   return Get-HttpStatusCodeFromHeaders -Headers $headers
 }
 
 function New-BranchProtectionBootstrapPayload {
   param([Parameter(Mandatory)][string[]]$RequiredNames)
-  $empty = [pscustomobject]@{ strict = $false; contexts = @(); checks = @() }
   return [pscustomobject][ordered]@{
-    required_status_checks = Merge-RequiredStatusChecks -Current $empty -RequiredNames $RequiredNames
+    required_status_checks = [pscustomobject][ordered]@{ strict = $true; contexts = @($RequiredNames) }
     enforce_admins = $true
     required_pull_request_reviews = $null
     restrictions = $null
@@ -1160,6 +1161,16 @@ function Set-RepositoryRequiredStatusChecks {
   if ($LASTEXITCODE -ne 0) {
     $operation = if ($bootstrapped) { 'bootstrap branch protection' } else { 'merge required status checks' }
     throw "Could not $operation for $($state.Repository); refusing to weaken or replace existing protection"
+  }
+  if ($bootstrapped) {
+    $appBound = Merge-RequiredStatusChecks `
+      -Current ([pscustomobject]@{ strict = $true; contexts = @(); checks = @() }) `
+      -RequiredNames $requiredNames
+    $appBoundJson = $appBound | ConvertTo-Json -Compress -Depth 8
+    $appBoundJson | & $GhExecutable api --method PATCH $state.Endpoint --input - 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Branch protection was created for $($state.Repository), but required checks could not be bound to GitHub Actions"
+    }
   }
   $verified = Get-RepositoryRequiredStatusChecks -Mapping $Mapping -GhExecutable $GhExecutable
   if (-not $verified.Exists) { throw "Required status checks are still absent after update for $($state.Repository)" }
@@ -1996,8 +2007,11 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'required check verification rejects an unbound CI check'; Passed = (-not (Test-RequiredStatusChecks -Current $wrongAppProtection -RequiredNames $requiredNames).Ok) }
   $results += [pscustomobject]@{ Name = 'GitHub status parser distinguishes explicit 404'; Passed = ((Get-HttpStatusCodeFromHeaders -Headers @('HTTP/2.0 404 Not Found')) -eq 404 -and (Get-HttpStatusCodeFromHeaders -Headers @('HTTP/2.0 403 Forbidden')) -eq 403) }
   $bootstrapPayload = New-BranchProtectionBootstrapPayload -RequiredNames $requiredNames
-  $bootstrapChecks = Test-RequiredStatusChecks -Current $bootstrapPayload.required_status_checks -RequiredNames $requiredNames
-  $results += [pscustomobject]@{ Name = 'branch protection bootstrap is automation compatible and destructive actions stay disabled'; Passed = ($bootstrapChecks.Ok -and $bootstrapPayload.enforce_admins -eq $true -and $null -eq $bootstrapPayload.required_pull_request_reviews -and $null -eq $bootstrapPayload.restrictions -and $bootstrapPayload.allow_force_pushes -eq $false -and $bootstrapPayload.allow_deletions -eq $false) }
+  $bootstrapStatusChecks = $bootstrapPayload.required_status_checks
+  $bootstrapUsesContextsOnly = $bootstrapStatusChecks.strict -eq $true `
+    -and (@($bootstrapStatusChecks.contexts) -join "`n") -ceq ($requiredNames -join "`n") `
+    -and $bootstrapStatusChecks.psobject.Properties.Name -notcontains 'checks'
+  $results += [pscustomobject]@{ Name = 'branch protection bootstrap is automation compatible and destructive actions stay disabled'; Passed = ($bootstrapUsesContextsOnly -and $bootstrapPayload.enforce_admins -eq $true -and $null -eq $bootstrapPayload.required_pull_request_reviews -and $null -eq $bootstrapPayload.restrictions -and $bootstrapPayload.allow_force_pushes -eq $false -and $bootstrapPayload.allow_deletions -eq $false) }
   $safeBootstrapResponse = [pscustomobject]@{ allow_force_pushes = [pscustomobject]@{ enabled = $false }; allow_deletions = [pscustomobject]@{ enabled = $false }; required_pull_request_reviews = $null }
   $unsafeBootstrapResponse = [pscustomobject]@{ allow_force_pushes = [pscustomobject]@{ enabled = $true }; allow_deletions = [pscustomobject]@{ enabled = $false }; required_pull_request_reviews = $null }
   $results += [pscustomobject]@{ Name = 'branch protection bootstrap verification rejects force pushes'; Passed = ((Test-BootstrapBranchProtection -Protection $safeBootstrapResponse).Ok -and -not (Test-BootstrapBranchProtection -Protection $unsafeBootstrapResponse).Ok) }
