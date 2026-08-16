@@ -1,6 +1,5 @@
-import { declaredIssueBranch, trustedAssociation } from './common.mjs'
-import { agentWorkRequestId, parseAgentWork } from './agent-work.mjs'
-import { baselineIssueWorkItem } from './baseline-issue.mjs'
+import { trustedAssociation } from './common.mjs'
+import { parseAgentWork } from './agent-work.mjs'
 import { hasTrustedExactReviewRun } from './landing-policy.mjs'
 
 function labelNames(item) {
@@ -17,8 +16,13 @@ export function issueDependencies(body) {
 
 /** Return whether a trusted PR comment explicitly requests a DSH repair. */
 export function explicitReworkCommand(body) {
-  return /^\s*(?:@dsh\s+(?:fix|repair|rework|revise|address)\b|dsh:\s*(?:fix|repair|rework|revise|address)\b)/i
+  return /^\s*(?:@(?:dsh|agent)\s+(?:fix|repair|rework|revise|address)\b|(?:dsh|agent):\s*(?:fix|repair|rework|revise|address)\b|\/automation\s+(?:repair|rework)\b)/i
     .test(String(body || ''))
+}
+
+/** Return whether a trusted comment explicitly resumes terminal paused automation. */
+export function explicitResumeCommand(body) {
+  return /^\s*\/automation\s+resume\s*$/i.test(String(body || ''))
 }
 
 /** Parse an idempotent CI repair request from a completed workflow run. */
@@ -73,33 +77,13 @@ export function trustedBlockedReviewProof({ pullRequest, reviewProof, trustedRev
     && reviewProof.run.conclusion === 'failure'
 }
 
-function hasDeclaredBranch(body) {
-  return Boolean(declaredIssueBranch(body))
-}
-
-function actionableIssue(issue) {
-  return hasDeclaredBranch(issue.body)
-    || /^\[BUG\]\s+/i.test(issue.title || '')
-    || Boolean(baselineIssueWorkItem(issue))
-}
-
 function issueDispatch(issue) {
   const work = parseAgentWork(issue.body)
-  if (work) {
-    if (work.dispatch !== 'ready') return null
-    return {
-      dependencies: work.dependsOn,
-      selected: {
-        type: 'issue',
-        number: issue.number,
-        role: work.role,
-        requestId: agentWorkRequestId(work),
-      },
-    }
+  if (!work || work.dispatch !== 'ready') return null
+  return {
+    dependencies: work.dependsOn,
+    selected: { type: 'issue', number: issue.number, work },
   }
-  return actionableIssue(issue)
-    ? { dependencies: issueDependencies(issue.body), selected: { type: 'issue', number: issue.number } }
-    : null
 }
 
 function closesIssue(pullRequest, issueNumber) {
@@ -107,9 +91,29 @@ function closesIssue(pullRequest, issueNumber) {
     .test(pullRequest.body || '')
 }
 
+/** Return active Issue numbers for one Profile workflow coordination key. */
+export function activeWorkflowIssueNumbers({ issues, pullRequests, profileId, workflowId }) {
+  const active = new Set()
+  for (const issue of issues) {
+    if (issue.state !== 'open') continue
+    let declaration
+    try {
+      declaration = parseAgentWork(issue.body)
+    } catch {
+      // A malformed declaration cannot be admitted, so it cannot own workflow capacity.
+      continue
+    }
+    if (!declaration || declaration.profile !== profileId || declaration.workflow !== workflowId) continue
+    const owned = labelNames(issue).has('agent/dsh')
+    const hasPullRequest = pullRequests.some(pullRequest => closesIssue(pullRequest, issue.number))
+    if (owned || hasPullRequest) active.add(issue.number)
+  }
+  return active
+}
+
 /** Select one safe unit of backlog work, preferring blocked PR repairs. */
-export function selectBacklogWork({ repository, pullRequests, issues, trustedBlockedRepairNumbers = new Set() }) {
-  const repair = [...pullRequests]
+export function selectBacklogWork({ repository, pullRequests, issues, trustedBlockedRepairNumbers = new Set(), includeRepairs = true }) {
+  const repair = includeRepairs && [...pullRequests]
     .filter(pullRequest => !pullRequest.draft
       && pullRequest.head?.repo?.full_name === repository
       && labelNames(pullRequest).has('automation/review-blocked')
@@ -131,6 +135,7 @@ export function selectBacklogWork({ repository, pullRequests, issues, trustedBlo
     if (labelNames(candidate).has('agent/dsh-failed')
       || labelNames(candidate).has('agent/dsh-blocked')
       || labelNames(candidate).has('agent/dsh')
+      || labelNames(candidate).has('automation/paused')
       || pullRequests.some(pullRequest => closesIssue(pullRequest, candidate.number))) continue
     const dispatch = issueDispatch(candidate)
     if (dispatch && dispatch.dependencies.every(number => !openIssueNumbers.has(number))) {

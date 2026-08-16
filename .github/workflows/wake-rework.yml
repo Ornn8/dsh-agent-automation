@@ -16,11 +16,14 @@ concurrency:
 
 jobs:
   repair:
-    name: dsh/comment-rework
-    runs-on: [self-hosted, agent-change]
-    timeout-minutes: 210
+    name: automation/comment-admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
+      actions: read
       contents: read
+      issues: write
+      pull-requests: write
     steps:
       - name: Check out automation controller
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -39,5 +42,5 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           CONTROLLER_SHA: ${{ job.workflow_sha }}
-          AGENT_ROLE: change
+          GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/wake-rework.mjs

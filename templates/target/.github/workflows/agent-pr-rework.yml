@@ -9,7 +9,10 @@ on:
     types: [dsh-repair, agent_work_requested]
 
 permissions:
+  actions: write
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   dsh-comment-rework:
@@ -18,7 +21,10 @@ jobs:
       && github.event.issue.pull_request
       && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       && (startsWith(github.event.comment.body, '@dsh ')
-        || startsWith(github.event.comment.body, 'DSH: '))
+        || startsWith(github.event.comment.body, 'DSH: ')
+        || startsWith(github.event.comment.body, '@agent ')
+        || startsWith(github.event.comment.body, 'agent: ')
+        || startsWith(github.event.comment.body, '/automation '))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/wake-rework.yml@{{CONTROLLER_SHA}}
     with:
       pull_request_number: ${{ github.event.issue.number }}
@@ -27,11 +33,12 @@ jobs:
   dsh-repair:
     if: >-
       github.event_name == 'repository_dispatch'
-      && (github.event.action == 'dsh-repair'
+          && (github.event.action == 'dsh-repair'
         || (github.event.action == 'agent_work_requested'
-          && github.event.client_payload.version == 1
+          && github.event.client_payload.version == 2
           && github.event.client_payload.role == 'change'
-          && github.event.client_payload.kind == 'review-repair'
+          && github.event.client_payload.workflowId == 'repair'
+          && github.event.client_payload.stageId == 'change'
           && github.event.client_payload.repository == github.repository
           && github.event.client_payload.subject.type == 'pull-request'))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-repair.yml@{{CONTROLLER_SHA}}
@@ -40,3 +47,4 @@ jobs:
       head_sha: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.revision.head || github.event.client_payload.head_sha }}
       request_id: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.requestId || github.event.client_payload.request_id }}
       ci_workflow_name: ${{ github.event.client_payload.ci_workflow_name || '' }}
+      work_request: ${{ github.event.action == 'agent_work_requested' && toJSON(github.event.client_payload) || '' }}

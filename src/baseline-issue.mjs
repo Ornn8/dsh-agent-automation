@@ -94,7 +94,7 @@ export function nonBaselineBlockFromReceipt(receipt) {
   return { reason: result.blockedReason }
 }
 
-/** Verify that a referenced Issue is still a same-repository, privileged DSH work item. */
+/** Verify that a referenced Issue is a same-repository candidate awaiting controller admission. */
 export function trustedBaselineIssue({ issue, repository, reference, trustedAssociation, workflowName, branch, pullRequestBody }) {
   if (!issue || issue.number !== reference.number) throw new Error('Baseline Issue number changed')
   if (issue.html_url !== reference.url || issue.html_url !== canonicalIssueUrl(repository, reference.number)) {
@@ -102,8 +102,8 @@ export function trustedBaselineIssue({ issue, repository, reference, trustedAsso
   }
   if (issue.state !== 'open' || issue.pull_request) throw new Error('Baseline Issue is not an open Issue')
   if (!trustedAssociation(issue.author_association)) throw new Error('Baseline Issue author is not trusted')
-  if (!Array.isArray(issue.labels) || !issue.labels.some(label => label?.name === 'agent/dsh')) {
-    throw new Error('Baseline Issue is missing the exact agent/dsh label')
+  if (!Array.isArray(issue.labels) || issue.labels.some(label => label?.name === 'agent/dsh')) {
+    throw new Error('Baseline Issue must not bypass controller admission with agent/dsh')
   }
   const identity = baselineIssueIdentity({ workflowName, issueBody: issue.body })
   if (issue.title !== identity.title) {

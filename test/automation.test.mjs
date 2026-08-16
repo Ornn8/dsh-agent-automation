@@ -65,7 +65,7 @@ import {
   reviewThreadConfig,
 } from '../src/codex-session.mjs'
 import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
-import { agentWorkRequestId, parseAgentWork } from '../src/agent-work.mjs'
+import { parseAgentWork } from '../src/agent-work.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -625,21 +625,28 @@ test('a blocking review publishes an independent change work request', async () 
   assert.match(workflow, /job\.workflow_sha/)
 })
 
-test('privileged agent workflows pass only an immutable role, never a caller-selected worker', async () => {
-  for (const name of ['agent-review.yml', 'dsh-issue.yml', 'dsh-repair.yml', 'wake-rework.yml', 'pipeline-health.yml']) {
+test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {
+  for (const name of ['dsh-repair.yml', 'pipeline-health.yml']) {
     const workflow = await readFile(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8')
     assert.match(workflow, /AGENT_ROLE:/)
     assert.doesNotMatch(workflow, /AGENT_WORKER_ID:/)
   }
+  const issueWorkflow = await readFile(new URL('../.github/workflows/dsh-issue.yml', import.meta.url), 'utf8')
+  assert.match(issueWorkflow, /WORK_REQUEST_JSON:/)
+  assert.doesNotMatch(issueWorkflow, /AGENT_ROLE:|AGENT_WORKER_ID:/)
+  const admission = await readFile(new URL('../.github/workflows/wake-rework.yml', import.meta.url), 'utf8')
+  assert.match(admission, /runs-on: ubuntu-latest/)
+  assert.doesNotMatch(admission, /AGENT_ROLE:|agent-change/)
   const source = await readFile(new URL('../src/common.mjs', import.meta.url), 'utf8')
   assert.match(source, /must have exactly one mapping/)
 })
 
-test('the explicit rework child preserves every required repair input', async () => {
+test('an explicit rework comment records admission without starting a repair child', async () => {
   const source = await readFile(new URL('../src/wake-rework.mjs', import.meta.url), 'utf8')
-  assert.match(source, /DEFAULT_BRANCH: requiredEnv\('DEFAULT_BRANCH'\)/)
-  assert.match(source, /CONTROLLER_SHA: requiredEnv\('CONTROLLER_SHA'\)/)
-  assert.doesNotMatch(source, /CONTROLLER_REPOSITORY: requiredEnv/)
+  assert.match(source, /governorDecision/)
+  assert.match(source, /observationId: `comment-\$\{commentId\}`/)
+  assert.match(source, /CONTROLLER_REPOSITORY/)
+  assert.doesNotMatch(source, /dsh-repair\.mjs|runAgentWorker/)
 })
 
 test('a completed BLOCK publishes repair without being mistaken for reviewer infrastructure failure', async () => {
@@ -804,8 +811,8 @@ test('Codex review results do not depend on task metadata housekeeping', async (
 
 test('backlog Issue dispatch is not lost to GitHub token recursion suppression', async () => {
   const source = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
-  assert.match(source, /event_type=dsh-issue/)
-  assert.match(source, /client_payload\[issue_number\]/)
+  assert.match(source, /repositoryDispatchBody\(work\.request\)/)
+  assert.doesNotMatch(source, /event_type=dsh-issue/)
 })
 
 test('a valid blocked Issue result becomes terminal state without recovery failure', async () => {
@@ -815,10 +822,11 @@ test('a valid blocked Issue result becomes terminal state without recovery failu
   assert.match(source, /no retry was scheduled/)
 })
 
-test('the Issue worker gives its own CI baseline handoff a deterministic branch', async () => {
+test('the Issue worker requires the exact Profile-bound WorkRequest branch', async () => {
   const source = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
-  assert.match(source, /baselineIssueWorkItem\(issue\)/)
-  assert.match(source, /\? \{ number: issueNumber \}/)
+  assert.match(source, /resolveAgentWorkDispatch\(/)
+  assert.match(source, /workRequest\.definitionHash/)
+  assert.doesNotMatch(source, /baselineIssueWorkItem|\^\\\[BUG\\\]/)
 })
 
 test('reviewer instructions come from the verified base rather than the pull request head', async () => {
@@ -985,6 +993,9 @@ test('backlog dispatch leaves failed or active repairs for their explicit recove
 })
 
 test('backlog dispatch waits for open dependencies and skips trackers', () => {
+  const declaration = (workflow, dependsOn = []) => `<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify({
+    version: 2, dispatch: 'ready', workflow, dependsOn,
+  })}\n\`\`\``
   const issues = [
     {
       number: 1,
@@ -998,7 +1009,7 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
       number: 2,
       state: 'open',
       title: '[GUI-01] Architecture',
-      body: 'Branch: `gui/01-architecture`',
+      body: declaration('default'),
       author_association: 'OWNER',
       labels: [{ name: 'agent/dsh' }],
     },
@@ -1006,51 +1017,53 @@ test('backlog dispatch waits for open dependencies and skips trackers', () => {
       number: 3,
       state: 'open',
       title: '[GUI-02] Shell',
-      body: 'Blocked by #2.\nBranch: `gui/02-shell`',
+      body: declaration('default', [2]),
       author_association: 'OWNER',
       labels: [],
     },
     {
       number: 11,
       state: 'open',
-      title: '[BUG] Static I/O error',
-      body: 'A focused bug report without a branch field.',
+      title: 'Static I/O error without an orchestration declaration',
+      body: 'A focused bug report without an agent-work block.',
       author_association: 'OWNER',
       labels: [],
     },
   ]
-  assert.deepEqual(selectBacklogWork({
+  assert.equal(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
-  }), { type: 'issue', number: 11 })
+  }), null)
 
   issues[1].labels = [{ name: 'agent/dsh-blocked' }]
-  assert.deepEqual(selectBacklogWork({
+  assert.equal(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
-  }), { type: 'issue', number: 11 })
+  }), null)
   issues[1].labels = [{ name: 'agent/dsh' }]
 
-  assert.deepEqual(selectBacklogWork({
+  assert.equal(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness',
     pullRequests: [{ body: 'Closes #2' }],
     issues,
-  }), { type: 'issue', number: 11 })
+  }), null)
 
   issues[1].state = 'closed'
-  assert.deepEqual(selectBacklogWork({
+  const selected = selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues,
-  }), { type: 'issue', number: 3 })
+  })
+  assert.equal(selected.type, 'issue')
+  assert.equal(selected.number, 3)
+  assert.equal(selected.work.workflow, 'default')
 })
 
 test('backlog dispatch selects a ready agent-work declaration after its dependencies close', () => {
   const declaration = {
-    version: 1,
+    version: 2,
     dispatch: 'ready',
-    role: 'change',
-    kind: 'integration',
+    workflow: 'default',
     branch: 'agent/integrate-ci-baseline',
     dependsOn: [39],
   }
-  const body = `Resolve the CI baseline cycle.\n\n<!-- agent-work:v1 -->\n\`\`\`json\n${JSON.stringify(declaration)}\n\`\`\``
+  const body = `Resolve the CI baseline cycle.\n\n<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify(declaration)}\n\`\`\``
   const workIssue = {
     number: 40,
     state: 'open',
@@ -1073,14 +1086,10 @@ test('backlog dispatch selects a ready agent-work declaration after its dependen
   }), null)
 
   dependency.state = 'closed'
-  assert.deepEqual(selectBacklogWork({
+  const selected = selectBacklogWork({
     repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [dependency, workIssue],
-  }), {
-    type: 'issue',
-    number: 40,
-    role: 'change',
-    requestId: agentWorkRequestId(parseAgentWork(body)),
   })
+  assert.deepEqual(selected, { type: 'issue', number: 40, work: parseAgentWork(body) })
 
   workIssue.body = workIssue.body.replace('"ready"', '"hold"')
   assert.equal(selectBacklogWork({
@@ -1089,8 +1098,8 @@ test('backlog dispatch selects a ready agent-work declaration after its dependen
 })
 
 test('a later malformed work declaration cannot block an earlier ready Issue', () => {
-  const readyBody = '<!-- agent-work:v1 -->\n```json\n{"version":1,"dispatch":"ready","role":"change","kind":"implementation","dependsOn":[]}\n```'
-  const malformedBody = '<!-- agent-work:v1 -->\n```json\n{"version":1,"dispatch":"ready","role":"change","kind":"unknown","dependsOn":[]}\n```'
+  const readyBody = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"default","dependsOn":[]}\n```'
+  const malformedBody = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"../unknown","dependsOn":[]}\n```'
   assert.deepEqual(selectBacklogWork({
     repository: 'Ornn8/deepseek-harness',
     pullRequests: [],
@@ -1098,12 +1107,7 @@ test('a later malformed work declaration cannot block an earlier ready Issue', (
       { number: 41, state: 'open', title: 'Broken declaration', body: malformedBody, author_association: 'OWNER', labels: [] },
       { number: 40, state: 'open', title: 'Ready work', body: readyBody, author_association: 'OWNER', labels: [] },
     ],
-  }), {
-    type: 'issue',
-    number: 40,
-    role: 'change',
-    requestId: agentWorkRequestId(parseAgentWork(readyBody)),
-  })
+  }), { type: 'issue', number: 40, work: parseAgentWork(readyBody) })
 })
 
 test('backlog dispatch consumes the CI baseline Issue emitted by the repair Skill', () => {

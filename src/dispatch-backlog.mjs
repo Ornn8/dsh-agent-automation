@@ -4,9 +4,28 @@ import {
   requiredEnv,
   run,
 } from './common.mjs'
-import { selectBacklogWork, trustedBlockedReviewProof } from './dispatch-policy.mjs'
+import {
+  activeWorkflowIssueNumbers,
+  selectBacklogWork,
+  trustedBlockedReviewProof,
+} from './dispatch-policy.mjs'
 import { reviewRunIdFromDetailsUrl } from './landing-policy.mjs'
-import { REVIEW_CHECK_NAME } from './review-authority.mjs'
+import {
+  governorBudgetDecision,
+  governorDecision,
+  subjectStateVersion,
+  workflowStageTransition,
+} from './governor-policy.mjs'
+import {
+  attestedGovernorRecordBody,
+  GOVERNOR_WORKFLOW_PATHS,
+  issueGovernorSubject,
+  pullRequestGovernorSubject,
+  trustedGovernorRecords,
+} from './governor-state.mjs'
+import { agentWorkRequestId } from './agent-work.mjs'
+import { loadTrustedWorkflowProfile, resolveWorkflow } from './workflow-profile.mjs'
+import { createIssueImplementationRequest, repositoryDispatchBody } from './work-request.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
@@ -16,6 +35,18 @@ const trustedReview = {
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
   workflowPath: requiredEnv('TRUSTED_REVIEW_WORKFLOW_PATH'),
 }
+const governorTrust = {
+  repository,
+  controllerRepository: trustedReview.controllerRepository,
+  workflowPaths: GOVERNOR_WORKFLOW_PATHS,
+}
+const governorWriterTrust = {
+  repository,
+  controllerRepository: trustedReview.controllerRepository,
+  controllerSha: trustedReview.controllerSha.toLowerCase(),
+  workflowPath: '.github/workflows/dispatch-backlog.yml',
+}
+const observationId = `${requiredEnv('GITHUB_RUN_ID')}:${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) {
   throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
@@ -50,7 +81,7 @@ async function trustedBlockedRepairNumbers(pullRequests) {
       'api', `repos/${repository}/commits/${pullRequest.headRefOid}/check-runs`, '--paginate', '--slurp',
     ], `check runs for pull request #${pullRequest.number}`)
     for (const checkRun of pages.flatMap(page => page.check_runs || [])) {
-      if (checkRun.name !== REVIEW_CHECK_NAME) continue
+      if (checkRun.name !== 'agent/review') continue
       const runId = reviewRunIdFromDetailsUrl(checkRun.details_url, repository)
       if (!runId) continue
       const workflowRun = await ghJson([
@@ -69,6 +100,109 @@ async function trustedBlockedRepairNumbers(pullRequests) {
   return result
 }
 
+async function targetProfile(profileId, revision) {
+  return loadTrustedWorkflowProfile({
+    repository,
+    revision,
+    profileId,
+    loadContent: async ({ path, revision: exactRevision }) => {
+      const content = await ghJson([
+        'api', '--method', 'GET', `repos/${repository}/contents/${path}`, '-f', `ref=${exactRevision}`,
+      ], `Profile ${profileId} at ${exactRevision}`)
+      if (content?.encoding !== 'base64' || typeof content.content !== 'string') {
+        throw new Error(`Profile ${profileId} is not a GitHub file`)
+      }
+      return Buffer.from(content.content.replace(/\s/g, ''), 'base64').toString('utf8')
+    },
+  })
+}
+
+async function governorComments(number) {
+  return ghPages(`repos/${repository}/issues/${number}/comments?per_page=100`, `governor comments for #${number}`)
+}
+
+async function governorRecords(number) {
+  return trustedGovernorRecords({
+    comments: await governorComments(number),
+    trust: governorTrust,
+    loadRun: runId => ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `governor workflow run ${runId}`),
+  })
+}
+
+async function writeGovernorRecord(number, record) {
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/issues/${number}/comments`, '--input', '-',
+  ], {
+    env: githubEnvironment,
+    input: JSON.stringify({
+      body: attestedGovernorRecordBody(record, {
+        ...governorWriterTrust,
+        runId: Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10),
+      }),
+    }),
+  })
+}
+
+async function admittedWork(work, pullRequests, issues) {
+  const source = work.type === 'repair'
+    ? pullRequests.find(candidate => candidate.number === work.number)
+    : issues.find(candidate => candidate.number === work.number)
+  if (!source) throw new Error(`Governor subject #${work.number} is missing from the bounded snapshot`)
+  const subject = work.type === 'repair'
+    ? pullRequestGovernorSubject(source)
+    : issueGovernorSubject(source)
+  const transition = work.request
+    ? workflowStageTransition(work.request)
+    : 'review-repair'
+  const stateVersion = subjectStateVersion(subject)
+  const records = await governorRecords(work.number)
+  const decision = governorDecision({ transition, subject, stateVersion, observationId, records })
+  if (decision.record) await writeGovernorRecord(work.number, decision.record)
+  if (!decision.execute) {
+    process.stdout.write(`Governor ${decision.action} for ${subject.type} #${work.number}; no work was dispatched.\n`)
+    return null
+  }
+  if (work.type === 'repair') {
+    const budget = governorBudgetDecision({
+      transition,
+      subject: { type: subject.type, number: subject.number },
+      workIdentity: `branch:${source.head.ref}`,
+      observationId,
+      limit: 6,
+      records,
+    })
+    if (budget.record) await writeGovernorRecord(work.number, budget.record)
+    if (!budget.execute) {
+      if (budget.action !== 'pause') {
+        process.stdout.write(`Governor ${budget.action} for pull request #${work.number}; no work was dispatched.\n`)
+        return null
+      }
+      await run(githubExecutable, [
+        'label', 'create', 'automation/paused', '--repo', repository,
+        '--description', 'Automatic governor budget exhausted', '--color', 'D93F0B',
+      ], { env: githubEnvironment }).catch(() => undefined)
+      await run(githubExecutable, [
+        'pr', 'edit', String(work.number), '--repo', repository,
+        '--add-label', 'automation/paused', '--remove-label', 'automation/review-blocked',
+      ], { env: githubEnvironment })
+      process.stdout.write(`Governor paused pull request #${work.number} after its review-repair budget was exhausted.\n`)
+      return null
+    }
+  }
+  return { subject, stateVersion, transition }
+}
+
+async function recordApplied(work, admission) {
+  await writeGovernorRecord(work.number, {
+    version: 1,
+    status: 'applied',
+    transition: admission.transition,
+    subject: { type: admission.subject.type, number: admission.subject.number },
+    stateVersion: admission.stateVersion,
+    observationId,
+  })
+}
+
 const pullRequests = await ghPages(`repos/${repository}/pulls?state=open&per_page=100`, 'open pull requests')
 const issues = (await ghPages(`repos/${repository}/issues?state=all&per_page=100`, 'Issues'))
   .filter(issue => !issue.pull_request)
@@ -77,6 +211,7 @@ const work = selectBacklogWork({
   pullRequests,
   issues,
   trustedBlockedRepairNumbers: await trustedBlockedRepairNumbers(pullRequests),
+  includeRepairs: false,
 })
 
 if (!work) {
@@ -84,7 +219,42 @@ if (!work) {
   process.exit(0)
 }
 
+if (work.type === 'issue') {
+  const repositoryState = await ghJson(['api', `repos/${repository}`], 'repository state')
+  const defaultBranch = repositoryState.default_branch
+  if (typeof defaultBranch !== 'string' || !defaultBranch) throw new Error('Repository default branch is missing')
+  const baseCommit = await ghJson([
+    'api', `repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`,
+  ], `default branch ${defaultBranch}`)
+  if (!/^[0-9a-f]{40}$/.test(baseCommit?.sha || '')) throw new Error('Default branch head is not a full SHA')
+  const profile = await targetProfile(work.work.profile, baseCommit.sha)
+  const workflow = resolveWorkflow(profile.definition, work.work.workflow)
+  const active = activeWorkflowIssueNumbers({
+    issues,
+    pullRequests,
+    profileId: profile.definition.profileId,
+    workflowId: work.work.workflow,
+  })
+  if (active.size >= workflow.coordination.limit) {
+    process.stdout.write(`Workflow ${profile.definition.profileId}/${work.work.workflow} is at its coordination limit ${workflow.coordination.limit}.\n`)
+    process.exit(0)
+  }
+  const requestId = agentWorkRequestId(work.work, profile.definitionHash)
+  work.request = createIssueImplementationRequest({
+    ...profile,
+    workflowId: work.work.workflow,
+    repository,
+    issueNumber: work.number,
+    base: baseCommit.sha,
+    requestId,
+  })
+}
+
+const admission = await admittedWork(work, pullRequests, issues)
+if (!admission) process.exit(0)
+
 if (work.type === 'repair') {
+  await recordApplied(work, admission)
   await run(githubExecutable, [
     'api', '--method', 'POST', `repos/${repository}/dispatches`,
     '-f', 'event_type=dsh-repair',
@@ -97,11 +267,16 @@ if (work.type === 'repair') {
   await run(githubExecutable, [
     'issue', 'edit', String(work.number), '--repo', repository, '--add-label', 'agent/dsh',
   ], { env: githubEnvironment })
-  await run(githubExecutable, [
-    'api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=dsh-issue',
-    '-F', `client_payload[issue_number]=${work.number}`,
-    '-f', `client_payload[request_id]=${work.requestId || `backlog-${work.number}`}`,
-  ], { env: githubEnvironment })
-  process.stdout.write(`Dispatched Issue #${work.number} through the trusted repository event.\n`)
+  try {
+    await run(githubExecutable, [
+      'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
+    ], { env: githubEnvironment, input: JSON.stringify(repositoryDispatchBody(work.request)) })
+  } catch (error) {
+    await run(githubExecutable, [
+      'issue', 'edit', String(work.number), '--repo', repository, '--remove-label', 'agent/dsh',
+    ], { env: githubEnvironment }).catch(() => undefined)
+    throw error
+  }
+  await recordApplied(work, admission)
+  process.stdout.write(`Dispatched Issue #${work.number} as ${work.request.profileId}/${work.request.workflowId}/${work.request.stageId}.\n`)
 }
