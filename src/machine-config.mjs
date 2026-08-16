@@ -2,10 +2,10 @@
 
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const ROLE_NAMES = ['change', 'review']
+const ROLE_NAMES = ['change', 'review', 'maintenance']
 const DEFAULTS_PATH = fileURLToPath(new URL('../ops/config.defaults.json', import.meta.url))
 const REMOVED_FIELDS = [
   'schemaVersion', 'configRevision', 'credentialRevision', 'repositories',
@@ -58,10 +58,11 @@ function expandConfigurationDirectory(value, configurationDirectory) {
 export function roleWorkerIds(config, role) {
   if (!ROLE_NAMES.includes(role)) throw new Error(`Unknown agent role ${role}`)
   const workers = config?.operations?.roles?.[role]?.workers
-  if (!Array.isArray(workers) || workers.length !== 1
+  const maximum = role === 'maintenance' ? 8 : 1
+  if (!Array.isArray(workers) || workers.length < 1 || workers.length > maximum
     || workers.some(workerId => typeof workerId !== 'string' || !workerId.trim())
     || new Set(workers).size !== workers.length) {
-    throw new Error(`operations.roles.${role}.workers must contain exactly one unique Worker id`)
+    throw new Error(`operations.roles.${role}.workers must contain ${role === 'maintenance' ? '1 through 8' : 'exactly one'} unique Worker id`)
   }
   return [...workers]
 }
@@ -73,16 +74,20 @@ function implementedCapabilities(worker, role) {
     return { skills: ['github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'], hardReadOnlyReview: true, trustDomain: role }
   }
   if (worker.adapter === 'dsh-web') {
+    if (role === 'maintenance') throw new Error('dsh-web cannot serve the maintenance role')
     if (role === 'review') throw new Error('dsh-web does not provide hard read-only review isolation')
     return { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: role }
   }
   if (['opencode-cli', 'claude-code-cli'].includes(worker.adapter)) {
     if (role === 'review') return { skills: ['github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'], hardReadOnlyReview: true, trustDomain: role }
+    if (role === 'maintenance') return { skills: ['controller-maintenance-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: role }
     return { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: role }
   }
   if (worker.adapter === 'command-json') {
     if (role === 'review') throw new Error('command-json cannot serve the review role without verifiable read-only isolation')
-    return { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: role }
+    return role === 'maintenance'
+      ? { skills: ['controller-maintenance-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: role }
+      : { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: role }
   }
   throw new Error(`Unknown Worker Adapter ${String(worker.adapter)}`)
 }
@@ -134,6 +139,10 @@ export function resolveMachineConfig({ defaults, input, configurationPath }) {
       if (worker.adapter === 'claude-code-cli' && worker.executable === undefined) worker.executable = 'claude'
       if (role === 'review' && ['opencode-cli', 'claude-code-cli'].includes(worker.adapter) && worker.gitExecutable === undefined) {
         worker.gitExecutable = config.gitExecutable
+      }
+      if (role === 'maintenance') {
+        if (worker.credentialIsolationDir === undefined) worker.credentialIsolationDir = join(config.operations.stateRoot, 'credentials', workerId)
+        worker.githubLogin = config.github?.login
       }
     }
   }

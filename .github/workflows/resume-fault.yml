@@ -1,0 +1,48 @@
+name: Resume Recovered Fault Work
+
+on:
+  workflow_call:
+    inputs:
+      subject_type:
+        required: true
+        type: string
+      subject_number:
+        required: true
+        type: number
+      fault_issue_number:
+        required: true
+        type: number
+      fault_id:
+        required: true
+        type: string
+
+jobs:
+  resume:
+    name: automation/resume-fault
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Check out the immutable automation controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Resume one subject from a recovered root fault
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+          SUBJECT_TYPE: ${{ inputs.subject_type }}
+          SUBJECT_NUMBER: ${{ inputs.subject_number }}
+          FAULT_ISSUE_NUMBER: ${{ inputs.fault_issue_number }}
+          FAULT_ID: ${{ inputs.fault_id }}
+          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROLLER_SHA: ${{ job.workflow_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node controller/src/resume-fault.mjs

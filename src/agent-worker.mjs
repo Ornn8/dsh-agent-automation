@@ -70,6 +70,11 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
     && (typeof normalizedInvocation.signal !== 'object' || typeof normalizedInvocation.signal.aborted !== 'boolean')) {
     throw new Error('invocation.signal must be an AbortSignal')
   }
+  if (normalizedInvocation.requiredSkill !== undefined
+    && worker.capabilities !== undefined
+    && !worker.capabilities?.skills?.includes(normalizedInvocation.requiredSkill)) {
+    throw new Error(`Agent worker ${id} does not implement required Skill ${normalizedInvocation.requiredSkill}`)
+  }
 
   const value = await invoke({ workerId: id, worker, invocation: normalizedInvocation })
   const sessionId = requiredText(value?.sessionId, 'worker receipt sessionId')

@@ -1305,15 +1305,17 @@ test('GitHub review fields reject non-English prose and Markdown path injection'
 test('role Worker bindings fail closed on missing skills or soft review isolation', () => {
   const changeCapabilities = { skills: ['github-issue-work', 'github-pr-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: 'change' }
   const reviewCapabilities = { skills: ['github-pr-review', 'github-repository-supervision', 'agent-readiness-canary'], hardReadOnlyReview: true, trustDomain: 'review' }
+  const maintenanceCapabilities = { skills: ['controller-maintenance-repair', 'agent-readiness-canary'], hardReadOnlyReview: false, trustDomain: 'maintenance' }
   const config = {
     repositories: ['owner/repository'],
     workers: {
       change: { adapter: 'dsh-web', capabilities: changeCapabilities },
       review: { adapter: 'codex-app', capabilities: reviewCapabilities },
+      maintenance: { adapter: 'opencode-cli', mode: 'maintenance', capabilities: maintenanceCapabilities },
     },
     operations: {
       roles: {
-        change: { workers: ['change'] }, review: { workers: ['review'] },
+        change: { workers: ['change'] }, review: { workers: ['review'] }, maintenance: { workers: ['maintenance'] },
       },
       repositoryMappings: [{ repository: 'owner/repository' }],
     },
