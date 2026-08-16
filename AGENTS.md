@@ -12,4 +12,5 @@ This repository owns an event-driven control plane between GitHub and independen
 - Labels are observable state projections. Keep review and CI repair failure transitions closed and idempotent through the exact review pair or workflow-run request marker.
 - Keep the Agent Worker Interface product-neutral. Agent-specific session and process behavior belongs in an Adapter.
 - Keep review and change roles on independent runner labels so stopping one role does not stop the other.
+- Keep each pull request within 40 changed files and 2,000 added plus deleted lines. Split larger work into independently reviewable pull requests.
 - Test JavaScript policy with `npm test` and `npm run typecheck`; test portable plans with `scripts/test-installation-plan.ps1`; test Windows operations with `scripts/test-operations.ps1`.

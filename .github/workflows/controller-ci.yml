@@ -9,6 +9,27 @@ permissions:
   contents: read
 
 jobs:
+  pull-request-scope:
+    name: pull request scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out complete pull request history
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Enforce reviewable pull request size
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/check-pr-size.mjs
+      - name: Skip the pull request gate for non-pull-request events
+        if: github.event_name != 'pull_request'
+        run: echo "Pull request size does not apply to this event."
+
   test:
     name: tests (${{ matrix.os }})
     strategy:
@@ -51,11 +72,13 @@ jobs:
   all-checks-passed:
     name: all checks passed
     if: always()
-    needs: [test]
+    needs: [pull-request-scope, test]
     runs-on: ubuntu-latest
     steps:
       - name: Require every controller test job
         env:
+          SCOPE_RESULT: ${{ needs.pull-request-scope.result }}
           TEST_RESULT: ${{ needs.test.result }}
         run: |
+          test "$SCOPE_RESULT" = success
           test "$TEST_RESULT" = success

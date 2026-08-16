@@ -48,3 +48,13 @@ test('Agent review publication is job-scoped and landing is a separate workflow'
   assert.match(landingController, /requiredCheckNames\.map\(context => \(\{ context, app_id: 15368 \}\)\)/)
   assert.match(landingController, /--body', current\.body \|\| ''/)
 })
+
+test('controller CI rejects pull requests that exceed the repository review budget', async () => {
+  const workflow = await readFile(new URL('controller-ci.yml', workflowDirectory), 'utf8')
+  const gate = await readFile(new URL('../scripts/check-pr-size.mjs', import.meta.url), 'utf8')
+  assert.match(workflow, /name: pull request scope/)
+  assert.match(workflow, /fetch-depth: 0/)
+  assert.match(workflow, /node scripts\/check-pr-size\.mjs/)
+  assert.match(workflow, /needs: \[pull-request-scope, test\]/)
+  assert.match(gate, /git', \['diff', '--numstat', '--find-renames'/)
+})
