@@ -172,7 +172,7 @@ if ($Online) {
     $principal = Test-HostGitHubLogin -Config $loaded.Config
     Add-Finding 'GitHub CLI principal' $principal.Ok $principal.Detail
   } catch { Add-Finding 'GitHub CLI principal' $false 'gh api user failed' }
-  foreach ($workerId in @($loaded.Config.maintenanceWorkers)) {
+  foreach ($workerId in @(Get-RoleWorkerIds -Config $loaded.Config -Role maintenance)) {
     $maintenancePrincipal = Test-MaintenanceGitHubLogin -Config $loaded.Config -Worker $loaded.Config.workers.$workerId -ControllerRepository $ops.controller.repository
     Add-Finding "maintenance Worker $workerId GitHub credential" $maintenancePrincipal.Ok $maintenancePrincipal.Detail
   }

@@ -2055,6 +2055,7 @@ function Invoke-OperationsSelfTest {
 
 Export-ModuleMember -Function @(
   'Get-JsonPropertyLineMap', 'Get-ConfigurationExplanation',
+  'Get-RoleWorkerIds',
   'Write-OperationLog', 'Write-OperationHeartbeat', 'Test-OperationHeartbeat', 'Resolve-OperationPath', 'Assert-PathInside', 'Get-RepositoryKey',
   'Read-OperationsConfig', 'Get-RunnerInstances', 'Get-RunnerInstance',
   'Resolve-InstallationPlatform', 'New-InstallationPlan', 'ConvertTo-InstallationPlanJson',
