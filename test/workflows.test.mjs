@@ -46,7 +46,7 @@ test('Agent review publication is job-scoped and landing is a separate workflow'
   assert.match(landing, /PROFILE_ID: \$\{\{ inputs\.profile_id \}\}/)
   assert.match(landingController, /required_status_checks/)
   assert.match(landingController, /cycle\.merge\.strategy/)
-  assert.match(landingController, /--body', current\.body \|\| ''/)
+  assert.match(landingController, /commit_message: current\.body \|\| ''/)
 })
 
 test('controller CI rejects pull requests that exceed the repository review budget', async () => {

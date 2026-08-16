@@ -74,7 +74,6 @@ export function intentionalReviewBlock(run, jobs) {
   if (run?.conclusion !== 'failure') return false
   return jobs?.some(job => job.name === 'agent-review / agent/review'
     && job.conclusion === 'failure'
-    && job.steps?.some(step => step.name === 'Review exact PR head with Codex' && step.conclusion === 'success')
     && job.steps?.some(step => step.name === 'Publish an independent change work request' && step.conclusion === 'success')
     && job.steps?.some(step => step.name === 'Preserve the blocking review conclusion' && step.conclusion === 'failure'))
 }

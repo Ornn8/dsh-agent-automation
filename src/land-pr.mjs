@@ -47,7 +47,7 @@ if (pullRequestNumber === 0) {
 async function readPullRequest() {
   return ghJson([
     'pr', 'view', String(pullRequestNumber), '--repo', repository,
-    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefOid,mergeStateStatus,url,body,labels',
+    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,mergeStateStatus,url,body,labels',
   ], 'pull request for landing')
 }
 
@@ -178,12 +178,27 @@ if (current.baseRefOid !== pullRequest.baseRefOid
   throw new Error(`Pull request or landing evidence changed before merge: ${currentDecision.reason}`)
 }
 
-const mergeArguments = [
-  'pr', 'merge', String(pullRequestNumber), '--repo', repository,
-  `--${cycle.merge.strategy}`,
-  ...(cycle.merge.deleteBranch ? ['--delete-branch'] : []),
-  '--match-head-commit', expectedHead,
-  '--body', current.body || '',
-]
-await run(githubExecutable, mergeArguments, { env: githubEnvironment, tee: true })
+const mergeResult = await run(githubExecutable, [
+  'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequestNumber}/merge`, '--input', '-',
+], {
+  env: githubEnvironment,
+  input: JSON.stringify({
+    sha: expectedHead,
+    merge_method: cycle.merge.strategy,
+    commit_message: current.body || '',
+  }),
+})
+const merge = parseJson(mergeResult.stdout, 'pull request merge result')
+if (merge?.merged !== true || !/^[0-9a-f]{40}$/.test(merge.sha || '')) {
+  throw new Error(`GitHub did not merge pull request #${pullRequestNumber}`)
+}
+if (cycle.merge.deleteBranch && !current.isCrossRepository && current.headRefName !== defaultBranch) {
+  try {
+    await run(githubExecutable, [
+      'api', '--method', 'DELETE', `repos/${repository}/git/refs/heads/${current.headRefName}`,
+    ], { env: githubEnvironment })
+  } catch (error) {
+    process.stderr.write(`Pull request #${pullRequestNumber} merged, but its source branch was not deleted: ${error.message}\n`)
+  }
+}
 process.stdout.write(`Landed pull request #${pullRequestNumber} at exact head ${expectedHead}.\n`)
