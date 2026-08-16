@@ -51,8 +51,11 @@ Describe 'Branch protection authority migration' {
 
 Describe 'Installer and uninstaller fail-closed guards' {
   It 'rejects runner versions that predate job.workflow_*' {
-    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.example.json') -Raw | ConvertFrom-Json -Depth 32
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
     $config.operations.runner.version = '2.333.0'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue 'F:\test-agent-automation\runtime'
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue 'F:\test-agent-automation\state'
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue 'F:\test-agent-automation\state\logs'
     $path = Join-Path $TestDrive 'old-runner.json'
     [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
     { Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders } | Should -Throw '*at least 2.334.0*'
@@ -71,5 +74,75 @@ Describe 'Installer and uninstaller fail-closed guards' {
       -Configuration $missing -DryRun -ConfirmMigration 2>&1
     $LASTEXITCODE | Should -Not -Be 0
     ($output | Out-String) | Should -Match 'ConfirmMigration requires -Migrate'
+  }
+}
+
+Describe 'Effective configuration explanation' {
+  It 'emits one structured offline explanation through doctor' {
+    $configuration = Join-Path $script:RepositoryRoot 'config.minimal.json'
+    (Get-Content -LiteralPath $configuration -Raw | Test-Json -SchemaFile (Join-Path $script:RepositoryRoot 'ops\config.schema.json')) | Should -BeTrue
+
+    $output = @(& pwsh -NoProfile -File (Join-Path $script:RepositoryRoot 'scripts\doctor.ps1') `
+      -Configuration $configuration -Explain -DryRun)
+
+    $LASTEXITCODE | Should -Be 0
+    $structured = @($output | Where-Object { $_ -like 'AUTOMATION_CONFIGURATION_EXPLAIN_JSON=*' })
+    $structured | Should -HaveCount 1
+    $records = @($structured[0].Substring('AUTOMATION_CONFIGURATION_EXPLAIN_JSON='.Length) | ConvertFrom-Json -Depth 16)
+    @($records | Where-Object { $_.Path -eq 'configurationHash' -and $_.SourceType -eq 'derived' }) | Should -HaveCount 1
+  }
+
+  It 'reports configuration, default, derived, and repository-variable sources' {
+    $configuration = Join-Path $script:RepositoryRoot 'config.minimal.json'
+    $loaded = Read-OperationsConfig -Configuration $configuration -AllowExamplePlaceholders
+    $resolver = {
+      param($Repository, $Name)
+      switch ($Name) {
+        'DSH_AUTOMATION_CI_WORKFLOWS' { return [pscustomobject]@{ Found = $true; Value = '["Remote CI"]' } }
+        'DSH_AUTOMATION_REQUIRED_CHECKS' { return [pscustomobject]@{ Found = $true; Value = '["remote/gate"]' } }
+        default { return [pscustomobject]@{ Found = $true; Value = 'maintenance-replica' } }
+      }
+    }
+
+    $rows = @(Get-ConfigurationExplanation -Loaded $loaded -RepositoryVariableResolver $resolver)
+    $configured = @($rows | Where-Object Path -CEQ 'operations.repositoryMappings[0].repository')
+    $configured | Should -HaveCount 1
+    $configured[0].SourceType | Should -BeExactly 'configuration'
+    $configured[0].Source | Should -BeExactly ([IO.Path]::GetFullPath($configuration))
+    $configured[0].Line | Should -Be 21
+
+    $defaulted = @($rows | Where-Object Path -CEQ 'ghExecutable')
+    $defaulted | Should -HaveCount 1
+    $defaulted[0].SourceType | Should -BeExactly 'default'
+    $defaulted[0].Line | Should -Be 3
+
+    $derived = @($rows | Where-Object Path -CEQ 'workers.change.mode')
+    $derived | Should -HaveCount 1
+    $derived[0].SourceType | Should -BeExactly 'derived'
+    $derived[0].Line | Should -BeNullOrEmpty
+
+    $nodeHash = & node --input-type=module -e "import { readMachineConfig } from './src/machine-config.mjs'; console.log((await readMachineConfig(process.argv[1])).configurationHash)" $configuration
+    $LASTEXITCODE | Should -Be 0
+    $loaded.Config.configurationHash | Should -BeExactly $nodeHash.Trim()
+    @($rows | Where-Object Path -CEQ 'configurationHash').SourceType | Should -BeExactly 'derived'
+
+    $overridden = @($rows | Where-Object Path -CEQ 'operations.repositoryMappings[0].ciWorkflows')
+    $overridden | Should -HaveCount 1
+    $overridden[0].DeclaredValue | Should -BeExactly '["CI"]'
+    $overridden[0].Value | Should -BeExactly '["Remote CI"]'
+    $overridden[0].SourceType | Should -BeExactly 'repository-variable'
+    $overridden[0].Override | Should -BeTrue
+    $overridden[0].Source | Should -BeExactly 'github:REPLACE/target:DSH_AUTOMATION_CI_WORKFLOWS'
+  }
+
+  It 'reports a missing required repository variable without treating it as an override' {
+    $loaded = Read-OperationsConfig -Configuration (Join-Path $script:RepositoryRoot 'config.minimal.json') -AllowExamplePlaceholders
+    $resolver = { param($Repository, $Name) [pscustomobject]@{ Found = $false; Value = $null } }
+
+    $rows = @(Get-ConfigurationExplanation -Loaded $loaded -RepositoryVariableResolver $resolver)
+    $missing = @($rows | Where-Object Status -CEQ 'missing')
+
+    $missing | Should -HaveCount 2
+    @($missing | Where-Object Override) | Should -HaveCount 0
   }
 }

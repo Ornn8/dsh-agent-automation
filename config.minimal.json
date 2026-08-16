@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Ornn8/dsh-agent-automation/master/ops/config.schema.json",
+  "credentialGeneration": "1",
+  "github": { "login": "REPLACE-GITHUB-LOGIN" },
+  "workers": {
+    "change": { "adapter": "opencode-cli", "model": "opencode-go/deepseek-v4-flash", "variant": "max" },
+    "review": { "adapter": "opencode-cli", "model": "openai/gpt-5", "variant": "medium" }
+  },
+  "operations": {
+    "controller": { "repository": "REPLACE/controller" },
+    "runner": {
+      "version": "2.336.0",
+      "artifacts": {
+        "windows-x64": {
+          "downloadUri": "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-win-x64-2.336.0.zip",
+          "sha256": "d59123a43003e357b0805b5d0f611d0bd2f65ab67d51bd070dd4e7a0f685c162"
+        }
+      }
+    },
+    "repositoryMappings": [
+      { "repository": "REPLACE/target", "ciWorkflows": ["CI"], "requiredChecks": ["all checks passed"] }
+    ],
+    "roles": {
+      "change": { "workers": ["change"] },
+      "review": { "workers": ["review"] }
+    }
+  }
+}
