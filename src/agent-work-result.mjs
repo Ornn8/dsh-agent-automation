@@ -3,6 +3,7 @@ export const AGENT_REPAIR_SKILL = 'github-pr-repair'
 export const AGENT_REVIEW_SKILL = 'github-pr-review'
 export const AGENT_SUPERVISION_SKILL = 'github-repository-supervision'
 export const AGENT_READINESS_SKILL = 'agent-readiness-canary'
+export const AGENT_MAINTENANCE_SKILL = 'controller-maintenance-repair'
 
 const AGENT_SKILLS = new Map([
   [AGENT_ISSUE_SKILL, {
@@ -24,6 +25,10 @@ const AGENT_SKILLS = new Map([
   [AGENT_READINESS_SKILL, {
     source: new URL('../dsh-plugin/skills/readiness.md', import.meta.url),
     description: 'Verify one configured Agent and provider with no repository or GitHub mutation.',
+  }],
+  [AGENT_MAINTENANCE_SKILL, {
+    source: new URL('../dsh-plugin/skills/maintenance.md', import.meta.url),
+    description: 'Repair one attested root fault in the Controller or Operations repository.',
   }],
 ])
 
@@ -131,7 +136,9 @@ export function parseAgentAutomationResult(finalMessage) {
 
 /** Render one structured WorkRequest as a user-explicit Agent Skill invocation. */
 export function agentWorkPrompt(skillName, workRequest) {
-  if (![AGENT_ISSUE_SKILL, AGENT_REPAIR_SKILL].includes(skillName)) {
+  try {
+    agentSkillDefinition(skillName)
+  } catch {
     throw new Error(`Unknown agent work skill: ${skillName}`)
   }
   if (!workRequest || typeof workRequest !== 'object' || Array.isArray(workRequest)) {

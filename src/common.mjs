@@ -50,6 +50,13 @@ export function run(command, args, options = {}) {
           stdio: 'ignore',
         })
         killer.once('error', () => child.kill())
+        killer.once('exit', (code) => {
+          if (code !== 0 && child.exitCode === null && child.signalCode === null) child.kill()
+        })
+        const fallback = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill()
+        }, 5_000)
+        fallback.unref?.()
         return
       }
       child.kill('SIGTERM')
@@ -151,11 +158,19 @@ export async function loadConfig() {
     resolveRepositoryWorker(config, repository, 'change')
     resolveRepositoryWorker(config, repository, 'review')
   }
+  for (const name of ['configRevision', 'credentialRevision']) {
+    if (typeof config[name] !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(config[name])) {
+      throw new Error(`runner configuration ${name} must be a non-secret revision identifier`)
+    }
+  }
+  resolveMaintenanceWorkers(config)
+  resolveMaintenanceReviewWorker(config)
   validateDshWorkerConfig(config)
   validateCodexWorkerConfig(config)
   validateOpenCodeWorkerConfig(config)
   validateClaudeCodeWorkerConfig(config)
   validateWorkerCapabilities(config)
+  validateMaintenanceWorkerCredentials(config)
   githubLogin(config)
   return config
 }
@@ -163,16 +178,20 @@ export async function loadConfig() {
 const CHANGE_SKILLS = ['github-issue-work', 'github-pr-repair']
 const REVIEW_SKILLS = ['github-pr-review', 'github-repository-supervision']
 const READINESS_SKILL = 'agent-readiness-canary'
+const MAINTENANCE_SKILL = 'controller-maintenance-repair'
 
 function implementedWorkerCapabilities(worker) {
   if (worker.adapter === 'codex-app') return { skills: [...REVIEW_SKILLS, READINESS_SKILL], hardReadOnlyReview: true }
   if (worker.adapter === 'dsh-web') return { skills: [...CHANGE_SKILLS, 'github-pr-review', READINESS_SKILL], hardReadOnlyReview: false }
   if (['opencode-cli', 'claude-code-cli'].includes(worker.adapter)) {
+    if (worker.mode === 'maintenance') return { skills: [MAINTENANCE_SKILL, READINESS_SKILL], hardReadOnlyReview: false }
     return worker.mode === 'review'
       ? { skills: [...REVIEW_SKILLS, READINESS_SKILL], hardReadOnlyReview: true }
       : { skills: [...CHANGE_SKILLS, READINESS_SKILL], hardReadOnlyReview: false }
   }
-  if (worker.adapter === 'command-json') return { skills: [...CHANGE_SKILLS, READINESS_SKILL], hardReadOnlyReview: false }
+  if (worker.adapter === 'command-json') return worker.mode === 'maintenance'
+    ? { skills: [MAINTENANCE_SKILL, READINESS_SKILL], hardReadOnlyReview: false }
+    : { skills: [...CHANGE_SKILLS, READINESS_SKILL], hardReadOnlyReview: false }
   return { skills: [], hardReadOnlyReview: false }
 }
 
@@ -203,8 +222,9 @@ export function validateWorkerCapabilities(config) {
       || capabilities.skills.length === 0
       || capabilities.skills.some(skill => typeof skill !== 'string' || !skill.trim())
       || new Set(capabilities.skills).size !== capabilities.skills.length
-      || typeof capabilities.hardReadOnlyReview !== 'boolean') {
-      throw new Error(`workers.${workerId}.capabilities must declare unique skills and hardReadOnlyReview`)
+      || typeof capabilities.hardReadOnlyReview !== 'boolean'
+      || !['change', 'review', 'maintenance'].includes(capabilities.trustDomain)) {
+      throw new Error(`workers.${workerId}.capabilities must declare unique skills, hardReadOnlyReview, and trustDomain`)
     }
     const implemented = implementedWorkerCapabilities(worker)
     for (const skill of capabilities.skills) {
@@ -216,11 +236,27 @@ export function validateWorkerCapabilities(config) {
       throw new Error(`workers.${workerId} hardReadOnlyReview does not match Adapter isolation`)
     }
   }
+  const maintenanceWorkers = resolveMaintenanceWorkers(config)
+  const productWorkers = new Set((config?.operations?.repositoryMappings || [])
+    .flatMap(mapping => [mapping.changeWorker, mapping.reviewWorker]))
+  for (const workerId of maintenanceWorkers) {
+    const capabilities = config.workers[workerId].capabilities
+    if (capabilities.trustDomain !== 'maintenance'
+      || !capabilities.skills.includes(MAINTENANCE_SKILL)
+      || !capabilities.skills.includes(READINESS_SKILL)) {
+      throw new Error(`Maintenance worker ${workerId} lacks its maintenance trust domain or required Skills`)
+    }
+    if (productWorkers.has(workerId)) throw new Error(`Maintenance worker ${workerId} cannot also serve a product role`)
+  }
   for (const repository of config?.repositories || []) {
     const changeWorkerId = resolveRepositoryWorker(config, repository, 'change')
     const reviewWorkerId = resolveRepositoryWorker(config, repository, 'review')
     const changeSkills = new Set(config.workers[changeWorkerId].capabilities.skills)
     const reviewCapabilities = config.workers[reviewWorkerId].capabilities
+    if (config.workers[changeWorkerId].capabilities.trustDomain !== 'change'
+      || reviewCapabilities.trustDomain !== 'review') {
+      throw new Error(`Repository ${repository} workers must use distinct change and review trust domains`)
+    }
     for (const skill of CHANGE_SKILLS) {
       if (!changeSkills.has(skill)) throw new Error(`Repository ${repository} change worker lacks ${skill}`)
     }
@@ -286,6 +322,35 @@ export function resolveRepositoryWorker(config, repository, role) {
   return workerId
 }
 
+/** Resolve the finite, declared maintenance Worker failover order. */
+export function resolveMaintenanceWorkers(config) {
+  const workers = config?.maintenanceWorkers
+  if (!Array.isArray(workers) || workers.length < 1 || workers.length > 8
+    || workers.some(workerId => typeof workerId !== 'string' || !workerId.trim())
+    || new Set(workers).size !== workers.length) {
+    throw new Error('runner configuration maintenanceWorkers must contain unique worker ids')
+  }
+  for (const workerId of workers) {
+    if (!config?.workers?.[workerId]) throw new Error(`Unknown maintenance worker ${workerId}`)
+  }
+  return [...workers]
+}
+
+/** Resolve the independent hard read-only reviewer for maintenance repairs. */
+export function resolveMaintenanceReviewWorker(config) {
+  const workerId = config?.maintenanceReviewWorker
+  const worker = typeof workerId === 'string' ? config?.workers?.[workerId] : undefined
+  if (!worker || worker.capabilities?.trustDomain !== 'review'
+    || worker.capabilities?.hardReadOnlyReview !== true
+    || !worker.capabilities?.skills?.includes('github-pr-review')) {
+    throw new Error('runner configuration maintenanceReviewWorker must name a hard read-only review Worker')
+  }
+  if (config?.maintenanceWorkers?.includes(workerId)) {
+    throw new Error('maintenanceReviewWorker must be independent from maintenanceWorkers')
+  }
+  return workerId
+}
+
 /** Return the immutable local GitHub identity that owns controller markers. */
 export function githubLogin(config) {
   const login = config?.github?.login
@@ -336,6 +401,21 @@ export function reviewerCredentialEnvironment(overrides = {}, source = process.e
   }, overrides)
 }
 
+/** Return a maintenance Worker environment bound to its dedicated GitHub CLI credential store. */
+export function maintenanceCredentialEnvironment(worker, overrides = {}, source = process.env) {
+  const credentialDirectory = worker?.credentialIsolationDir
+  if (typeof credentialDirectory !== 'string' || !isAbsolute(credentialDirectory)) {
+    throw new Error('maintenance Worker credentialIsolationDir must be an absolute path')
+  }
+  const environment = hostCredentialEnvironment({}, source)
+  return Object.assign(environment, {
+    GH_CONFIG_DIR: credentialDirectory,
+    GCM_INTERACTIVE: 'Never',
+    GH_PROMPT_DISABLED: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  }, overrides)
+}
+
 /** Return an environment that forces GitHub CLI to use the current Actions token. */
 export function actionsCredentialEnvironment(overrides = {}, source = process.env) {
   const environment = { ...source, ...overrides }
@@ -362,8 +442,8 @@ export function validateOpenCodeWorkerConfig(config) {
     if (!/^[^/\s]+\/[^/\s]+$/.test(worker.model)) {
       throw new Error(`workers.${workerId} model must be provider/model`)
     }
-    if (!['change', 'review'].includes(worker.mode)) {
-      throw new Error(`workers.${workerId} mode must be change or review`)
+    if (!['change', 'review', 'maintenance'].includes(worker.mode)) {
+      throw new Error(`workers.${workerId} mode must be change, review, or maintenance`)
     }
     if (worker.agent !== undefined && (typeof worker.agent !== 'string' || !worker.agent.trim())) {
       throw new Error(`workers.${workerId} agent must be a non-empty string`)
@@ -389,12 +469,25 @@ export function validateClaudeCodeWorkerConfig(config) {
     if (!CLAUDE_CODE_EFFORTS.has(worker.effort)) {
       throw new Error(`workers.${workerId} effort must be a supported Claude Code effort`)
     }
-    if (!['change', 'review'].includes(worker.mode)) {
-      throw new Error(`workers.${workerId} mode must be change or review`)
+    if (!['change', 'review', 'maintenance'].includes(worker.mode)) {
+      throw new Error(`workers.${workerId} mode must be change, review, or maintenance`)
     }
     if (worker.mode === 'review'
       && (typeof worker.gitExecutable !== 'string' || !worker.gitExecutable.trim())) {
       throw new Error(`workers.${workerId} gitExecutable must be a non-empty string for review`)
+    }
+  }
+}
+
+/** Validate the dedicated GitHub identity declared by each maintenance Worker. */
+export function validateMaintenanceWorkerCredentials(config) {
+  for (const workerId of resolveMaintenanceWorkers(config)) {
+    const worker = config.workers[workerId]
+    if (typeof worker.credentialIsolationDir !== 'string' || !isAbsolute(worker.credentialIsolationDir)) {
+      throw new Error(`workers.${workerId} credentialIsolationDir must be an absolute path`)
+    }
+    if (typeof worker.githubLogin !== 'string' || !/^[A-Za-z0-9-]{1,39}$/.test(worker.githubLogin)) {
+      throw new Error(`workers.${workerId} githubLogin must be a GitHub login`)
     }
   }
 }

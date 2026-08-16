@@ -5,6 +5,7 @@ import {
   AGENT_REVIEW_SKILL,
   AGENT_SUPERVISION_SKILL,
   AGENT_READINESS_SKILL,
+  AGENT_MAINTENANCE_SKILL,
   agentSkillDefinition,
   parseAgentAutomationResult,
 } from './agent-work-result.mjs'
@@ -124,8 +125,8 @@ async function materializeSkill(skillName) {
 
 /** Run one controller invocation through the official non-interactive OpenCode CLI. */
 export async function runOpenCodeCli({ worker, invocation, runCommand, environment }) {
-  if (!['change', 'review'].includes(worker.mode)) {
-    throw new Error('OpenCode CLI worker mode must be change or review')
+  if (!['change', 'review', 'maintenance'].includes(worker.mode)) {
+    throw new Error('OpenCode CLI worker mode must be change, review, or maintenance')
   }
   const executable = requiredText(worker.executable, 'OpenCode executable')
   const model = requiredText(worker.model, 'OpenCode model')
@@ -137,6 +138,9 @@ export async function runOpenCodeCli({ worker, invocation, runCommand, environme
   }
   if (worker.mode === 'review' && ![AGENT_REVIEW_SKILL, AGENT_SUPERVISION_SKILL, AGENT_READINESS_SKILL].includes(requiredSkill)) {
     throw new Error(`OpenCode review does not implement ${requiredSkill}`)
+  }
+  if (worker.mode === 'maintenance' && ![AGENT_MAINTENANCE_SKILL, AGENT_READINESS_SKILL].includes(requiredSkill)) {
+    throw new Error(`OpenCode maintenance does not implement ${requiredSkill}`)
   }
   const args = [
     ...(worker.mode === 'review' ? ['--pure'] : []),

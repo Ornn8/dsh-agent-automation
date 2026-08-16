@@ -1,0 +1,34 @@
+name: Controller Maintenance Readiness
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '3-59/15 * * * *'
+    - cron: '37 3 * * *'
+
+concurrency:
+  group: controller-maintenance-readiness
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  readiness:
+    name: maintenance/readiness
+    runs-on: [self-hosted, "${{ vars.AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID }}"]
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact Controller revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: controller
+          persist-credentials: false
+
+      - name: Verify exact replica, Worker CLIs, and dedicated credentials
+        env:
+          CONTROLLER_REPOSITORY: ${{ github.repository }}
+          AGENT_REPLICA_ID: ${{ vars.AGENT_AUTOMATION_MAINTENANCE_REPLICA_ID }}
+          READINESS_CANARY: ${{ github.event.schedule == '37 3 * * *' }}
+        run: node controller/src/maintenance-readiness.mjs

@@ -1,6 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/Ornn8/dsh-agent-automation/master/ops/config.schema.json",
   "schemaVersion": 4,
+  "configRevision": "config-1",
+  "credentialRevision": "credential-1",
   "repositories": ["Ornn8/deepseek-harness"],
   "ghExecutable": "gh.exe",
   "gitExecutable": "git.exe",
@@ -18,7 +20,8 @@
       "reasoningEffort": "max",
       "capabilities": {
         "skills": ["github-issue-work", "github-pr-repair", "github-pr-review", "agent-readiness-canary"],
-        "hardReadOnlyReview": false
+        "hardReadOnlyReview": false,
+        "trustDomain": "change"
       }
     },
     "codex": {
@@ -32,7 +35,8 @@
       "keep": 6,
       "capabilities": {
         "skills": ["github-pr-review", "github-repository-supervision", "agent-readiness-canary"],
-        "hardReadOnlyReview": true
+        "hardReadOnlyReview": true,
+        "trustDomain": "review"
       }
     },
     "opencode-change": {
@@ -43,7 +47,8 @@
       "variant": "max",
       "capabilities": {
         "skills": ["github-issue-work", "github-pr-repair", "agent-readiness-canary"],
-        "hardReadOnlyReview": false
+        "hardReadOnlyReview": false,
+        "trustDomain": "change"
       }
     },
     "opencode-review": {
@@ -55,7 +60,8 @@
       "variant": "medium",
       "capabilities": {
         "skills": ["github-pr-review", "github-repository-supervision", "agent-readiness-canary"],
-        "hardReadOnlyReview": true
+        "hardReadOnlyReview": true,
+        "trustDomain": "review"
       }
     },
     "claude-change": {
@@ -66,7 +72,8 @@
       "effort": "max",
       "capabilities": {
         "skills": ["github-issue-work", "github-pr-repair", "agent-readiness-canary"],
-        "hardReadOnlyReview": false
+        "hardReadOnlyReview": false,
+        "trustDomain": "change"
       }
     },
     "claude-review": {
@@ -78,7 +85,8 @@
       "effort": "high",
       "capabilities": {
         "skills": ["github-pr-review", "github-repository-supervision", "agent-readiness-canary"],
-        "hardReadOnlyReview": true
+        "hardReadOnlyReview": true,
+        "trustDomain": "review"
       }
     },
     "another-agent": {
@@ -89,10 +97,41 @@
       "mode": "change",
       "capabilities": {
         "skills": ["github-issue-work", "github-pr-repair", "agent-readiness-canary"],
-        "hardReadOnlyReview": false
+        "hardReadOnlyReview": false,
+        "trustDomain": "change"
+      }
+    },
+    "opencode-maintenance": {
+      "adapter": "opencode-cli",
+      "executable": "opencode.exe",
+      "mode": "maintenance",
+      "credentialIsolationDir": "F:\\dsh-agent-automation-state\\credentials\\opencode-maintenance-gh",
+      "githubLogin": "Ornn8",
+      "model": "opencode-go/deepseek-v4-flash",
+      "variant": "max",
+      "capabilities": {
+        "skills": ["controller-maintenance-repair", "agent-readiness-canary"],
+        "hardReadOnlyReview": false,
+        "trustDomain": "maintenance"
+      }
+    },
+    "claude-maintenance": {
+      "adapter": "claude-code-cli",
+      "executable": "claude.exe",
+      "mode": "maintenance",
+      "credentialIsolationDir": "F:\\dsh-agent-automation-state\\credentials\\claude-maintenance-gh",
+      "githubLogin": "Ornn8",
+      "model": "opus",
+      "effort": "max",
+      "capabilities": {
+        "skills": ["controller-maintenance-repair", "agent-readiness-canary"],
+        "hardReadOnlyReview": false,
+        "trustDomain": "maintenance"
       }
     }
   },
+  "maintenanceWorkers": ["opencode-maintenance", "claude-maintenance"],
+  "maintenanceReviewWorker": "codex",
   "operations": {
     "schemaVersion": 4,
     "installRoot": "F:\\dsh-agent-automation-runtime",
@@ -130,6 +169,11 @@
         "runnerNamePrefix": "dsh-agent-review",
         "replicas": 1,
         "labels": ["agent-reviewer"]
+      },
+      "maintenance": {
+        "runnerNamePrefix": "dsh-agent-maint",
+        "replicas": 1,
+        "labels": ["agent-maintenance"]
       }
     },
     "dshWebHost": {

@@ -2,9 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DSH Agent Automation operations configuration",
   "type": "object",
-  "required": ["schemaVersion", "repositories", "ghExecutable", "gitExecutable", "github", "workers", "operations"],
+  "required": ["schemaVersion", "configRevision", "credentialRevision", "repositories", "ghExecutable", "gitExecutable", "github", "workers", "maintenanceWorkers", "maintenanceReviewWorker", "operations"],
   "properties": {
     "schemaVersion": { "const": 4 },
+    "configRevision": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "credentialRevision": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
     "repositories": {
       "type": "array",
       "minItems": 1,
@@ -29,17 +31,23 @@
         "required": ["adapter", "capabilities"],
         "properties": {
           "adapter": { "type": "string", "minLength": 1 },
+          "credentialIsolationDir": { "type": "string", "pattern": "^[A-Za-z]:\\\\" },
+          "githubLogin": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$" },
           "capabilities": {
             "type": "object",
-            "required": ["skills", "hardReadOnlyReview"],
+            "required": ["skills", "hardReadOnlyReview", "trustDomain"],
             "additionalProperties": false,
             "properties": {
               "skills": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
-              "hardReadOnlyReview": { "type": "boolean" }
+              "hardReadOnlyReview": { "type": "boolean" },
+              "trustDomain": { "enum": ["change", "review", "maintenance"] }
             }
           }
         },
         "allOf": [{
+          "if": { "properties": { "capabilities": { "properties": { "trustDomain": { "const": "maintenance" } }, "required": ["trustDomain"] } }, "required": ["capabilities"] },
+          "then": { "required": ["credentialIsolationDir", "githubLogin"] }
+        }, {
           "if": { "properties": { "adapter": { "const": "dsh-web" } }, "required": ["adapter"] },
           "then": {
             "required": ["baseUrl", "agentPreset", "permissionPreset", "provider", "model", "reasoningEffort"],
@@ -71,7 +79,7 @@
             "required": ["executable", "mode", "model", "variant"],
             "properties": {
               "executable": { "type": "string", "minLength": 1 },
-              "mode": { "enum": ["change", "review"] },
+              "mode": { "enum": ["change", "review", "maintenance"] },
               "model": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
               "variant": { "type": "string", "minLength": 1 },
               "agent": { "type": "string", "minLength": 1 }
@@ -90,7 +98,7 @@
             "required": ["executable", "mode", "model", "effort"],
             "properties": {
               "executable": { "type": "string", "minLength": 1 },
-              "mode": { "enum": ["change", "review"] },
+              "mode": { "enum": ["change", "review", "maintenance"] },
               "model": { "type": "string", "minLength": 1 },
               "effort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultracode"] }
             },
@@ -108,7 +116,7 @@
             "required": ["executable", "mode"],
             "properties": {
               "executable": { "type": "string", "minLength": 1 },
-              "mode": { "enum": ["change", "review"] },
+              "mode": { "enum": ["change", "review", "maintenance"] },
               "args": { "type": "array", "items": { "type": "string" } },
               "healthArgs": { "type": "array", "items": { "type": "string" } }
             }
@@ -116,6 +124,14 @@
         }]
       }
     },
+    "maintenanceWorkers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "maintenanceReviewWorker": { "type": "string", "minLength": 1 },
     "operations": {
       "type": "object",
       "required": ["schemaVersion", "installRoot", "stateRoot", "logsRoot", "controller", "runner", "repositoryMappings", "roles", "dshWebHost"],
@@ -173,11 +189,17 @@
         },
         "roles": {
           "type": "object",
-          "required": ["change", "review"],
+          "required": ["change", "review", "maintenance"],
           "additionalProperties": false,
           "properties": {
             "change": { "$ref": "#/$defs/role" },
-            "review": { "$ref": "#/$defs/role" }
+            "review": { "$ref": "#/$defs/role" },
+            "maintenance": {
+              "allOf": [
+                { "$ref": "#/$defs/role" },
+                { "properties": { "replicas": { "const": 1 } } }
+              ]
+            }
           }
         },
         "dshWebHost": {
