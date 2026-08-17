@@ -4,6 +4,12 @@ BeforeAll {
 }
 
 Describe 'Branch protection authority migration' {
+  It 'keeps every configured required check distinct from review authority' {
+    $names = Get-RequiredCheckNames -Mapping ([pscustomobject]@{ requiredChecks = @('lint', 'unit', 'e2e') })
+
+    ($names -join '|') | Should -BeExactly 'lint|unit|e2e|agent/review'
+  }
+
   It 'replaces only the reserved legacy review authority and preserves unrelated requirements' {
     $current = [pscustomobject]@{
       strict = $false
@@ -40,12 +46,31 @@ Describe 'Branch protection authority migration' {
   }
 
   It 'creates minimal branch protection without enabling destructive branch operations' {
-    $payload = New-BranchProtectionBootstrapPayload -RequiredNames @('all checks passed', 'agent/review')
+    $required = @('all checks passed', 'agent/review')
+    $payload = New-BranchProtectionBootstrapPayload -RequiredNames $required
+    $payload.required_status_checks.strict | Should -BeTrue
+    @($payload.required_status_checks.contexts) | Should -Be $required
+    $payload.required_status_checks.psobject.Properties.Name | Should -Not -Contain 'checks'
     $payload.enforce_admins | Should -BeTrue
     $payload.required_pull_request_reviews | Should -BeNullOrEmpty
     $payload.restrictions | Should -BeNullOrEmpty
     $payload.allow_force_pushes | Should -BeFalse
     $payload.allow_deletions | Should -BeFalse
+  }
+
+  It 'reads final HTTP status from headers and GitHub CLI stderr without accepting body numbers' -Skip:(-not $IsWindows) {
+    $fakeGh = Join-Path $TestDrive 'fake-gh-http-error.cmd'
+    [IO.File]::WriteAllText($fakeGh, "@echo off`r`n1>&2 echo HTTP/2.0 301 Moved Permanently`r`n1>&2 echo gh: Not Found (HTTP 404)`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
+
+    Get-GhApiHttpStatus -Endpoint 'repos/owner/repository/branches/main/protection' -GhExecutable $fakeGh | Should -Be 404
+
+    [IO.File]::WriteAllText($fakeGh, "@echo off`r`n1>&2 echo gh: Forbidden (HTTP 403)`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
+
+    Get-GhApiHttpStatus -Endpoint 'repos/owner/repository/branches/main/protection' -GhExecutable $fakeGh | Should -Be 403
+
+    [IO.File]::WriteAllText($fakeGh, "@echo off`r`n1>&2 echo response body 404`r`n1>&2 echo other (HTTP 403)`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
+
+    { Get-GhApiHttpStatus -Endpoint 'repos/owner/repository/branches/main/protection' -GhExecutable $fakeGh } | Should -Throw 'Could not determine an HTTP status*'
   }
 }
 
