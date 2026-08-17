@@ -1,3 +1,5 @@
+// @ts-check
+
 const MARKER = '<!-- agent-controller-mutation:v1\n'
 const TRAILER = '\n-->'
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
@@ -8,6 +10,13 @@ const OPERATIONS = new Map([
   ['repair-worker', { subjectType: 'pull-request', workflowPath: '.github/workflows/dsh-repair.yml' }],
 ])
 
+/** @typedef {{ type: string, number: number }} MutationSubject */
+/** @typedef {{ repository: string, workflowPath: string, sha: string }} ControllerSource */
+/** @typedef {{ version: number, operation: string, repository: string, subject: MutationSubject, runUrl: string, controller: ControllerSource }} ControllerMutationRecord */
+/** @typedef {{ user?: { login?: string }, body?: unknown }} MutationComment */
+/** @typedef {{ id?: number, repository?: { full_name?: string }, referenced_workflows?: Array<{ path?: string, sha?: string }> }} WorkflowRun */
+
+/** @param {unknown} value @param {string[]} expected @param {string} description */
 function exactKeys(value, expected, description) {
   const keys = value && typeof value === 'object' && !Array.isArray(value)
     ? Object.keys(value).sort() : []
@@ -17,47 +26,57 @@ function exactKeys(value, expected, description) {
   }
 }
 
+/** @param {unknown} value @returns {ControllerMutationRecord} */
 function validatedRecord(value) {
-  exactKeys(value, ['version', 'operation', 'repository', 'subject', 'runUrl', 'controller'], 'Controller mutation marker')
-  exactKeys(value?.subject, ['type', 'number'], 'Controller mutation subject')
-  exactKeys(value?.controller, ['repository', 'workflowPath', 'sha'], 'Controller mutation source')
-  const run = RUN_URL.exec(value?.runUrl || '')
-  const operation = OPERATIONS.get(value?.operation)
-  if (value?.version !== 1
-    || !operation
-    || !REPOSITORY.test(value.repository || '')
-    || value.subject?.type !== operation.subjectType
-    || !Number.isSafeInteger(value.subject?.number) || value.subject.number < 1
-    || !run || run[1] !== value.repository
-    || !REPOSITORY.test(value.controller?.repository || '')
-    || value.controller?.workflowPath !== operation.workflowPath
-    || !FULL_SHA.test(value.controller?.sha || '')) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Controller mutation marker is invalid')
   }
-  return value
+  const record = /** @type {ControllerMutationRecord} */ (value)
+  exactKeys(value, ['version', 'operation', 'repository', 'subject', 'runUrl', 'controller'], 'Controller mutation marker')
+  exactKeys(record.subject, ['type', 'number'], 'Controller mutation subject')
+  exactKeys(record.controller, ['repository', 'workflowPath', 'sha'], 'Controller mutation source')
+  const run = RUN_URL.exec(record.runUrl)
+  const operation = OPERATIONS.get(record.operation)
+  if (record.version !== 1
+    || !operation
+    || !REPOSITORY.test(record.repository)
+    || record.subject?.type !== operation.subjectType
+    || !Number.isSafeInteger(record.subject?.number) || record.subject.number < 1
+    || !run || run[1] !== record.repository
+    || !REPOSITORY.test(record.controller?.repository)
+    || record.controller?.workflowPath !== operation.workflowPath
+    || !FULL_SHA.test(record.controller?.sha)) {
+    throw new Error('Controller mutation marker is invalid')
+  }
+  return record
 }
 
 /** Render an audit-only marker for one host-credential Controller operation. */
+/** @param {unknown} record @returns {string} */
 export function controllerMutationMarker(record) {
   return `${MARKER}${JSON.stringify(validatedRecord(record))}${TRAILER}`
 }
 
 /** Parse one strict terminal Controller mutation marker. */
+/** @param {unknown} body @returns {ControllerMutationRecord} */
 export function parseControllerMutationMarker(body) {
-  const markerAt = typeof body === 'string' ? body.lastIndexOf(MARKER) : -1
-  if (markerAt < 0 || markerAt !== body.indexOf(MARKER) || !body.endsWith(TRAILER)) {
+  const text = typeof body === 'string' ? body : ''
+  const markerAt = text.lastIndexOf(MARKER)
+  if (markerAt < 0 || markerAt !== text.indexOf(MARKER) || !text.endsWith(TRAILER)) {
     throw new Error('Controller mutation marker must be the unique terminal marker')
   }
   let value
   try {
-    value = JSON.parse(body.slice(markerAt + MARKER.length, -TRAILER.length))
+    value = JSON.parse(text.slice(markerAt + MARKER.length, -TRAILER.length))
   } catch (error) {
-    throw new Error(`Controller mutation marker is not valid JSON: ${error.message}`, { cause: error })
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`Controller mutation marker is not valid JSON: ${detail}`, { cause: error })
   }
   return validatedRecord(value)
 }
 
 /** Verify that an audit marker names the expected target, Actions run, and reusable Controller revision. */
+/** @param {{ comment: MutationComment, markerAuthor: string, expectedRepository: string, expectedSubject: MutationSubject, loadRun: (runId: number) => WorkflowRun | Promise<WorkflowRun> }} input @returns {Promise<ControllerMutationRecord>} */
 export async function trustedControllerMutation({ comment, markerAuthor, expectedRepository, expectedSubject, loadRun }) {
   if (typeof markerAuthor !== 'string' || !markerAuthor.trim()
     || !REPOSITORY.test(expectedRepository || '')
@@ -73,6 +92,7 @@ export async function trustedControllerMutation({ comment, markerAuthor, expecte
     throw new Error('Controller mutation marker does not identify the expected target')
   }
   const runMatch = RUN_URL.exec(record.runUrl)
+  if (!runMatch) throw new Error('Controller mutation marker is invalid')
   const runId = Number.parseInt(runMatch[2], 10)
   const run = await loadRun(runId)
   const workflowReference = `${record.controller.repository}/${record.controller.workflowPath}@${record.controller.sha}`
