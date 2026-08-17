@@ -32,20 +32,28 @@ if (heartbeat.instanceId !== replicaId || !Number.isFinite(heartbeatAge)
 }
 
 const available = []
+const unavailable = []
 for (const workerId of maintenanceWorkers) {
   const worker = config.workers[workerId]
+  let stage = 'CLI health'
   try {
     await checkAgentWorker({ config, workerId, adapters })
+    stage = 'GitHub identity'
     const environment = maintenanceCredentialEnvironment(worker)
     const identity = await run(config.ghExecutable, ['api', 'user'], { env: environment })
-    if (parseJson(identity.stdout, `${workerId} GitHub identity`).login !== worker.githubLogin) continue
+    if (parseJson(identity.stdout, `${workerId} GitHub identity`).login !== worker.githubLogin) {
+      throw new Error('dedicated GitHub identity does not match the configured login')
+    }
+    stage = 'Controller repository access'
     await run(config.ghExecutable, ['repo', 'view', controllerRepository, '--json', 'nameWithOwner'], { env: environment })
     available.push(workerId)
-  } catch {
-    // An unavailable declared Worker remains visible in the final bounded result.
+  } catch (error) {
+    unavailable.push(`${workerId} ${stage}: ${error.message}`)
   }
 }
-if (available.length === 0) throw new Error('No declared maintenance Worker has a usable CLI and dedicated Controller credential')
+if (available.length === 0) {
+  throw new Error(`No declared maintenance Worker is ready. ${unavailable.join('; ')}`)
+}
 
 if (readinessCanary) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-maintenance-readiness-'))

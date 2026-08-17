@@ -17,7 +17,7 @@ The optional `dsh-web` task is host-wide. Its supervisor probes the loopback RPC
 
 ## Configuration and paths
 
-Use a dedicated Windows account. Install PowerShell 7 (`pwsh`), Git, GitHub CLI, Node, and every Adapter selected by a repository mapping. A `dsh-web` worker requires the DSH Web Host; `opencode-cli` and `claude-code-cli` require their respective executables and existing local authentication. Model credentials remain in those products' local configuration.
+Use a dedicated Windows account. Install PowerShell 7 (`pwsh`), Git, GitHub CLI, Node, and every Adapter selected by a repository mapping. A `dsh-web` worker requires the DSH Web Host; `opencode-cli` and `claude-code-cli` require their respective executables and existing local authentication. On Windows, configure a native executable rather than a `.cmd`, `.bat`, or `.ps1` command shim because Agent processes start without a command shell. Model credentials remain in those products' local configuration.
 
 Copy [config.minimal.json](../config.minimal.json) to a machine-local file on a data volume, for example `F:\dsh-agent-automation-state\agent-config.json`. Its directory becomes the default `stateRoot`; installed tasks continue to read that file, so it must not remain in a Git checkout. The [configuration reference](configuration-reference.md) lists every optional field and default. A `dsh-web` Worker requires explicit `agentPreset` and `permissionPreset` values, so it never inherits a mutable DSH UI default. Removed fields fail closed rather than receiving implicit migration. The runner must be version 2.334.0 or newer because every reusable workflow uses `job.workflow_repository` and `job.workflow_sha`; the minimal file pins 2.336.0.
 

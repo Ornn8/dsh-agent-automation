@@ -12,6 +12,7 @@ import {
   parseGovernorRecord,
   rolloutDecision,
   subjectStateVersion,
+  unappliedGovernorCandidate,
   workflowStageTransition,
 } from '../src/governor-policy.mjs'
 import {
@@ -67,6 +68,20 @@ test('new work requires an independent later observation before admission', () =
 
   assert.equal(admitted.action, 'admit')
   assert.equal(admitted.execute, true)
+})
+
+test('an applied transition removes its durable candidate from pending reconciliation', () => {
+  const stateVersion = 'a'.repeat(64)
+  const candidate = {
+    version: 1, status: 'candidate', transition: 'workflow-recovery',
+    subject: { type: 'pull-request', number: 21 }, stateVersion, observationId: 'source-run-1',
+  }
+  const applied = {
+    version: 1, status: 'applied', transition: 'workflow-recovery',
+    subject: { type: 'pull-request', number: 21 }, stateVersion, observationId: 'recovery-run-2',
+  }
+  assert.equal(unappliedGovernorCandidate([candidate], () => true), candidate)
+  assert.equal(unappliedGovernorCandidate([candidate, applied], () => true), undefined)
 })
 
 test('an applied transition is a no-op for the same semantic state despite prose changes', () => {

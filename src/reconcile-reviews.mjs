@@ -9,7 +9,12 @@ import {
 } from './common.mjs'
 import { needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
 import { hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
-import { governorBudgetDecision, governorDecision, subjectStateVersion } from './governor-policy.mjs'
+import {
+  governorBudgetDecision,
+  governorDecision,
+  subjectStateVersion,
+  unappliedGovernorCandidate,
+} from './governor-policy.mjs'
 import {
   attestedGovernorRecordBody,
   GOVERNOR_WORKFLOW_PATHS,
@@ -244,8 +249,8 @@ for (const summary of summaries.flat()) {
   const subject = pullRequestGovernorSubject(pullRequest)
   const stateVersion = subjectStateVersion(subject)
   const governorRecords = await pullRequestGovernorRecords(pullRequest.number)
-  const pendingRecord = governorRecords.find(record => record.status === 'candidate'
-    && (record.transition === 'workflow-recovery' || record.transition.startsWith('review-repair:run-'))
+  const pendingRecord = unappliedGovernorCandidate(governorRecords, record =>
+    (record.transition === 'workflow-recovery' || record.transition.startsWith('review-repair:run-'))
     && record.subject.type === 'pull-request'
     && record.subject.number === pullRequest.number
     && record.stateVersion === stateVersion)
@@ -264,35 +269,37 @@ for (const summary of summaries.flat()) {
       workIdentity: `branch:${pullRequest.head.ref}`,
       ...(reviewRepair ? { budgetTransition: 'review-repair' } : {}),
     })
-    if (!governed.execute) continue
-    if (reviewRepair) {
-      if (pendingRecord.observationId.startsWith('comment-')) {
-        await run(githubExecutable, [
-          'api', '--method', 'POST', `repos/${repository}/dispatches`,
-          '-f', 'event_type=dsh-repair',
-          '-F', `client_payload[pr_number]=${pullRequest.number}`,
-          '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
-          '-f', `client_payload[request_id]=${pendingRecord.observationId}`,
-        ], { env: actionsEnvironment })
+    if (governed.execute) {
+      if (reviewRepair) {
+        if (pendingRecord.observationId.startsWith('comment-')) {
+          await run(githubExecutable, [
+            'api', '--method', 'POST', `repos/${repository}/dispatches`,
+            '-f', 'event_type=dsh-repair',
+            '-F', `client_payload[pr_number]=${pullRequest.number}`,
+            '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
+            '-f', `client_payload[request_id]=${pendingRecord.observationId}`,
+          ], { env: actionsEnvironment })
+        } else {
+          const request = createReviewRepairRequest({
+            ...repairProfile,
+            repository,
+            pullRequestNumber: pullRequest.number,
+            base: pullRequest.base.sha,
+            head: pullRequest.head.sha,
+            reviewObservationId: pendingTransition.slice('review-repair:'.length),
+          })
+          await run(githubExecutable, [
+            'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
+          ], { env: actionsEnvironment, input: JSON.stringify(repositoryDispatchBody(request)) })
+        }
       } else {
-        const request = createReviewRepairRequest({
-          ...repairProfile,
-          repository,
-          pullRequestNumber: pullRequest.number,
-          base: pullRequest.base.sha,
-          head: pullRequest.head.sha,
-          reviewObservationId: pendingTransition.slice('review-repair:'.length),
-        })
-        await run(githubExecutable, [
-          'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
-        ], { env: actionsEnvironment, input: JSON.stringify(repositoryDispatchBody(request)) })
+        await requestReview(pullRequest)
       }
-    } else {
-      await requestReview(pullRequest)
+      await markGovernorApplied(pullRequest, pendingTransition, governed)
+      reconciled += 1
+      continue
     }
-    await markGovernorApplied(pullRequest, pendingTransition, governed)
-    reconciled += 1
-    continue
+    if (governed.action !== 'noop') continue
   }
   let reviewProof = null
   for (const checkRun of checkRuns) {

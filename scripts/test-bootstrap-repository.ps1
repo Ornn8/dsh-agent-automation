@@ -98,10 +98,11 @@ try {
   Assert-True ($rendered -match $immutablePin) 'Generated YAML omitted the immutable controller SHA.'
   Assert-True ($rendered -notmatch 'controller_sha|worker_id|runner_labels_json') 'Generated YAML exposes controller or runner selection to callers.'
   Assert-True ($rendered -notmatch 'with:\s*\r?\n\s*repository:') 'Generated YAML exposes a reusable repository input.'
-  Assert-True ($rendered -match 'role: review' -and $rendered -match 'role: change') 'Health workflow did not keep separate roles.'
   $healthWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-health.yml') -Raw
   Assert-True ($healthWorkflow -match 'runner-watchdog\.yml') 'Health workflow omitted the GitHub-hosted queue watchdog.'
   Assert-True ($healthWorkflow -match "(?m)^    - cron: '29 3 \* \* \*'\r?$") 'Health workflow omitted the daily provider canary.'
+  Assert-True ($healthWorkflow -match 'AGENT_AUTOMATION_REPLICA_HEALTH') 'Health workflow omitted exact replica routing.'
+  Assert-True ($healthWorkflow -match 'replica_id: \$\{\{ matrix\.label \}\}') 'Health workflow did not pass each exact replica ID.'
   Assert-True ($rendered -match 'ci_workflow_name: \$\{\{ github\.event\.workflow_run\.name \}\}') 'CI repair did not pass the exact failed workflow name.'
   foreach ($name in @('agent-pr-ci-repair.yml', 'agent-pr-land.yml')) {
     $workflow = Get-Content -LiteralPath (Join-Path $temp ".github\workflows\$name") -Raw
