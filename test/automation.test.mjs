@@ -818,6 +818,7 @@ test('landing reconciliation is hosted, bounded, and independent of workflow_run
   assert.match(source, /pullRequests\.length > 100/)
   assert.match(reusable, /runs-on: ubuntu-latest/)
   assert.doesNotMatch(reusable, /self-hosted/)
+  assert.match(reusable, /issues: write/)
   assert.doesNotMatch(landingCaller, /pull_requests\[0\]\.number != null/)
   assert.doesNotMatch(repairCaller, /pull_requests\[0\]\.number != null/)
   assert.match(landingCaller, /pull_requests\[0\]\.number \|\| 0/)
