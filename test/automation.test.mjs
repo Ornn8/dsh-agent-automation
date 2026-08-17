@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
@@ -1510,23 +1510,27 @@ test('blocking review findings bind an excerpt to an added exact-head line', asy
 
 test('review evidence reads an exact-head blob from a long checkout path', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-review-evidence-'))
-  const checkout = join(root, 'checkout-segment-'.repeat(5), 'nested-segment-'.repeat(5))
+  const sourceCheckout = join(root, 'source')
+  const checkoutParent = join(root, 'checkout-segment-'.repeat(5))
+  const checkout = join(checkoutParent, 'nested-segment-'.repeat(5))
   const findingPath = `src/${'long-directory-'.repeat(5)}/config.mjs`
   try {
-    await mkdir(checkout, { recursive: true })
-    await run('git', ['-C', checkout, 'init'])
-    await run('git', ['-C', checkout, 'config', 'core.longpaths', 'true'])
-    await run('git', ['-C', checkout, 'config', 'user.email', 'automation@example.invalid'])
-    await run('git', ['-C', checkout, 'config', 'user.name', 'Automation Test'])
-    await writeFile(join(checkout, 'README.md'), 'base\n')
-    await run('git', ['-C', checkout, 'add', 'README.md'])
-    await run('git', ['-C', checkout, 'commit', '-m', 'base'])
-    const base = (await run('git', ['-C', checkout, 'rev-parse', 'HEAD'])).stdout.trim()
-    await mkdir(join(checkout, findingPath, '..'), { recursive: true })
-    await writeFile(join(checkout, findingPath), 'export const enabled = true\n')
-    await run('git', ['-C', checkout, 'add', findingPath])
-    await run('git', ['-C', checkout, 'commit', '-m', 'head'])
-    const head = (await run('git', ['-C', checkout, 'rev-parse', 'HEAD'])).stdout.trim()
+    await mkdir(sourceCheckout, { recursive: true })
+    await run('git', ['-C', sourceCheckout, 'init'])
+    await run('git', ['-C', sourceCheckout, 'config', 'core.longpaths', 'true'])
+    await run('git', ['-C', sourceCheckout, 'config', 'user.email', 'automation@example.invalid'])
+    await run('git', ['-C', sourceCheckout, 'config', 'user.name', 'Automation Test'])
+    await writeFile(join(sourceCheckout, 'README.md'), 'base\n')
+    await run('git', ['-C', sourceCheckout, 'add', 'README.md'])
+    await run('git', ['-C', sourceCheckout, 'commit', '-m', 'base'])
+    const base = (await run('git', ['-C', sourceCheckout, 'rev-parse', 'HEAD'])).stdout.trim()
+    await mkdir(join(sourceCheckout, findingPath, '..'), { recursive: true })
+    await writeFile(join(sourceCheckout, findingPath), 'export const enabled = true\n')
+    await run('git', ['-C', sourceCheckout, 'add', findingPath])
+    await run('git', ['-C', sourceCheckout, 'commit', '-m', 'head'])
+    const head = (await run('git', ['-C', sourceCheckout, 'rev-parse', 'HEAD'])).stdout.trim()
+    await mkdir(checkoutParent, { recursive: true })
+    await rename(sourceCheckout, checkout)
     await validateReviewFindings({
       verdict: 'block',
       summary: 'The enabled value is unsafe.',
