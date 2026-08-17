@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "measuredAt": "2026-08-17T02:30:00Z",
+  "repository": "Ornn8/shanyin-tea-commerce",
+  "baseReconcile": {
+    "attemptLimit": 3,
+    "successfulApplications": 7,
+    "completedRootWorkRequests": 2,
+    "rootWorkRequestsThatReachedPullRequest": 3,
+    "meanPerCompletedRootWorkRequest": 3.5,
+    "meanPerRootWorkRequestThatReachedPullRequest": 2.3333333333333335,
+    "budgetExhaustion": {
+      "pullRequest": 10,
+      "consumedAttempts": 3,
+      "blockedObservation": "31957007977:1",
+      "pauseComment": "https://github.com/Ornn8/shanyin-tea-commerce/pull/10#issuecomment-5308301877",
+      "resumeComment": "https://github.com/Ornn8/shanyin-tea-commerce/pull/10#issuecomment-5308322639"
+    },
+    "successfulExactPairs": [
+      {
+        "pullRequest": 10,
+        "base": "fc12cd67d65cc38a2b758fa05ff64309f92f1e49",
+        "headBefore": "7035e4efdf114843fbbd27e4bb489db6e0bf1cc1",
+        "headAfter": "2f0de28834d005dc8e86064464ca64360a4ce3a9"
+      },
+      {
+        "pullRequest": 10,
+        "base": "f4bb0c9ab70326d1cc6acf9ba5ea467ce4ac85c7",
+        "headBefore": "2f0de28834d005dc8e86064464ca64360a4ce3a9",
+        "headAfter": "d0db5e0030780a8bc005857465b9888ca77f9329"
+      },
+      {
+        "pullRequest": 10,
+        "base": "1dc5ff652519c531c8ba02a06f3a01177466ce41",
+        "headBefore": "d0db5e0030780a8bc005857465b9888ca77f9329",
+        "headAfter": "2ea5d39f1177bdeffc47cfe718af7509eb4ecaf0"
+      },
+      {
+        "pullRequest": 10,
+        "base": "b4eb47cfffdf1c69d2ee12a4a435faa42b22e892",
+        "headBefore": "2ea5d39f1177bdeffc47cfe718af7509eb4ecaf0",
+        "headAfter": "afc70a3da6eb974013b6d3b1c0a9ae9a303367c3"
+      },
+      {
+        "pullRequest": 10,
+        "base": "09fcebd112da287f16b6ea1ec8077427fdcbdce8",
+        "headBefore": "afc70a3da6eb974013b6d3b1c0a9ae9a303367c3",
+        "headAfter": "632b01ba52101328ccabb7f980cd475623239f33"
+      },
+      {
+        "pullRequest": 10,
+        "base": "491e46f4f19fed8a21b62c323204e51f24ba58b9",
+        "headBefore": "632b01ba52101328ccabb7f980cd475623239f33",
+        "headAfter": "c47c310a1bde703da653bf4e0d1032430b1fde8c"
+      },
+      {
+        "pullRequest": 21,
+        "base": "cf8374f849b9d1344d72d19c9ba3cdcea4aeb994",
+        "headBefore": "3267bb2a9c03cb66789b15857491299e5eb483c3",
+        "headAfter": "9692f85a8f976bd39c221789a668e6480b1bff02"
+      }
+    ]
+  }
+}

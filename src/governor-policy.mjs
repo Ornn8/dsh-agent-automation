@@ -322,15 +322,31 @@ export function governorBudgetDecision({ transition, subject, workIdentity, obse
   }
 }
 
+/** Return whether a value is one exact Gregorian calendar date in UTC notation. */
+export function isUtcDay(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
 /** Select an explicitly promoted stable controller revision or defer one batched rollout. */
-export function rolloutDecision({ stableRevision, proposedRevisions, activeProductPullRequests, faultBound }) {
+export function rolloutDecision({
+  stableRevision,
+  proposedRevisions,
+  activeProductPullRequests,
+  faultBound,
+  lastPromotionDay,
+  promotionDay,
+}) {
   if (!FULL_SHA.test(stableRevision || '')
     || !Array.isArray(proposedRevisions) || proposedRevisions.length < 1
     || proposedRevisions.some(revision => !FULL_SHA.test(revision))
     || !Array.isArray(activeProductPullRequests)
     || activeProductPullRequests.some(pullRequest => !Number.isSafeInteger(pullRequest?.number)
       || pullRequest.number < 1 || !['review', 'ci', 'landing'].includes(pullRequest.phase))
-    || typeof faultBound !== 'boolean') {
+    || typeof faultBound !== 'boolean'
+    || !isUtcDay(lastPromotionDay)
+    || !isUtcDay(promotionDay)) {
     throw new Error('Controller rollout evidence is incomplete')
   }
   const unique = [...new Set(proposedRevisions)].filter(revision => revision !== stableRevision)
@@ -345,9 +361,19 @@ export function rolloutDecision({ stableRevision, proposedRevisions, activeProdu
       reason: 'product-critical-section',
     }
   }
+  if (!faultBound && lastPromotionDay === promotionDay) {
+    return {
+      action: 'defer',
+      stableRevision,
+      pendingRevision,
+      supersededRevisions: unique.slice(0, -1),
+      reason: 'daily-promotion-slot-consumed',
+    }
+  }
   return {
     action: 'promote',
     stableRevision: pendingRevision,
     supersededRevisions: unique.slice(0, -1),
+    promotionDay,
   }
 }

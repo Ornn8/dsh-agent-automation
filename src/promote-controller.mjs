@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { rolloutDecision } from './governor-policy.mjs'
+import { isUtcDay, rolloutDecision } from './governor-policy.mjs'
 import { parseFaultRecord } from './fault-record.mjs'
 
 function argument(name) {
@@ -20,9 +20,10 @@ function exactKeys(value, expected, description) {
 }
 
 function releaseRecord(value) {
-  exactKeys(value, ['version', 'stableRevision', 'pendingRevisions'], 'Controller release record')
-  if (!value || value.version !== 1
+  exactKeys(value, ['version', 'stableRevision', 'pendingRevisions', 'lastPromotionDay'], 'Controller release record')
+  if (!value || value.version !== 2
     || !/^[0-9a-f]{40}$/.test(value.stableRevision || '')
+    || !isUtcDay(value.lastPromotionDay)
     || !Array.isArray(value.pendingRevisions)
     || value.pendingRevisions.some(revision => !/^[0-9a-f]{40}$/.test(revision))
     || new Set(value.pendingRevisions).size !== value.pendingRevisions.length
@@ -46,6 +47,10 @@ function rolloutSnapshot(value) {
 const recordPath = resolve(argument('--record'))
 const snapshotPath = resolve(argument('--snapshot'))
 const candidate = argument('--candidate')
+if (process.argv.includes('--promotion-day')) {
+  throw new Error('Promotion day is derived from the current UTC date')
+}
+const promotionDay = new Date().toISOString().slice(0, 10)
 const faultRecordIndex = process.argv.indexOf('--fault-record')
 let faultBound = false
 if (faultRecordIndex >= 0) {
@@ -69,11 +74,13 @@ const decision = rolloutDecision({
   proposedRevisions,
   activeProductPullRequests: snapshot.activeProductPullRequests,
   faultBound,
+  lastPromotionDay: record.lastPromotionDay,
+  promotionDay,
 })
 const next = decision.action === 'defer'
-  ? { version: 1, stableRevision: record.stableRevision, pendingRevisions: [decision.pendingRevision] }
+  ? { ...record, pendingRevisions: [decision.pendingRevision] }
   : decision.action === 'promote'
-    ? { version: 1, stableRevision: decision.stableRevision, pendingRevisions: [] }
+    ? { version: 2, stableRevision: decision.stableRevision, pendingRevisions: [], lastPromotionDay: decision.promotionDay }
     : record
 const temporaryPath = `${recordPath}.${randomUUID()}.tmp`
 try {

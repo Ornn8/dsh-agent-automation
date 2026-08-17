@@ -43,6 +43,15 @@ function Require-Value {
   if ([string]::IsNullOrWhiteSpace($Value)) { throw "$Name must not be empty." }
 }
 
+function Test-UtcDay {
+  param([object]$Value)
+  if ($Value -isnot [string] -or $Value -notmatch '^\d{4}-\d{2}-\d{2}$') { return $false }
+  try {
+    $date = [DateTime]::ParseExact($Value, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)
+    return $date.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) -ceq $Value
+  } catch { return $false }
+}
+
 Require-Value -Name 'ControllerRepository' -Value $ControllerRepository
 Require-Value -Name 'ControllerSha' -Value $ControllerSha
 Require-Value -Name 'CiWorkflowNamesJson' -Value $CiWorkflowNamesJson
@@ -72,8 +81,9 @@ if (-not (Test-Path -LiteralPath $PromotionRecordPath -PathType Leaf)) {
 try { $promotion = Get-Content -LiteralPath $PromotionRecordPath -Raw | ConvertFrom-Json -ErrorAction Stop } catch {
   throw 'PromotionRecordPath must contain valid controller release JSON.'
 }
-if ((@($promotion.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'pendingRevisions,stableRevision,version' `
-  -or ($promotion.version -ne 1) `
+if ((@($promotion.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'lastPromotionDay,pendingRevisions,stableRevision,version' `
+  -or ($promotion.version -ne 2) `
+  -or -not (Test-UtcDay -Value $promotion.lastPromotionDay) `
   -or ($promotion.stableRevision -notmatch '^[0-9a-f]{40}$') `
   -or ($promotion.pendingRevisions -isnot [System.Array]) `
   -or @($promotion.pendingRevisions | Where-Object { $_ -notmatch '^[0-9a-f]{40}$' }).Count `

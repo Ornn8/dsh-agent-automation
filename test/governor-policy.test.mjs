@@ -293,6 +293,8 @@ test('stable controller rollout freezes during product critical work and batches
     proposedRevisions: ['b'.repeat(40), 'c'.repeat(40)],
     activeProductPullRequests: [{ number: 7, phase: 'ci' }],
     faultBound: false,
+    lastPromotionDay: '2026-08-16',
+    promotionDay: '2026-08-17',
   })
   assert.deepEqual(deferred, {
     action: 'defer',
@@ -306,21 +308,49 @@ test('stable controller rollout freezes during product critical work and batches
     proposedRevisions: ['b'.repeat(40), 'c'.repeat(40)],
     activeProductPullRequests: [],
     faultBound: false,
+    lastPromotionDay: '2026-08-16',
+    promotionDay: '2026-08-17',
   }), {
     action: 'promote',
     stableRevision: 'c'.repeat(40),
     supersededRevisions: ['b'.repeat(40)],
+    promotionDay: '2026-08-17',
+  })
+  assert.deepEqual(rolloutDecision({
+    stableRevision: 'a'.repeat(40),
+    proposedRevisions: ['b'.repeat(40), 'c'.repeat(40)],
+    activeProductPullRequests: [],
+    faultBound: false,
+    lastPromotionDay: '2026-08-17',
+    promotionDay: '2026-08-17',
+  }), {
+    action: 'defer',
+    stableRevision: 'a'.repeat(40),
+    pendingRevision: 'c'.repeat(40),
+    supersededRevisions: ['b'.repeat(40)],
+    reason: 'daily-promotion-slot-consumed',
   })
   assert.deepEqual(rolloutDecision({
     stableRevision: 'a'.repeat(40),
     proposedRevisions: ['d'.repeat(40)],
     activeProductPullRequests: [{ number: 7, phase: 'landing' }],
     faultBound: true,
+    lastPromotionDay: '2026-08-17',
+    promotionDay: '2026-08-17',
   }), {
     action: 'promote',
     stableRevision: 'd'.repeat(40),
     supersededRevisions: [],
+    promotionDay: '2026-08-17',
   })
+  assert.throws(() => rolloutDecision({
+    stableRevision: 'a'.repeat(40),
+    proposedRevisions: ['b'.repeat(40)],
+    activeProductPullRequests: [],
+    faultBound: false,
+    lastPromotionDay: '2026-99-99',
+    promotionDay: '2026-08-17',
+  }), /evidence is incomplete/)
 })
 
 test('controller promotion keeps targets on stable revision until the critical section ends', async (context) => {
@@ -332,7 +362,14 @@ test('controller promotion keeps targets on stable revision until the critical s
   const pending = 'b'.repeat(40)
   const deferred = 'c'.repeat(40)
   const promoted = 'd'.repeat(40)
-  await writeFile(recordPath, `${JSON.stringify({ version: 1, stableRevision: stable, pendingRevisions: [pending] })}\n`)
+  const promotionDay = new Date().toISOString().slice(0, 10)
+  const previousPromotionDay = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+  await writeFile(recordPath, `${JSON.stringify({
+    version: 2,
+    stableRevision: stable,
+    pendingRevisions: [pending],
+    lastPromotionDay: previousPromotionDay,
+  })}\n`)
   await writeFile(`${recordPath}.tmp`, 'interrupted legacy promotion')
   await writeFile(snapshotPath, `${JSON.stringify({ activeProductPullRequests: [{ number: 7, phase: 'review' }] })}\n`)
   const deferredOutput = execFileSync(process.execPath, [
@@ -343,9 +380,10 @@ test('controller promotion keeps targets on stable revision until the critical s
   ], { encoding: 'utf8' })
   assert.match(deferredOutput, new RegExp(`superseded pending controller revisions: ${pending}`))
   assert.deepEqual(JSON.parse(await readFile(recordPath, 'utf8')), {
-    version: 1,
+    version: 2,
     stableRevision: stable,
     pendingRevisions: [deferred],
+    lastPromotionDay: previousPromotionDay,
   })
 
   await writeFile(snapshotPath, `${JSON.stringify({ activeProductPullRequests: [] })}\n`)
@@ -356,10 +394,33 @@ test('controller promotion keeps targets on stable revision until the critical s
     '--candidate', promoted,
   ])
   assert.deepEqual(JSON.parse(await readFile(recordPath, 'utf8')), {
-    version: 1,
+    version: 2,
     stableRevision: promoted,
     pendingRevisions: [],
+    lastPromotionDay: promotionDay,
   })
+
+  const later = 'e'.repeat(40)
+  const dailyOutput = execFileSync(process.execPath, [
+    fileURLToPath(new URL('../src/promote-controller.mjs', import.meta.url)),
+    '--record', recordPath,
+    '--snapshot', snapshotPath,
+    '--candidate', later,
+  ], { encoding: 'utf8' })
+  assert.match(dailyOutput, /defer: stable controller revision/)
+  assert.deepEqual(JSON.parse(await readFile(recordPath, 'utf8')), {
+    version: 2,
+    stableRevision: promoted,
+    pendingRevisions: [later],
+    lastPromotionDay: promotionDay,
+  })
+  assert.throws(() => execFileSync(process.execPath, [
+    fileURLToPath(new URL('../src/promote-controller.mjs', import.meta.url)),
+    '--record', recordPath,
+    '--snapshot', snapshotPath,
+    '--candidate', 'f'.repeat(40),
+    '--promotion-day', '2000-01-01',
+  ], { encoding: 'utf8', stdio: 'pipe' }), /Promotion day is derived from the current UTC date/)
 })
 
 test('GitHub governor state accepts only records attested by the pinned controller workflow', async () => {

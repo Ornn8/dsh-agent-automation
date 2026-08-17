@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
   "stableRevision": "69cb3077fd000c3bfbd8b8e3214616cbf92f3054",
-  "pendingRevisions": []
+  "pendingRevisions": [],
+  "lastPromotionDay": "2026-08-17"
 }

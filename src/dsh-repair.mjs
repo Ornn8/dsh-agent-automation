@@ -24,6 +24,7 @@ import {
   trustedCiRerunSuccess,
 } from './dispatch-policy.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
+import { controllerMutationMarker } from './controller-mutation-marker.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import {
   interruptedRepairMayRetry,
@@ -167,6 +168,7 @@ if (pullRequestNumber === 0) {
 }
 
 async function upsertStatus(status, branch, detail, failureClass) {
+  const runUrl = requiredEnv('RUN_URL')
   const body = [
     marker,
     ciRequest ? '### DSH CI repair' : '### DSH review repair',
@@ -177,11 +179,24 @@ async function upsertStatus(status, branch, detail, failureClass) {
     ...(ciRequest ? [`- CI workflow: \`${ciWorkflowName}\``] : []),
     `- Reviewed head: \`${expectedHead}\``,
     `- Branch: \`${branch}\``,
-    `- Run: ${requiredEnv('RUN_URL')}`,
+    `- Run: ${runUrl}`,
     ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
     `- Detail: ${detail}`,
     '',
     '_DSH owns the technical response and any implementation changes._',
+    '',
+    controllerMutationMarker({
+      version: 1,
+      operation: 'repair-worker',
+      repository,
+      subject: { type: 'pull-request', number: pullRequestNumber },
+      runUrl,
+      controller: {
+        repository: controllerRepository,
+        workflowPath: '.github/workflows/dsh-repair.yml',
+        sha: controllerSha,
+      },
+    }),
   ].join('\n')
   const comments = (await ghJson([
     'api', `repos/${repository}/issues/${pullRequestNumber}/comments?per_page=100`, '--paginate', '--slurp',
