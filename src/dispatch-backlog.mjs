@@ -6,6 +6,7 @@ import {
 } from './common.mjs'
 import {
   activeWorkflowIssueNumbers,
+  independentIssueObservationNumber,
   selectBacklogWork,
   trustedBlockedReviewProof,
 } from './dispatch-policy.mjs'
@@ -180,11 +181,13 @@ async function admittedWork(work, pullRequests, issues) {
   const decision = governorDecision({ transition, subject, stateVersion, observationId, records })
   if (decision.record) await writeGovernorRecord(work.number, decision.record)
   if (!decision.execute) {
-    if (work.type === 'issue'
-      && requestedIssueNumber === work.number
-      && decision.action === 'record-candidate') {
-      await requestIndependentIssueObservation(work.number)
-      process.stdout.write(`Requested an independent backlog observation for Issue #${work.number}.\n`)
+    const observationNumber = independentIssueObservationNumber({
+      work,
+      governorAction: decision.action,
+    })
+    if (observationNumber !== null) {
+      await requestIndependentIssueObservation(observationNumber)
+      process.stdout.write(`Requested an independent backlog observation for Issue #${observationNumber}.\n`)
     }
     process.stdout.write(`Governor ${decision.action} for ${subject.type} #${work.number}; no work was dispatched.\n`)
     return null

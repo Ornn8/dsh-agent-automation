@@ -120,6 +120,13 @@ export function activeWorkflowIssueNumbers({ issues, pullRequests, profileId, wo
   return active
 }
 
+/** Return the Issue that needs a later independent Governor observation. */
+export function independentIssueObservationNumber({ work, governorAction }) {
+  return work?.type === 'issue' && governorAction === 'record-candidate'
+    ? work.number
+    : null
+}
+
 /** Select one safe unit of backlog work, preferring blocked PR repairs. */
 export function selectBacklogWork({
   repository,

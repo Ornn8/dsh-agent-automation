@@ -29,6 +29,7 @@ import {
   ciRepairRequest,
   ciRepairTransition,
   explicitReworkCommand,
+  independentIssueObservationNumber,
   issueDependencies,
   selectBacklogWork,
   trustedBlockedReviewProof,
@@ -926,6 +927,21 @@ test('backlog Issue dispatch is not lost to GitHub token recursion suppression',
   assert.match(source, /event_type: 'agent_backlog_reconcile'/)
   assert.match(source, /client_payload: \{ issue_number: number \}/)
   assert.doesNotMatch(source, /event_type=dsh-issue/)
+})
+
+test('every Governor candidate Issue requests one independent observation', () => {
+  assert.equal(independentIssueObservationNumber({
+    work: { type: 'issue', number: 4 },
+    governorAction: 'record-candidate',
+  }), 4)
+  assert.equal(independentIssueObservationNumber({
+    work: { type: 'issue', number: 4 },
+    governorAction: 'admit',
+  }), null)
+  assert.equal(independentIssueObservationNumber({
+    work: { type: 'repair', number: 4 },
+    governorAction: 'record-candidate',
+  }), null)
 })
 
 test('a valid blocked Issue result becomes terminal state without recovery failure', async () => {
