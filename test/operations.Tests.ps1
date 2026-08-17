@@ -58,11 +58,19 @@ Describe 'Branch protection authority migration' {
     $payload.allow_deletions | Should -BeFalse
   }
 
-  It 'reads an HTTP error status that GitHub CLI writes to stderr' -Skip:(-not $IsWindows) {
+  It 'reads final HTTP status from headers and GitHub CLI stderr without accepting body numbers' -Skip:(-not $IsWindows) {
     $fakeGh = Join-Path $TestDrive 'fake-gh-http-error.cmd'
-    [IO.File]::WriteAllText($fakeGh, "@echo off`r`n1>&2 echo HTTP/2.0 404 Not Found`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText($fakeGh, "@echo off`r`n1>&2 echo HTTP/2.0 301 Moved Permanently`r`n1>&2 echo gh: Not Found (HTTP 404)`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
 
     Get-GhApiHttpStatus -Endpoint 'repos/owner/repository/branches/main/protection' -GhExecutable $fakeGh | Should -Be 404
+
+    [IO.File]::WriteAllText($fakeGh, "@echo off`r`n1>&2 echo gh: Forbidden (HTTP 403)`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
+
+    Get-GhApiHttpStatus -Endpoint 'repos/owner/repository/branches/main/protection' -GhExecutable $fakeGh | Should -Be 403
+
+    [IO.File]::WriteAllText($fakeGh, "@echo off`r`n1>&2 echo response body 404`r`n1>&2 echo other (HTTP 403)`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
+
+    { Get-GhApiHttpStatus -Endpoint 'repos/owner/repository/branches/main/protection' -GhExecutable $fakeGh } | Should -Throw 'Could not determine an HTTP status*'
   }
 }
 

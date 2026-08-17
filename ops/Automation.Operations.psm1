@@ -1072,7 +1072,10 @@ function Test-RequiredStatusChecks {
 
 function Get-HttpStatusCodeFromHeaders {
   param([Parameter(Mandatory)][string[]]$Headers)
-  $status = @($headers | ForEach-Object { if ($_ -match '^HTTP/\S+\s+(\d{3})(?:\s|$)') { [int]$Matches[1] } })
+  $status = @($headers | ForEach-Object {
+    if ($_ -match '^HTTP/\S+\s+(\d{3})(?:\s|$)') { return [int]$Matches[1] }
+    if ($_ -match '^\s*gh:\s+.*\(HTTP\s+(\d{3})\)\s*$') { return [int]$Matches[1] }
+  })
   if (-not $status.Count) { throw 'Could not determine an HTTP status from GitHub response headers' }
   return $status[-1]
 }
@@ -2005,7 +2008,7 @@ function Invoke-OperationsSelfTest {
   $results += [pscustomobject]@{ Name = 'required check merge is idempotent'; Passed = (($mergedProtection | ConvertTo-Json -Compress -Depth 8) -ceq ($remergedProtection | ConvertTo-Json -Compress -Depth 8)) }
   $wrongAppProtection = [pscustomobject]@{ strict = $true; checks = @([pscustomobject]@{ context = 'all checks passed'; app_id = -1 }, [pscustomobject]@{ context = $script:ReviewRequiredCheckName; app_id = 15368 }) }
   $results += [pscustomobject]@{ Name = 'required check verification rejects an unbound CI check'; Passed = (-not (Test-RequiredStatusChecks -Current $wrongAppProtection -RequiredNames $requiredNames).Ok) }
-  $results += [pscustomobject]@{ Name = 'GitHub status parser distinguishes explicit 404'; Passed = ((Get-HttpStatusCodeFromHeaders -Headers @('HTTP/2.0 404 Not Found')) -eq 404 -and (Get-HttpStatusCodeFromHeaders -Headers @('HTTP/2.0 403 Forbidden')) -eq 403) }
+  $results += [pscustomobject]@{ Name = 'GitHub status parser recognizes headers and GitHub CLI stderr'; Passed = ((Get-HttpStatusCodeFromHeaders -Headers @('HTTP/2.0 404 Not Found')) -eq 404 -and (Get-HttpStatusCodeFromHeaders -Headers @('gh: Forbidden (HTTP 403)')) -eq 403 -and (Get-HttpStatusCodeFromHeaders -Headers @('HTTP/2.0 301 Moved Permanently', 'gh: Not Found (HTTP 404)')) -eq 404) }
   $bootstrapPayload = New-BranchProtectionBootstrapPayload -RequiredNames $requiredNames
   $bootstrapStatusChecks = $bootstrapPayload.required_status_checks
   $bootstrapUsesContextsOnly = $bootstrapStatusChecks.strict -eq $true `
