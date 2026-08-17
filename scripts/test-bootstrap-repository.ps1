@@ -51,9 +51,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'git init failed.' }
 
   [IO.File]::WriteAllText($promotionRecord, (ConvertTo-Json -InputObject @{
-    version = 1
+    version = 2
     stableRevision = $sha
     pendingRevisions = @()
+    lastPromotionDay = '2026-08-17'
   }), [Text.UTF8Encoding]::new($false))
   $arguments = @(
     '-TargetCheckout', $temp,
@@ -259,6 +260,20 @@ try {
     version = 1
     stableRevision = $sha
     pendingRevisions = @()
+  }), [Text.UTF8Encoding]::new($false))
+  Invoke-Bootstrap -Arguments $arguments -ExpectedExitCode 1
+  [IO.File]::WriteAllText($promotionRecord, (ConvertTo-Json -InputObject @{
+    version = 2
+    stableRevision = $sha
+    pendingRevisions = @()
+    lastPromotionDay = '2026-99-99'
+  }), [Text.UTF8Encoding]::new($false))
+  Invoke-Bootstrap -Arguments $arguments -ExpectedExitCode 1
+  [IO.File]::WriteAllText($promotionRecord, (ConvertTo-Json -InputObject @{
+    version = 2
+    stableRevision = $sha
+    pendingRevisions = @()
+    lastPromotionDay = '2026-08-17'
     unexpected = $true
   }), [Text.UTF8Encoding]::new($false))
   Invoke-Bootstrap -Arguments $arguments -ExpectedExitCode 1

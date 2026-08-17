@@ -16,6 +16,7 @@ import {
   verifyGithubIdentity,
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
+import { controllerMutationMarker } from './controller-mutation-marker.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import { agentWorkPrompt } from './agent-work-result.mjs'
 import { openAgentWorkDependencies, resolveAgentWorkDispatch } from './agent-work.mjs'
@@ -88,17 +89,31 @@ async function upsertStatus(body) {
 }
 
 function statusBody(status, branch, detail, failureClass) {
+  const runUrl = requiredEnv('RUN_URL')
   return [
     marker,
     '### Agent worker run',
     '',
     `- Status: **${status}**`,
     `- Branch: \`${branch}\``,
-    `- Run: ${requiredEnv('RUN_URL')}`,
+    `- Run: ${runUrl}`,
     ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
     `- Detail: ${detail}`,
     '',
     '_The selected change Worker owns implementation, validation, commits, pushes, and the pull request._',
+    '',
+    controllerMutationMarker({
+      version: 1,
+      operation: 'change-worker',
+      repository,
+      subject: { type: 'issue', number: issueNumber },
+      runUrl,
+      controller: {
+        repository: requiredEnv('CONTROLLER_REPOSITORY'),
+        workflowPath: '.github/workflows/dsh-issue.yml',
+        sha: requiredEnv('CONTROLLER_SHA'),
+      },
+    }),
   ].join('\n')
 }
 

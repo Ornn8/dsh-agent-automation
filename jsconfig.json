@@ -10,6 +10,7 @@
     "types": ["node"]
   },
   "files": [
+    "src/controller-mutation-marker.mjs",
     "src/landing-policy.mjs",
     "src/machine-config.mjs",
     "src/review-authority.mjs"
