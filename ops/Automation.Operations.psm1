@@ -475,6 +475,7 @@ function Read-OperationsConfig {
     if ($mapping.PSObject.Properties['changeWorker'] -or $mapping.PSObject.Properties['reviewWorker']) { throw 'repositoryMappings Worker fields were removed; use operations.roles.<role>.workers' }
   }
   foreach ($property in @($inputConfig.workers.PSObject.Properties)) {
+    if ($property.Value.PSObject.Properties['projectCwd']) { throw "workers.$($property.Name).projectCwd was removed; Codex projects are derived per repository from operations.stateRoot" }
     foreach ($field in 'mode', 'capabilities', 'githubLogin') {
       if ($property.Value.PSObject.Properties[$field]) { throw "workers.$($property.Name) role, capabilities, and GitHub identity are derived from its role binding" }
     }

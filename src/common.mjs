@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { rm } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { normalizeWorkerConfig } from './agent-worker.mjs'
 import { dshModelSelection, dshSessionPresets } from './dsh-web-session.mjs'
 import { readMachineConfig, roleWorkerIds } from './machine-config.mjs'
@@ -305,6 +305,18 @@ export function resolveRepositoryWorker(config, repository, role) {
   if (!['change', 'review'].includes(role)) throw new Error(`Unknown agent role ${role}`)
   const [workerId] = resolveRoleWorkers(config, role, repository)
   return workerId
+}
+
+/** Resolve the stable, repository-owned ChatGPT Desktop project directory. */
+export function repositoryProjectCwd(config, repository) {
+  if (typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+    throw new Error(`Invalid repository project key ${String(repository)}`)
+  }
+  const stateRoot = config?.operations?.stateRoot
+  if (typeof stateRoot !== 'string' || !isAbsolute(stateRoot)) {
+    throw new Error('operations.stateRoot must be absolute before resolving repository projects')
+  }
+  return join(stateRoot, 'projects', ...repository.split('/'))
 }
 
 /** Resolve the declared Worker order for one role after optional repository admission. */

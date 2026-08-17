@@ -13,6 +13,7 @@ import {
   authenticatedMarker,
   authorizedIssueBranch,
   removeJobDirectory,
+  repositoryProjectCwd,
   resolveRepositoryWorker,
   run,
   trustedAssociation,
@@ -495,12 +496,22 @@ test('Codex review negotiates experimental workspace roots before using them', (
   })
 })
 
-test('Codex review restores the visible project cwd after isolating the automated turn', async () => {
+test('Codex review restores the visible task cwd after isolating the automated turn', async () => {
   const source = await readFile(new URL('../src/codex-session.mjs', import.meta.url), 'utf8')
   assert.match(source, /const turn = await call\('turn\/start'/)
   assert.match(source, /cwd: taskCwd/)
   assert.match(source, /settleReviewTaskMetadata\(call, \{ threadId, title, projectCwd, keep \}\)/)
   assert.match(source, /call\('thread\/settings\/update', \{ threadId, cwd: projectCwd \}\)/)
+})
+
+test('Codex repository projects are stable and repository-specific', () => {
+  const stateRoot = join(process.cwd(), 'automation-state')
+  const config = { operations: { stateRoot } }
+  assert.equal(repositoryProjectCwd(config, 'Ornn8/shanyin-tea-commerce'),
+    join(stateRoot, 'projects', 'Ornn8', 'shanyin-tea-commerce'))
+  assert.equal(repositoryProjectCwd(config, 'Ornn8/deepseek-harness'),
+    join(stateRoot, 'projects', 'Ornn8', 'deepseek-harness'))
+  assert.throws(() => repositoryProjectCwd(config, 'not-a-repository'), /Invalid repository project key/)
 })
 
 test('the shared process runner terminates a cancelled adapter process', async () => {
@@ -596,7 +607,7 @@ test('DSH Web review returns its final message without requiring a change receip
   assert.equal(result.automationResult, undefined)
 })
 
-test('Codex retention reads every active-task page and rejects repeated cursors', async () => {
+test('Codex retention reads every repository-project task page and rejects repeated cursors', async () => {
   const requests = []
   const pages = [
     { data: [{ id: 'first' }], nextCursor: 'next' },
@@ -605,10 +616,16 @@ test('Codex retention reads every active-task page and rejects repeated cursors'
   assert.deepEqual(await listAllActiveThreads(async (method, params) => {
     requests.push({ method, params })
     return pages.shift()
-  }), [{ id: 'first' }, { id: 'second' }])
+  }, 'F:\\automation-state\\projects\\Ornn8\\target'), [{ id: 'first' }, { id: 'second' }])
   assert.deepEqual(requests.map(request => request.params.cursor), [null, 'next'])
+  assert.deepEqual(requests.map(request => request.params.cwds), [
+    ['F:\\automation-state\\projects\\Ornn8\\target'],
+    ['F:\\automation-state\\projects\\Ornn8\\target'],
+  ])
 
-  await assert.rejects(listAllActiveThreads(async () => ({ data: [], nextCursor: 'same' })),
+  await assert.rejects(listAllActiveThreads(
+    async () => ({ data: [], nextCursor: 'same' }), 'F:\\project',
+  ),
     /repeated task-list cursor/)
 })
 
@@ -738,6 +755,8 @@ test('review checkout contains the exact base and head before the Agent reads th
   assert.match(workflow, /fetch-depth: 0/)
   assert.match(source, /cat-file', '-e', `\$\{expectedBase\}\^\{commit\}`/)
   assert.match(source, /merge-base', expectedBase, expectedHead/)
+  assert.match(source, /taskProjectCwd = repositoryProjectCwd\(config, repository\)/)
+  assert.match(source, /projectCwd: taskProjectCwd/)
 })
 
 test('base reconciliation updates a behind default-branch pull request before review', async () => {
@@ -825,7 +844,7 @@ test('landing reconciliation is hosted, bounded, and independent of workflow_run
   assert.match(repairCaller, /pull_requests\[0\]\.number \|\| 0/)
 })
 
-test('Codex starts the first turn without racing durable task metadata', async () => {
+test('Codex starts a fresh review in its repository project before starting the first turn', async () => {
   const calls = []
   const result = await materializeReviewTask(async (method, params) => {
     calls.push({ method, params })
@@ -835,7 +854,7 @@ test('Codex starts the first turn without racing durable task metadata', async (
   }, {
     title: '[Agent GitHub 审查] PR #32 @a01eadc',
     prompt: 'Review the exact pair.',
-    projectCwd: 'F:\\dsh-gui',
+    projectCwd: 'F:\\automation-state\\projects\\Ornn8\\target',
     taskCwd: 'F:\\isolated-task',
     reviewCwd: 'F:\\exact-review',
     environment: { PATH: 'bin' },
@@ -846,6 +865,7 @@ test('Codex starts the first turn without racing durable task metadata', async (
 
   assert.deepEqual(result, { threadId: 'fresh-review', turnId: 'review-turn' })
   assert.deepEqual(calls.map(call => call.method), ['thread/start', 'turn/start'])
+  assert.equal(calls[0].params.cwd, 'F:\\automation-state\\projects\\Ornn8\\target')
   assert.equal(calls[1].params.threadId, 'fresh-review')
 })
 
@@ -864,7 +884,7 @@ test('Codex review results do not depend on task metadata housekeeping', async (
   }, {
     threadId: 'fresh-review',
     title: '[Agent GitHub 审查] PR #32 @head',
-    projectCwd: 'F:\\dsh-gui',
+    projectCwd: 'F:\\automation-state\\projects\\Ornn8\\target',
     keep: 1,
   }, warning => warnings.push(warning))
 

@@ -58,7 +58,7 @@ export function reviewInitializeParams() {
   }
 }
 
-/** Start a fresh review task without mutating metadata while its first turn is active. */
+/** Start a fresh review task before its first turn is active. */
 export async function materializeReviewTask(call, {
   prompt, projectCwd, taskCwd, reviewCwd, environment, effectiveConfig, model, effort,
 }) {
@@ -114,8 +114,8 @@ export async function settleReviewTaskMetadata(call, {
   }
 
   await attempt('naming', () => call('thread/name/set', { threadId, name: title }))
-  await attempt('project restore', () => call('thread/settings/update', { threadId, cwd: projectCwd }))
-  const activeThreads = await attempt('retention scan', () => listAllActiveThreads(call))
+  await attempt('cwd restore', () => call('thread/settings/update', { threadId, cwd: projectCwd }))
+  const activeThreads = await attempt('retention scan', () => listAllActiveThreads(call, projectCwd))
   if (!activeThreads) return
   for (const staleThreadId of reviewTaskIdsToArchive(activeThreads, threadId, keep)) {
     await attempt('archive', () => call('thread/archive', { threadId: staleThreadId }))
@@ -124,7 +124,7 @@ export async function settleReviewTaskMetadata(call, {
 
 
 /** Read every active task without silently truncating retention at one page. */
-export async function listAllActiveThreads(call) {
+export async function listAllActiveThreads(call, projectCwd) {
   const threads = []
   const cursors = new Set()
   let cursor = null
@@ -132,6 +132,7 @@ export async function listAllActiveThreads(call) {
     const listed = await call('thread/list', {
       archived: false,
       cursor,
+      cwds: [projectCwd],
       limit: 100,
       sortKey: 'created_at',
       sortDirection: 'desc',

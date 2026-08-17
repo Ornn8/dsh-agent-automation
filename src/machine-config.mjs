@@ -106,6 +106,9 @@ function rejectRemovedFields(input) {
     }
   }
   for (const [workerId, worker] of Object.entries(input?.workers || {})) {
+    if (Object.hasOwn(worker, 'projectCwd')) {
+      throw new Error(`workers.${workerId}.projectCwd was removed; Codex projects are derived per repository from operations.stateRoot`)
+    }
     if (Object.hasOwn(worker, 'mode') || Object.hasOwn(worker, 'capabilities') || Object.hasOwn(worker, 'githubLogin')) {
       throw new Error(`workers.${workerId} role, capabilities, and GitHub identity are derived from its role binding`)
     }
