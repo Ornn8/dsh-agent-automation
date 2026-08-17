@@ -155,16 +155,25 @@ export async function runDshWebSession({
   try {
     await rpc('session.selectModel', { sessionId, ...selectedModel })
     await rpc('session.rename', { sessionId, title })
-    await dshRpc(endpoint, 'session.prompt', {
-      sessionId,
-      mode: 'queue',
-      content: [{ type: 'text', text: `/permission ${selectedPresets.permissionPreset}` }],
+    const permissionExecution = await dshRpc(endpoint, 'commands/execute', {
+      args: {
+        agentId: sessionId,
+        line: `/permission ${selectedPresets.permissionPreset}`,
+      },
     }, fetchImpl, {
       maxAttempts: rpcAttempts,
       rpcId: identity.permissionRpcId,
       sleep,
       signal,
     })
+    if (typeof permissionExecution?.commandId !== 'string'
+      || !permissionExecution.commandId
+      || permissionExecution.result?.kind !== 'success') {
+      const detail = permissionExecution?.result?.kind === 'error'
+        ? `: ${permissionExecution.result.text}`
+        : ''
+      throw new Error(`DSH Web Host did not apply permission preset ${selectedPresets.permissionPreset}${detail}`)
+    }
     if (requiredSkill) {
       const catalog = await rpc('skill.list', { sessionId })
       if (!catalog?.skills?.some(skill => skill?.name === requiredSkill)) {
