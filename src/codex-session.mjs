@@ -150,6 +150,39 @@ export async function listAllActiveThreads(call, projectCwd) {
   return threads
 }
 
+function childHasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (childHasExited(child)) return Promise.resolve(true)
+  return new Promise(resolve => {
+    let timer
+    const finish = exited => {
+      clearTimeout(timer)
+      child.off('exit', onExit)
+      resolve(exited)
+    }
+    const onExit = () => finish(true)
+    child.once('exit', onExit)
+    timer = setTimeout(() => finish(false), timeoutMs)
+  })
+}
+
+/** Stop the owned App Server and wait until it can no longer retain review workspace handles. */
+export async function stopCodexAppServer(child, {
+  gracefulExitMs = 5_000,
+  forcedExitMs = 5_000,
+} = {}) {
+  if (childHasExited(child)) return
+  if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end()
+  if (await waitForChildExit(child, gracefulExitMs)) return
+  if (!childHasExited(child)) child.kill()
+  if (!await waitForChildExit(child, forcedExitMs)) {
+    throw new Error('Codex App Server did not exit after termination')
+  }
+}
+
 /** Run a visible ChatGPT Desktop Codex task and return its final assistant message. */
 export async function runReviewTask({
   node,
@@ -296,7 +329,6 @@ export async function runReviewTask({
   } finally {
     signal?.removeEventListener('abort', cancel)
     clearTimeout(forceStopTimer)
-    child.stdin.end()
-    child.kill()
+    await stopCodexAppServer(child)
   }
 }

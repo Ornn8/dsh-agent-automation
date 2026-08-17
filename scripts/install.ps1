@@ -364,6 +364,11 @@ foreach ($instance in $instances) {
   Invoke-InstallAction "install isolated runner instance $($instance.Id) at $($instance.RunnerRoot)" {
     Initialize-PrivateDirectory -Path $instance.RunnerRoot
     Initialize-PrivateDirectory -Path $instance.WorkDirectory
+    if ($instance.Role -eq 'review') {
+      Assert-RegisteredReviewWorkspace -Path $instance.WorkspaceSlot -StateRoot $ops.stateRoot -Instances @($instances) | Out-Null
+      Initialize-PrivateDirectory -Path $instance.WorkspaceSlot
+      Initialize-PrivateDirectory -Path (Split-Path -Parent $instance.WorkspaceLease)
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $instance.RunnerRoot '.runner'))) {
       Expand-Archive -LiteralPath $archive -DestinationPath $instance.RunnerRoot -Force
       $token = Get-RunnerToken -Instance $instance -GhExecutable $loaded.Config.ghExecutable

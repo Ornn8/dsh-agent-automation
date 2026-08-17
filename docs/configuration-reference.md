@@ -32,7 +32,7 @@ Every Worker requires `adapter`. The Adapter determines the remaining fields. Ro
 | `claude-code-cli` | `model`, `effort` | `executable`, `credentialIsolationDir`, `healthArgs` |
 | `command-json` | `executable` | `args`, `healthArgs`, `credentialIsolationDir` |
 
-`executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. Windows deployments must override it with a native executable when the discovered command is a `.cmd`, `.bat`, or `.ps1` shim because Agent processes start without a command shell. A review Worker also derives `gitExecutable`. A maintenance Worker derives `credentialIsolationDir` under `operations.stateRoot` unless it is explicitly configured. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. Codex review tasks use `operations.stateRoot/projects/<owner>/<repository>` so one review Worker can expose tasks under the matching repository project instead of one Worker-wide directory. `keep` applies independently to each repository project. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
+`executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. Windows deployments must override it with a native executable when the discovered command is a `.cmd`, `.bat`, or `.ps1` shim because Agent processes start without a command shell. A review Worker also derives `gitExecutable`. A maintenance Worker derives `credentialIsolationDir` under `operations.stateRoot` unless it is explicitly configured. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. Review workspace paths are not configurable: installation derives one fixed slot and lease from `operations.stateRoot` and each exact review replica id. `keep` limits retained Codex review tasks. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
 
 ## Operations fields
 
@@ -78,8 +78,8 @@ The loader rejects these pre-release fields so a stale file cannot appear to wor
 - top-level `maintenanceWorkers` and `maintenanceReviewWorker`: replaced by `operations.roles.maintenance.workers` and `operations.roles.review.workers`.
 - mapping-local `changeWorker` and `reviewWorker`: replaced by the global role routing table.
 - Worker-local `mode`, capabilities, and `githubLogin`: derived from the role and Adapter.
-- Worker-local `projectCwd`: replaced by the repository project derived from `operations.stateRoot`.
+- Worker-local `projectCwd`: replaced by the registered review replica workspace derived from `operations.stateRoot`.
 
 ## Explain output
 
-`scripts/doctor.ps1 -Explain -DryRun` is offline and reports `configuration`, `default`, and `derived` values. Without `-DryRun`, it also reads the three required repository variables, marks overrides, and fails if one is missing. The human table is followed by `AUTOMATION_CONFIGURATION_EXPLAIN_JSON=...` for scripts. Each record contains `Path`, effective `Value`, `DeclaredValue`, `SourceType`, `Source`, `Line`, `Override`, and `Status`.
+`scripts/doctor.ps1 -Explain -DryRun` is offline and reports `configuration`, `default`, and `derived` values, including every planned review workspace. Without `-DryRun`, it also reads the three required repository variables, marks overrides, reports each slot as available, leased, stale, invalid, or missing, and fails if a required projection is missing. The human table is followed by `AUTOMATION_CONFIGURATION_EXPLAIN_JSON=...` for scripts. Each record contains `Path`, effective `Value`, `DeclaredValue`, `SourceType`, `Source`, `Line`, `Override`, and `Status`; workspace records also contain `Detail` and the current `Repository` binding read from the lease or local origin.

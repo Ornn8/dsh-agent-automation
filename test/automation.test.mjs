@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -66,6 +67,7 @@ import {
   reviewTurnPermissions,
   reviewTaskIdsToArchive,
   reviewThreadConfig,
+  stopCodexAppServer,
 } from '../src/codex-session.mjs'
 import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
 import { parseAgentWork } from '../src/agent-work.mjs'
@@ -776,14 +778,63 @@ test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispat
   assert.match(workflow, /pull-requests: write/)
 })
 
-test('review checkout contains the exact base and head before the Agent reads their diff', async () => {
+test('review uses one controller-owned slot and verifies the exact pair before the Agent reads it', async () => {
   const workflow = await readFile(new URL('../.github/workflows/agent-review.yml', import.meta.url), 'utf8')
   const source = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
-  assert.match(workflow, /fetch-depth: 0/)
-  assert.match(source, /cat-file', '-e', `\$\{expectedBase\}\^\{commit\}`/)
-  assert.match(source, /merge-base', expectedBase, expectedHead/)
-  assert.match(source, /taskProjectCwd = repositoryProjectCwd\(config, repository\)/)
+  assert.doesNotMatch(workflow, /Check out exact review head/)
+  assert.doesNotMatch(workflow, /REVIEW_CHECKOUT/)
+  assert.match(source, /acquireReviewWorkspace/)
+  assert.match(source, /prepareReviewWorkspace/)
+  assert.match(source, /requiredEnv\('AGENT_REPLICA_ID'\)/)
+  assert.match(source, /taskProjectCwd = reviewCheckout/)
   assert.match(source, /projectCwd: taskProjectCwd/)
+})
+
+test('Codex review waits for its App Server to release workspace handles', async () => {
+  const child = new EventEmitter()
+  child.exitCode = null
+  child.signalCode = null
+  child.stdin = {
+    destroyed: false,
+    writableEnded: false,
+    end() {
+      this.writableEnded = true
+      setImmediate(() => {
+        child.exitCode = 0
+        child.emit('exit', 0, null)
+      })
+    },
+  }
+  child.kill = () => assert.fail('graceful App Server shutdown must not be killed')
+
+  await stopCodexAppServer(child, { gracefulExitMs: 100, forcedExitMs: 100 })
+
+  assert.equal(child.stdin.writableEnded, true)
+  assert.equal(child.exitCode, 0)
+})
+
+test('Codex review bounds App Server shutdown before cleanup', async () => {
+  const child = new EventEmitter()
+  child.exitCode = null
+  child.signalCode = null
+  child.stdin = {
+    destroyed: false,
+    writableEnded: false,
+    end() { this.writableEnded = true },
+  }
+  let kills = 0
+  child.kill = () => {
+    kills += 1
+    setImmediate(() => {
+      child.signalCode = 'SIGTERM'
+      child.emit('exit', null, 'SIGTERM')
+    })
+  }
+
+  await stopCodexAppServer(child, { gracefulExitMs: 1, forcedExitMs: 100 })
+
+  assert.equal(kills, 1)
+  assert.equal(child.signalCode, 'SIGTERM')
 })
 
 test('base reconciliation updates a behind default-branch pull request before review', async () => {

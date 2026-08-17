@@ -101,7 +101,9 @@ Describe 'Portable installation plan' {
       '/srv/agent-automation/runtime',
       '/srv/agent-automation/state',
       '/srv/agent-automation/state/logs',
-      '/srv/agent-automation/state/faults'
+      '/srv/agent-automation/state/faults',
+      '/srv/agent-automation/state/workspaces',
+      '/srv/agent-automation/state/workspace-leases'
     )
     @($plan.runnerInstances) | Should -HaveCount 4
     foreach ($instance in @($plan.runnerInstances)) {
@@ -109,6 +111,13 @@ Describe 'Portable installation plan' {
       @($instance.labels) | Should -Contain 'X64'
       @($instance.labels) | Should -Not -Contain 'Windows'
       $instance.serviceManager | Should -BeExactly 'systemd-user'
+      if ($instance.role -eq 'review') {
+        $instance.workspaceSlot | Should -BeExactly "/srv/agent-automation/state/workspaces/$($instance.id)"
+        $instance.workspaceLease | Should -BeExactly "/srv/agent-automation/state/workspace-leases/$($instance.id).json"
+      } else {
+        $instance.workspaceSlot | Should -BeNullOrEmpty
+        $instance.workspaceLease | Should -BeNullOrEmpty
+      }
     }
     $plan.repositories[0].variables.DSH_AUTOMATION_CI_WORKFLOWS | Should -BeExactly '["CI","Security"]'
     $plan.repositories[0].variables.DSH_AUTOMATION_REQUIRED_CHECKS | Should -BeExactly '["all checks passed","security/gate"]'

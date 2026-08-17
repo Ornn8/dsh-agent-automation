@@ -13,6 +13,8 @@
     "src/controller-mutation-marker.mjs",
     "src/landing-policy.mjs",
     "src/machine-config.mjs",
-    "src/review-authority.mjs"
+    "src/review-authority.mjs",
+    "src/review-workspace-policy.mjs",
+    "src/review-workspace.mjs"
   ]
 }
