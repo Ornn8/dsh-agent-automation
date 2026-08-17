@@ -54,6 +54,9 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
   const normalizedInvocation = {
     taskId: requiredText(invocation?.taskId, 'invocation.taskId'),
     cwd: requiredText(invocation?.cwd, 'invocation.cwd'),
+    projectCwd: invocation?.projectCwd === undefined
+      ? undefined
+      : requiredText(invocation.projectCwd, 'invocation.projectCwd'),
     title: requiredText(invocation?.title, 'invocation.title'),
     prompt: requiredText(invocation?.prompt, 'invocation.prompt'),
     requiredSkill: invocation?.requiredSkill === undefined

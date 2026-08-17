@@ -27,12 +27,12 @@ Every Worker requires `adapter`. The Adapter determines the remaining fields. Ro
 | Adapter | Required fields | Optional fields |
 | --- | --- | --- |
 | `dsh-web` | `baseUrl`, `agentPreset`, `permissionPreset`, `provider`, `model`, `reasoningEffort` | None |
-| `codex-app` | `node`, `script`, `home`, `model`, `effort`, `keep` | `projectCwd` |
+| `codex-app` | `node`, `script`, `home`, `model`, `effort`, `keep` | None |
 | `opencode-cli` | `model`, `variant` | `executable`, `agent`, `credentialIsolationDir`, `healthArgs` |
 | `claude-code-cli` | `model`, `effort` | `executable`, `credentialIsolationDir`, `healthArgs` |
 | `command-json` | `executable` | `args`, `healthArgs`, `credentialIsolationDir` |
 
-`executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. Windows deployments must override it with a native executable when the discovered command is a `.cmd`, `.bat`, or `.ps1` shim because Agent processes start without a command shell. A review Worker also derives `gitExecutable`. A maintenance Worker derives `credentialIsolationDir` under `operations.stateRoot` unless it is explicitly configured. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. `projectCwd` selects the Codex Desktop project directory. `keep` limits visible Codex review tasks. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
+`executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. Windows deployments must override it with a native executable when the discovered command is a `.cmd`, `.bat`, or `.ps1` shim because Agent processes start without a command shell. A review Worker also derives `gitExecutable`. A maintenance Worker derives `credentialIsolationDir` under `operations.stateRoot` unless it is explicitly configured. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. Codex review tasks use `operations.stateRoot/projects/<owner>/<repository>` so one review Worker can expose tasks under the matching repository project instead of one Worker-wide directory. `keep` applies independently to each repository project. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
 
 ## Operations fields
 
@@ -78,6 +78,7 @@ The loader rejects these pre-release fields so a stale file cannot appear to wor
 - top-level `maintenanceWorkers` and `maintenanceReviewWorker`: replaced by `operations.roles.maintenance.workers` and `operations.roles.review.workers`.
 - mapping-local `changeWorker` and `reviewWorker`: replaced by the global role routing table.
 - Worker-local `mode`, capabilities, and `githubLogin`: derived from the role and Adapter.
+- Worker-local `projectCwd`: replaced by the repository project derived from `operations.stateRoot`.
 
 ## Explain output
 

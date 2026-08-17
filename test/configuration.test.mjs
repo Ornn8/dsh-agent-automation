@@ -50,6 +50,9 @@ test('removed entry points and cross-domain Worker reuse fail before an Adapter 
     legacy[field] = field.endsWith('Workers') ? [] : 'legacy'
     assert.throws(() => resolve(legacy), /was removed/)
   }
+  const workerProject = structuredClone(input)
+  workerProject.workers.review.projectCwd = 'F:\\one-project-for-every-repository'
+  assert.throws(() => resolve(workerProject), /projectCwd was removed/)
   const reused = structuredClone(input)
   reused.operations.roles.maintenance.workers = ['review']
   delete reused.workers.maintenance

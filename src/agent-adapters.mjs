@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import {
   hostCredentialEnvironment,
   maintenanceCredentialEnvironment,
@@ -67,12 +67,16 @@ export function createAgentAdapters({
           || path.join(worker.home, '.dsh-agent-automation', 'reviewer-gh')
         const taskCwd = await mkdtemp(path.join(path.dirname(invocation.cwd), 'codex-review-context-'))
         try {
+          if (typeof invocation.projectCwd !== 'string' || !path.isAbsolute(invocation.projectCwd)) {
+            throw new Error('Codex review invocation requires an absolute projectCwd')
+          }
+          await mkdir(invocation.projectCwd, { recursive: true })
           const result = await runCodexTask({
             node: worker.node,
             codexScript: worker.script,
             prompt: invocation.prompt,
             title: invocation.title,
-            projectCwd: worker.projectCwd || taskCwd,
+            projectCwd: invocation.projectCwd,
             taskCwd,
             reviewCwd: invocation.cwd,
             environment: reviewerCredentialEnvironment({

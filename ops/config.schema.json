@@ -156,7 +156,6 @@
         "node": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
         "script": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
         "home": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
-        "projectCwd": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n`]+$" },
         "effort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultracode"] },
         "keep": { "type": "integer", "minimum": 1, "maximum": 100 },
         "executable": { "type": "string", "minLength": 1 },

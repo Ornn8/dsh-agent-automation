@@ -498,12 +498,12 @@ test('the Codex adapter satisfies the worker interface without GitHub credential
     const receipt = await runAgentWorker({
       config: { workers: { reviewer: {
         adapter: 'codex-app', node: 'node.exe', script: 'codex.js',
-        home, projectCwd: project,
+        home,
         model: 'gpt-5.6-sol', effort: 'medium', keep: 6,
       } } },
       workerId: 'reviewer',
       invocation: {
-        taskId: 'review-pair', cwd: checkout, title: 'Review pair',
+        taskId: 'review-pair', cwd: checkout, projectCwd: project, title: 'Review pair',
         prompt: 'Review it.', timeoutMs: 60_000,
       },
       adapters,
