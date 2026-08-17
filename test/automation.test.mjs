@@ -776,13 +776,15 @@ test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispat
   assert.match(workflow, /pull-requests: write/)
 })
 
-test('review checkout contains the exact base and head before the Agent reads their diff', async () => {
+test('review uses one controller-owned slot and verifies the exact pair before the Agent reads it', async () => {
   const workflow = await readFile(new URL('../.github/workflows/agent-review.yml', import.meta.url), 'utf8')
   const source = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
-  assert.match(workflow, /fetch-depth: 0/)
-  assert.match(source, /cat-file', '-e', `\$\{expectedBase\}\^\{commit\}`/)
-  assert.match(source, /merge-base', expectedBase, expectedHead/)
-  assert.match(source, /taskProjectCwd = repositoryProjectCwd\(config, repository\)/)
+  assert.doesNotMatch(workflow, /Check out exact review head/)
+  assert.doesNotMatch(workflow, /REVIEW_CHECKOUT/)
+  assert.match(source, /acquireReviewWorkspace/)
+  assert.match(source, /prepareReviewWorkspace/)
+  assert.match(source, /requiredEnv\('AGENT_REPLICA_ID'\)/)
+  assert.match(source, /taskProjectCwd = reviewCheckout/)
   assert.match(source, /projectCwd: taskProjectCwd/)
 })
 

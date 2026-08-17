@@ -38,7 +38,10 @@ if ($Explain) {
       return [pscustomobject]@{ Found = $true; Value = $value.Trim() }
     }
   }
-  $explanation = @(Get-ConfigurationExplanation -Loaded $loaded -RepositoryVariableResolver $resolver)
+  $explanation = @(
+    Get-ConfigurationExplanation -Loaded $loaded -RepositoryVariableResolver $resolver
+    Get-ReviewWorkspaceExplanation -Instances $instances -StateRoot $ops.stateRoot -GitExecutable $loaded.Config.gitExecutable -DryRun:$DryRun
+  ) | Sort-Object Path
   $explanation | Format-Table Path, Value, SourceType, Source, Line, Override, Status -Wrap
   Write-Output "AUTOMATION_CONFIGURATION_EXPLAIN_JSON=$(ConvertTo-Json -InputObject $explanation -Depth 8 -Compress)"
   if (-not $DryRun -and @($explanation | Where-Object Status -in @('missing', 'invalid', 'mismatch')).Count) { exit 1 }
@@ -134,6 +137,16 @@ foreach ($instance in $instances) {
     $expectedRuntimeScript = if ($manifest -and $manifest.psobject.Properties.Name -contains 'operationsRuntime' -and $manifest.operationsRuntime) { Join-Path $manifest.operationsRuntime.root 'runner-supervisor.ps1' } else { '' }
     $taskRuntime = if ($expectedRuntimeScript) { Test-ScheduledTaskRuntimePath -Task $task -ExpectedScript $expectedRuntimeScript } else { [pscustomobject]@{ Ok = $false; Detail = 'manifest has no operations runtime snapshot' } }
     Add-Finding "$($instance.Id) task runtime" $taskRuntime.Ok $taskRuntime.Detail
+  }
+  if ($instance.Role -eq 'review') {
+    try {
+      $workspaceAcl = Test-PrivateDirectoryAcl -Path $instance.WorkspaceSlot
+      Add-Finding "$($instance.Id) review workspace" $workspaceAcl.Ok $workspaceAcl.Detail
+      $lease = Get-ReviewWorkspaceLeaseState -Instance $instance -StateRoot $ops.stateRoot
+      Add-Finding "$($instance.Id) review workspace lease" (-not $lease.Reclaim) "$($lease.State): $($lease.Detail)"
+    } catch {
+      Add-Finding "$($instance.Id) review workspace" $false $_.Exception.Message
+    }
   }
 }
 $legacy = Get-ScheduledTask -TaskName 'DSH-Agent-Automation-controller' -ErrorAction SilentlyContinue

@@ -48,15 +48,6 @@ jobs:
           path: controller
           persist-credentials: false
 
-      - name: Check out exact review head
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ inputs.head_sha }}
-          path: review
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Review exact PR head with the configured Agent
         id: review
         continue-on-error: true
@@ -68,7 +59,6 @@ jobs:
           PROFILE_ID: ${{ inputs.profile_id }}
           WORKFLOW_ID: ${{ inputs.workflow_id }}
           STAGE_ID: ${{ inputs.stage_id }}
-          REVIEW_CHECKOUT: ${{ github.workspace }}/review
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           CONTROLLER_SHA: ${{ job.workflow_sha }}

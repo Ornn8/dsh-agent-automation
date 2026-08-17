@@ -17,7 +17,7 @@ This Module owns the stable invocation and terminal receipt Interface. Its Depth
 Adapters translate the Worker Interface to one runtime:
 
 - `dsh-web` uses the local DeepSeek Harness Web Host. Change work is a structured WorkRequest sent through a controller-installed, user-explicit Cordis Skill; the Adapter verifies the Skill is present before prompting and does not carry the role procedure itself. The Adapter preallocates the visible session from the immutable task id and treats the durable prompt rpc id as the admission receipt, so transport recovery cannot create a second turn. A hidden final result reports `completed` or `blocked`; it does not authorize GitHub changes, and the Automation Domain revalidates the live postcondition.
-- `codex-app` starts each review in the stable repository project directory derived as `operations.stateRoot/projects/<owner>/<repository>`, while the model turn receives only an isolated task directory and the exact read-only checkout. After the turn completes, it attempts the stable review title and archives reviews beyond that repository's retention limit. A stale task that cannot be archived does not discard a completed review result.
+- `codex-app` starts each review in the controller-owned workspace slot for the exact review replica. Operations derives one durable slot below `operations.stateRoot/workspaces/` for each installed review runner; the controller acquires its machine-local lease, resets only that registered directory, fetches the exact base/head pair, and then starts the model in the existing checkout. After the turn completes, it releases the lease, attempts the stable review title, and archives reviews beyond the retention limit. A busy slot is deferred to the existing reconciler, and a stale task that cannot be archived does not discard a completed review result.
 - `opencode-cli` runs either role through OpenCode's non-interactive JSON event stream and a temporary native Skill.
 - `claude-code-cli` runs either role through Claude Code's non-interactive JSON event stream. Trusted change work receives a temporary native plugin and full permissions; review receives the same controller Skill with only the neutral project setting source and a read-only tool set.
 - `command-json` supports any executable that accepts JSON stdin and returns a JSON receipt.
@@ -31,6 +31,8 @@ Controller scripts validate and publish GitHub state using the host controller i
 ### Role Runners
 
 GitHub runner labels are the scheduling Interface. `agent-reviewer`, `agent-change`, and `agent-maintenance` use different registrations, processes, work directories, credentials, concurrency groups, and task timeouts. They may run on different machines without controller changes.
+
+The review runner supervisor owns local slot recovery. Its lease binds the exact replica, process, WorkRequest, repository, base, head, acquisition time, and expiry. A live bounded lease is exclusive; a dead, expired, terminal, or superseded owner is reclaimable. Operations derives the slot from the installed runner manifest rather than accepting a task path, so reset and clean operations cannot escape to a repository checkout or another replica.
 
 ### Infrastructure Recovery
 

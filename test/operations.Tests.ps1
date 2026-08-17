@@ -75,6 +75,61 @@ Describe 'Branch protection authority migration' {
 }
 
 Describe 'Installer and uninstaller fail-closed guards' {
+  It 'authorizes destructive review cleanup only for a registered review workspace' {
+    $stateRoot = Join-Path $TestDrive 'state'
+    $registered = Join-Path $stateRoot 'workspaces\target-owner-repository-a1b2c3d4e5f6-review'
+    $instance = [pscustomobject]@{
+      Id = 'target-owner-repository-a1b2c3d4e5f6-review'
+      Role = 'review'
+      WorkspaceSlot = $registered
+    }
+
+    (Assert-RegisteredReviewWorkspace -Path $registered -StateRoot $stateRoot -Instances @($instance)) | Should -BeExactly ([IO.Path]::GetFullPath($registered))
+    { Assert-RegisteredReviewWorkspace -Path (Join-Path $stateRoot 'projects\owner\repository') -StateRoot $stateRoot -Instances @($instance) } | Should -Throw '*registered review workspace*'
+    { Assert-RegisteredReviewWorkspace -Path (Join-Path $stateRoot '..\outside') -StateRoot $stateRoot -Instances @($instance) } | Should -Throw '*inside*'
+  }
+
+  It 'reclaims a dead review lease without touching the registered workspace' {
+    $stateRoot = Join-Path $TestDrive 'lease-state'
+    $paths = Get-ReviewWorkspacePaths -StateRoot $stateRoot -InstanceId 'target-owner-repository-a1b2c3d4e5f6-review'
+    [IO.Directory]::CreateDirectory($paths.Directory) | Out-Null
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $paths.LeaseFile)) | Out-Null
+    $instance = [pscustomobject]@{ Id = $paths.SlotId; Role = 'review'; WorkspaceSlot = $paths.Directory; WorkspaceLease = $paths.LeaseFile }
+    $lease = [ordered]@{
+      slotId = $paths.SlotId
+      pid = 2147483647
+      workRequestId = 'review-pr-1-base-head'
+      repository = 'owner/repository'
+      acquiredAt = '2026-08-17T00:00:00.000Z'
+      expiresAt = '2026-08-17T01:00:00.000Z'
+    }
+    [IO.File]::WriteAllText($paths.LeaseFile, ($lease | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+
+    $result = Remove-StaleReviewWorkspaceLease -Instance $instance -StateRoot $stateRoot -Now ([DateTimeOffset]'2026-08-17T00:30:00Z')
+
+    $result.State | Should -BeExactly 'reclaimed'
+    Test-Path -LiteralPath $paths.LeaseFile | Should -BeFalse
+    Test-Path -LiteralPath $paths.Directory -PathType Container | Should -BeTrue
+  }
+
+  It 'reports the repository currently bound to an available review workspace' {
+    $stateRoot = Join-Path $TestDrive 'binding-state'
+    $paths = Get-ReviewWorkspacePaths -StateRoot $stateRoot -InstanceId 'target-owner-repository-a1b2c3d4e5f6-review'
+    [IO.Directory]::CreateDirectory($paths.Directory) | Out-Null
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $paths.LeaseFile)) | Out-Null
+    & git -C $paths.Directory init --quiet
+    $LASTEXITCODE | Should -Be 0
+    & git -C $paths.Directory remote add origin https://github.com/owner/repository.git
+    $LASTEXITCODE | Should -Be 0
+    $instance = [pscustomobject]@{ Id = $paths.SlotId; Role = 'review'; WorkspaceSlot = $paths.Directory; WorkspaceLease = $paths.LeaseFile }
+
+    $rows = @(Get-ReviewWorkspaceExplanation -Instances @($instance) -StateRoot $stateRoot -GitExecutable git)
+
+    $rows | Should -HaveCount 1
+    $rows[0].Status | Should -BeExactly 'available'
+    $rows[0].Repository | Should -BeExactly 'owner/repository'
+  }
+
   It 'accepts the exact legacy runtime manifest only during explicit migration' {
     $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
     $dataRoot = Join-Path (Split-Path -Parent $script:RepositoryRoot) "dsh-agent-automation-pester-$([Guid]::NewGuid().ToString('N'))"
@@ -165,6 +220,10 @@ Describe 'Effective configuration explanation' {
     $structured | Should -HaveCount 1
     $records = @($structured[0].Substring('AUTOMATION_CONFIGURATION_EXPLAIN_JSON='.Length) | ConvertFrom-Json -Depth 16)
     @($records | Where-Object { $_.Path -eq 'configurationHash' -and $_.SourceType -eq 'derived' }) | Should -HaveCount 1
+    $reviewWorkspaces = @($records | Where-Object { $_.Path -like 'operations.reviewWorkspaces.*' })
+    $reviewWorkspaces | Should -HaveCount 1
+    $reviewWorkspaces[0].Status | Should -BeExactly 'planned'
+    $reviewWorkspaces[0].Repository | Should -BeExactly '<unbound>'
   }
 
   It 'reports configuration, default, derived, and repository-variable sources' {

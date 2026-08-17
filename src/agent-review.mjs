@@ -1,4 +1,3 @@
-import { resolve } from 'node:path'
 import { appendFile } from 'node:fs/promises'
 import {
   authenticatedMarker,
@@ -6,7 +5,6 @@ import {
   loadConfig,
   parseJson,
   requiredEnv,
-  repositoryProjectCwd,
   resolveRepositoryWorker,
   run,
 } from './common.mjs'
@@ -25,18 +23,23 @@ import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { reviewMarker } from './review-authority.mjs'
 import { reviewObservations } from './review-observations.mjs'
+import {
+  acquireReviewWorkspace,
+  prepareReviewWorkspace,
+  releaseReviewWorkspace,
+} from './review-workspace.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
 const expectedBase = requiredEnv('BASE_SHA')
 const expectedHead = requiredEnv('HEAD_SHA')
-const reviewCheckout = resolve(requiredEnv('REVIEW_CHECKOUT'))
 const config = await loadConfig()
 const profileId = requiredEnv('PROFILE_ID')
 const workflowId = requiredEnv('WORKFLOW_ID')
 const stageId = requiredEnv('STAGE_ID')
 const marker = reviewMarker(expectedHead)
 const githubEnvironment = actionsCredentialEnvironment()
+const reviewTimeoutMs = 60 * 60 * 1000
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
@@ -107,19 +110,36 @@ if (reviewStage.procedure !== AGENT_REVIEW_SKILL) {
   throw new Error(`Review workflow cannot execute procedure ${reviewStage.procedure}`)
 }
 const workerId = resolveRepositoryWorker(config, repository, reviewStage.role)
-const taskProjectCwd = repositoryProjectCwd(config, repository)
 const expectedBaseRef = pullRequest.baseRefName
-const checkedOutHead = (await run(config.gitExecutable, [
-  '-C', reviewCheckout, 'rev-parse', 'HEAD',
-])).stdout.trim()
-if (checkedOutHead !== expectedHead) {
-  throw new Error(`Review checkout is ${checkedOutHead}, expected ${expectedHead}`)
+const replicaId = requiredEnv('AGENT_REPLICA_ID')
+const workspace = await acquireReviewWorkspace({
+  stateRoot: config.operations.stateRoot,
+  replicaId,
+  workRequestId: `review-pr-${pullRequestNumber}-${expectedBase}-${expectedHead}`,
+  repository,
+  baseSha: expectedBase,
+  headSha: expectedHead,
+  timeoutMs: reviewTimeoutMs + 5 * 60 * 1000,
+})
+if (!workspace) {
+  await writeOutput('deferred', 'true')
+  process.stdout.write(`Review workspace ${replicaId} is leased; the exact pair remains eligible for reconciliation.\n`)
+  process.exit(0)
 }
-await run(config.gitExecutable, ['-C', reviewCheckout, 'cat-file', '-e', `${expectedBase}^{commit}`])
-const mergeBase = (await run(config.gitExecutable, [
-  '-C', reviewCheckout, 'merge-base', expectedBase, expectedHead,
-])).stdout.trim()
-if (!/^[0-9a-f]{40}$/i.test(mergeBase)) throw new Error('Review checkout has no valid merge base')
+
+try {
+  const preparedWorkspace = await prepareReviewWorkspace({
+    stateRoot: config.operations.stateRoot,
+    replicaId,
+    repository,
+    remoteUrl: `https://github.com/${repository}.git`,
+    baseSha: expectedBase,
+    headSha: expectedHead,
+    gitExecutable: config.gitExecutable,
+    environment: githubEnvironment,
+  })
+  const reviewCheckout = preparedWorkspace.directory
+  const taskProjectCwd = reviewCheckout
 
 const [observationComments, observationChecks] = await Promise.all([
   ghJson([
@@ -209,7 +229,7 @@ const workerReceipt = await runAgentWorker({
     title: `[Agent GitHub 审查] ${repository} PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
     prompt,
     requiredSkill: reviewStage.procedure,
-    timeoutMs: 60 * 60 * 1000,
+    timeoutMs: reviewTimeoutMs,
   },
   adapters: createAgentAdapters(),
 })
@@ -279,4 +299,7 @@ if (review.verdict === 'block') {
   ], { env: githubEnvironment })
   await writeOutput('verdict', 'pass')
   process.stdout.write(`The review Worker passed pull request #${pullRequestNumber}; landing was requested for ${expectedHead}.\n`)
+}
+} finally {
+  await releaseReviewWorkspace(workspace)
 }

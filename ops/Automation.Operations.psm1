@@ -356,6 +356,131 @@ function Get-RepositoryKey {
   return "$slug-$hash"
 }
 
+function Get-ReviewWorkspacePaths {
+  param(
+    [Parameter(Mandatory)][string]$StateRoot,
+    [Parameter(Mandatory)][string]$InstanceId
+  )
+  if ($InstanceId -notmatch '^(?:target-[A-Za-z0-9_.-]+-review|organization-review)(?:-r[2-8])?$') {
+    throw 'Review workspace requires an exact review replica id'
+  }
+  $directory = Join-Path $StateRoot (Join-Path 'workspaces' $InstanceId)
+  $leaseFile = Join-Path $StateRoot (Join-Path 'workspace-leases' "$InstanceId.json")
+  Assert-PathInside -Child $directory -Parent $StateRoot -Name "$InstanceId review workspace"
+  Assert-PathInside -Child $leaseFile -Parent $StateRoot -Name "$InstanceId review workspace lease"
+  return [pscustomobject]@{ SlotId = $InstanceId; Directory = $directory; LeaseFile = $leaseFile }
+}
+
+function Assert-RegisteredReviewWorkspace {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$StateRoot,
+    [Parameter(Mandatory)][object[]]$Instances
+  )
+  Assert-PathInside -Child $Path -Parent $StateRoot -Name 'review workspace reset target'
+  $candidate = [IO.Path]::GetFullPath($Path)
+  $matches = @($Instances | Where-Object {
+    $_.Role -eq 'review' -and $_.WorkspaceSlot -and
+    ([IO.Path]::GetFullPath([string]$_.WorkspaceSlot)).Equals($candidate, [StringComparison]::OrdinalIgnoreCase)
+  })
+  if ($matches.Count -ne 1) { throw "Path is not one registered review workspace: $candidate" }
+  return $candidate
+}
+
+function Get-ReviewWorkspaceLeaseState {
+  param(
+    [Parameter(Mandatory)]$Instance,
+    [Parameter(Mandatory)][string]$StateRoot,
+    [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
+  )
+  if ($Instance.Role -ne 'review' -or -not $Instance.WorkspaceSlot -or -not $Instance.WorkspaceLease) {
+    throw "$($Instance.Id) is not a review workspace instance"
+  }
+  Assert-RegisteredReviewWorkspace -Path $Instance.WorkspaceSlot -StateRoot $StateRoot -Instances @($Instance) | Out-Null
+  Assert-PathInside -Child $Instance.WorkspaceLease -Parent $StateRoot -Name "$($Instance.Id) workspace lease"
+  if (-not (Test-Path -LiteralPath $Instance.WorkspaceLease -PathType Leaf)) {
+    return [pscustomobject]@{ State = 'available'; Reclaim = $false; Repository = $null; WorkRequestId = $null; Detail = 'available' }
+  }
+  $item = Get-Item -LiteralPath $Instance.WorkspaceLease -Force
+  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Review workspace lease is a reparse point: $($Instance.WorkspaceLease)" }
+  try {
+    $lease = Get-Content -LiteralPath $Instance.WorkspaceLease -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8
+    $pidTypeOk = $lease.pid -is [long] -or $lease.pid -is [int]
+    if ($lease.slotId -cne $Instance.Id -or -not $pidTypeOk -or [long]$lease.pid -lt 1) { throw 'invalid identity' }
+    if ($lease.repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or [string]::IsNullOrWhiteSpace($lease.workRequestId)) { throw 'invalid work identity' }
+    $expiresAt = [DateTimeOffset]::Parse([string]$lease.expiresAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+  } catch {
+    if (($Now.UtcDateTime - $item.LastWriteTimeUtc).TotalMinutes -ge 5) {
+      return [pscustomobject]@{ State = 'invalid'; Reclaim = $true; Repository = $null; WorkRequestId = $null; Detail = 'invalid lease older than five minutes' }
+    }
+    throw "Review workspace lease is invalid and still within its write grace period: $($Instance.WorkspaceLease)"
+  }
+  $pidAlive = $null -ne (Get-Process -Id ([int]$lease.pid) -ErrorAction SilentlyContinue)
+  $expired = $Now -gt $expiresAt
+  $reclaim = -not $pidAlive -or $expired
+  return [pscustomobject]@{
+    State = if ($reclaim) { 'stale' } else { 'leased' }
+    Reclaim = $reclaim
+    Repository = [string]$lease.repository
+    WorkRequestId = [string]$lease.workRequestId
+    Detail = if (-not $pidAlive) { "owner pid $($lease.pid) is absent" } elseif ($expired) { "expired at $($expiresAt.ToString('O'))" } else { "held by pid $($lease.pid) until $($expiresAt.ToString('O'))" }
+  }
+}
+
+function Remove-StaleReviewWorkspaceLease {
+  param(
+    [Parameter(Mandatory)]$Instance,
+    [Parameter(Mandatory)][string]$StateRoot,
+    [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
+  )
+  $state = Get-ReviewWorkspaceLeaseState -Instance $Instance -StateRoot $StateRoot -Now $Now
+  if (-not $state.Reclaim) { return $state }
+  Assert-RegisteredReviewWorkspace -Path $Instance.WorkspaceSlot -StateRoot $StateRoot -Instances @($Instance) | Out-Null
+  Remove-Item -LiteralPath $Instance.WorkspaceLease -Force
+  return [pscustomobject]@{ State = 'reclaimed'; Reclaim = $false; Repository = $state.Repository; WorkRequestId = $state.WorkRequestId; Detail = $state.Detail }
+}
+
+function Get-ReviewWorkspaceExplanation {
+  param(
+    [Parameter(Mandatory)][object[]]$Instances,
+    [Parameter(Mandatory)][string]$StateRoot,
+    [string]$GitExecutable = 'git',
+    [switch]$DryRun
+  )
+  $rows = [Collections.Generic.List[object]]::new()
+  foreach ($instance in @($Instances | Where-Object Role -eq 'review' | Sort-Object Id)) {
+    Assert-RegisteredReviewWorkspace -Path $instance.WorkspaceSlot -StateRoot $StateRoot -Instances $Instances | Out-Null
+    $state = if ($DryRun) {
+      [pscustomobject]@{ State = 'planned'; Detail = 'created by install; one slot per review replica' }
+    } elseif (-not (Test-Path -LiteralPath $instance.WorkspaceSlot -PathType Container)) {
+      [pscustomobject]@{ State = 'missing'; Detail = 'workspace directory is missing' }
+    } else {
+      Get-ReviewWorkspaceLeaseState -Instance $instance -StateRoot $StateRoot
+    }
+    $repository = if ($state.PSObject.Properties['Repository'] -and $state.Repository) { [string]$state.Repository } else { $null }
+    if (-not $DryRun -and -not $repository -and (Test-Path -LiteralPath (Join-Path $instance.WorkspaceSlot '.git') -PathType Container)) {
+      $remote = & $GitExecutable -C $instance.WorkspaceSlot remote get-url origin 2>$null
+      if ($LASTEXITCODE -eq 0 -and ([string]$remote).Trim() -match '^(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$') {
+        $repository = $Matches[1]
+      }
+    }
+    $repositoryDetail = if ($repository) { "repository $repository; " } else { '' }
+    $rows.Add([pscustomobject][ordered]@{
+      Path = "operations.reviewWorkspaces.$($instance.Id)"
+      Value = [string]$instance.WorkspaceSlot
+      DeclaredValue = '<derived>'
+      SourceType = 'derived'
+      Source = 'operations.stateRoot + installed review replica'
+      Line = $null
+      Override = $false
+      Status = [string]$state.State
+      Detail = "$repositoryDetail$([string]$state.Detail)"
+      Repository = if ($repository) { $repository } else { '<unbound>' }
+    })
+  }
+  return @($rows)
+}
+
 function Get-RunnerName {
   param(
     [Parameter(Mandatory)][string]$Prefix,
@@ -475,7 +600,7 @@ function Read-OperationsConfig {
     if ($mapping.PSObject.Properties['changeWorker'] -or $mapping.PSObject.Properties['reviewWorker']) { throw 'repositoryMappings Worker fields were removed; use operations.roles.<role>.workers' }
   }
   foreach ($property in @($inputConfig.workers.PSObject.Properties)) {
-    if ($property.Value.PSObject.Properties['projectCwd']) { throw "workers.$($property.Name).projectCwd was removed; Codex projects are derived per repository from operations.stateRoot" }
+    if ($property.Value.PSObject.Properties['projectCwd']) { throw "workers.$($property.Name).projectCwd was removed; review workspaces are derived per installed replica from operations.stateRoot" }
     foreach ($field in 'mode', 'capabilities', 'githubLogin') {
       if ($property.Value.PSObject.Properties[$field]) { throw "workers.$($property.Name) role, capabilities, and GitHub identity are derived from its role binding" }
     }
@@ -646,6 +771,8 @@ function Get-RunnerInstances {
           Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.$roleName.labels + @($id)) -Platform $hostPlatform)
           RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
           WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
+          WorkspaceSlot = if ($roleName -eq 'review') { (Get-ReviewWorkspacePaths -StateRoot $ops.stateRoot -InstanceId $id).Directory } else { $null }
+          WorkspaceLease = if ($roleName -eq 'review') { (Get-ReviewWorkspacePaths -StateRoot $ops.stateRoot -InstanceId $id).LeaseFile } else { $null }
           TaskName = "DSH-Agent-Automation-$id"
           LogFile = Join-Path $ops.logsRoot "$id-supervisor.log"
           FaultFile = Join-Path $ops.stateRoot (Join-Path 'faults' "$id.restart")
@@ -672,6 +799,8 @@ function Get-RunnerInstances {
             Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.$roleName.labels + @($id)) -Platform $hostPlatform)
             RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
             WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
+            WorkspaceSlot = if ($roleName -eq 'review') { (Get-ReviewWorkspacePaths -StateRoot $ops.stateRoot -InstanceId $id).Directory } else { $null }
+            WorkspaceLease = if ($roleName -eq 'review') { (Get-ReviewWorkspacePaths -StateRoot $ops.stateRoot -InstanceId $id).LeaseFile } else { $null }
             TaskName = "DSH-Agent-Automation-$id"
             LogFile = Join-Path $ops.logsRoot "$id-supervisor.log"
             FaultFile = Join-Path $ops.stateRoot (Join-Path 'faults' "$id.restart")
@@ -696,6 +825,8 @@ function Get-RunnerInstances {
         Labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($ops.roles.maintenance.labels + @($id)) -Platform $hostPlatform)
         RunnerRoot = Join-Path $ops.installRoot (Join-Path 'runners' $id)
         WorkDirectory = Join-Path $ops.stateRoot (Join-Path 'work' $id)
+        WorkspaceSlot = $null
+        WorkspaceLease = $null
         TaskName = "DSH-Agent-Automation-$id"
         LogFile = Join-Path $ops.logsRoot "$id-supervisor.log"
         FaultFile = Join-Path $ops.stateRoot (Join-Path 'faults' "$id.restart")
@@ -705,6 +836,10 @@ function Get-RunnerInstances {
   foreach ($instance in $instances) {
     Assert-PathInside -Child $instance.RunnerRoot -Parent $ops.installRoot -Name "$($instance.Id) runner root"
     Assert-PathInside -Child $instance.WorkDirectory -Parent $ops.stateRoot -Name "$($instance.Id) work directory"
+    if ($instance.WorkspaceSlot) {
+      Assert-RegisteredReviewWorkspace -Path $instance.WorkspaceSlot -StateRoot $ops.stateRoot -Instances @($instances) | Out-Null
+      Assert-PathInside -Child $instance.WorkspaceLease -Parent $ops.stateRoot -Name "$($instance.Id) workspace lease"
+    }
   }
   return @($instances)
 }
@@ -819,6 +954,8 @@ function New-InstallationPlan {
         $id = "$($target.idPrefix)-$roleName$suffix"
         $runnerRoot = Join-InstallationPlanPath -Root $ops.installRoot -Child "runners/$id" -Platform $profile
         $workDirectory = Join-InstallationPlanPath -Root $ops.stateRoot -Child "work/$id" -Platform $profile
+        $workspaceSlot = if ($roleName -eq 'review') { Join-InstallationPlanPath -Root $ops.stateRoot -Child "workspaces/$id" -Platform $profile } else { $null }
+        $workspaceLease = if ($roleName -eq 'review') { Join-InstallationPlanPath -Root $ops.stateRoot -Child "workspace-leases/$id.json" -Platform $profile } else { $null }
         $serviceName = if ($profile.serviceManager -eq 'scheduled-task') { "DSH-Agent-Automation-$id" } else { "dsh-agent-automation-$id".ToLowerInvariant() }
         $instances.Add([pscustomobject][ordered]@{
           id = $id
@@ -831,6 +968,8 @@ function New-InstallationPlan {
           labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($role.labels + @($id)) -Platform $profile)
           runnerRoot = $runnerRoot
           workDirectory = $workDirectory
+          workspaceSlot = $workspaceSlot
+          workspaceLease = $workspaceLease
           serviceManager = $profile.serviceManager
           serviceName = $serviceName
           taskName = $serviceName
@@ -860,6 +999,8 @@ function New-InstallationPlan {
         labels = @(Get-InstallationPlanLabels -ConfiguredLabels @($role.labels + @($id)) -Platform $profile)
         runnerRoot = $runnerRoot
         workDirectory = $workDirectory
+        workspaceSlot = $null
+        workspaceLease = $null
         serviceManager = $profile.serviceManager
         serviceName = $serviceName
         taskName = $serviceName
@@ -898,6 +1039,10 @@ function New-InstallationPlan {
     [pscustomobject][ordered]@{ id = 'logs-root'; path = $ops.logsRoot },
     [pscustomobject][ordered]@{ id = 'faults-root'; path = (Join-InstallationPlanPath -Root $ops.stateRoot -Child 'faults' -Platform $profile) }
   )
+  if (@($instances | Where-Object role -eq 'review').Count) {
+    $paths += [pscustomobject][ordered]@{ id = 'review-workspaces-root'; path = (Join-InstallationPlanPath -Root $ops.stateRoot -Child 'workspaces' -Platform $profile) }
+    $paths += [pscustomobject][ordered]@{ id = 'review-workspace-leases-root'; path = (Join-InstallationPlanPath -Root $ops.stateRoot -Child 'workspace-leases' -Platform $profile) }
+  }
   $services = @($instances | ForEach-Object { [pscustomobject][ordered]@{ id = $_.id; kind = 'github-runner'; manager = $_.serviceManager; name = $_.serviceName; start = -not [bool]$NoStart } })
   if ([bool]$ops.dshWebHost.enabled) {
     $dshServiceName = if ($profile.serviceManager -eq 'scheduled-task') { Get-DshWebTaskName } else { 'dsh-agent-automation-dsh-web' }
@@ -2074,6 +2219,8 @@ function Invoke-OperationsSelfTest {
 Export-ModuleMember -Function @(
   'Get-JsonPropertyLineMap', 'Get-ConfigurationExplanation',
   'Write-OperationLog', 'Write-OperationHeartbeat', 'Test-OperationHeartbeat', 'Resolve-OperationPath', 'Assert-PathInside', 'Get-RepositoryKey',
+  'Get-ReviewWorkspacePaths', 'Assert-RegisteredReviewWorkspace',
+  'Get-ReviewWorkspaceLeaseState', 'Remove-StaleReviewWorkspaceLease', 'Get-ReviewWorkspaceExplanation',
   'Read-OperationsConfig', 'Get-RunnerInstances', 'Get-RunnerInstance',
   'Resolve-InstallationPlatform', 'New-InstallationPlan', 'ConvertTo-InstallationPlanJson',
   'Initialize-PrivateDirectory', 'Test-PrivateDirectoryAcl', 'Assert-ManagedDirectoryForRemoval',

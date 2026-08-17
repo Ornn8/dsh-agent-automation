@@ -10,9 +10,16 @@ Import-Module (Join-Path $PSScriptRoot 'Automation.Operations.psm1') -Force
 $loaded = Read-OperationsConfig -Configuration $Configuration
 $instance = Get-RunnerInstance -Loaded $loaded -InstanceId $InstanceId
 $env:DSH_AGENT_CONFIG = $loaded.Path
+$env:AGENT_REPLICA_ID = $instance.Id
 $restartAttempt = 0
 
 while ($true) {
+  if ($instance.Role -eq 'review') {
+    $leaseState = Remove-StaleReviewWorkspaceLease -Instance $instance -StateRoot $loaded.Operations.stateRoot
+    if ($leaseState.State -eq 'reclaimed') {
+      Write-OperationLog -Message "$($instance.Id) reclaimed stale review workspace lease: $($leaseState.Detail)" -Level WARN -LogFile $instance.LogFile
+    }
+  }
   $startedAt = [DateTime]::UtcNow
   if (-not (Test-Path -LiteralPath (Join-Path $instance.RunnerRoot 'run.cmd'))) { throw "Runner is not installed for $($instance.Id)" }
   if (Test-Path -LiteralPath $instance.FaultFile) {
@@ -30,6 +37,12 @@ while ($true) {
   }
   try {
     while (-not $process.HasExited) {
+      if ($instance.Role -eq 'review') {
+        $leaseState = Remove-StaleReviewWorkspaceLease -Instance $instance -StateRoot $loaded.Operations.stateRoot
+        if ($leaseState.State -eq 'reclaimed') {
+          Write-OperationLog -Message "$($instance.Id) reclaimed stale review workspace lease: $($leaseState.Detail)" -Level WARN -LogFile $instance.LogFile
+        }
+      }
       Write-OperationHeartbeat -Operations $loaded.Operations -InstanceId $instance.Id -RootPid $process.Id
       Start-Sleep -Seconds 5
       if (Test-Path -LiteralPath $instance.FaultFile) {
