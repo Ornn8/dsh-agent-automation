@@ -103,6 +103,9 @@ function visibleSessionFetch(reason = 'completed', automationResult, finalMessag
       }
       case 'session.selectModel': return rpcResponse(request, { selected: request.payload })
       case 'session.rename': return rpcResponse(request, { title: request.payload.title, seq: 1 })
+      case 'commands/execute': return rpcResponse(request, {
+        commandId: 'command-permission', result: { kind: 'success', text: 'Permission preset selected.' },
+      })
       case 'skill.list': return rpcResponse(request, { skills: [
         { name: AGENT_ISSUE_SKILL }, { name: AGENT_REPAIR_SKILL }, { name: AGENT_REVIEW_SKILL },
       ] })
@@ -169,12 +172,14 @@ test('DSH Web session is titled, prompted once, and observed to completion', asy
   })
   assert.deepEqual(created, { sessionId: identity.sessionId })
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.selectModel', 'session.rename', 'session.prompt', 'skill.list', 'session.history', 'session.prompt',
+    'session.create', 'session.selectModel', 'session.rename', 'commands/execute', 'skill.list', 'session.history', 'session.prompt',
     'session.list', 'session.list', 'session.history',
   ])
   assert.deepEqual(fake.calls[0].payload, { cwd: 'F:\\runner\\checkout', sessionId: identity.sessionId, agentPreset: 'standard' })
   assert.deepEqual(fake.calls[1].payload, { sessionId: identity.sessionId, ...dshModel })
-  assert.equal(fake.calls[3].payload.content[0].text, '/permission danger-full-access')
+  assert.deepEqual(fake.calls[3].payload, {
+    args: { agentId: identity.sessionId, line: '/permission danger-full-access' },
+  })
   assert.equal(fake.calls[3].rpcId, identity.permissionRpcId)
   assert.deepEqual(fake.calls[4].payload, { sessionId: identity.sessionId })
   assert.equal(fake.calls[6].payload.content[0].text, 'Do the work.')
@@ -261,7 +266,7 @@ test('DSH Web fails before prompting when its work plugin is absent', async () =
     modelSelection: dshModel, ...dshPresets, fetchImpl, sleep: async () => undefined,
   }), /cannot invoke required skill github-issue-work/)
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.selectModel', 'session.rename', 'session.prompt', 'skill.list', 'session.cancel',
+    'session.create', 'session.selectModel', 'session.rename', 'commands/execute', 'skill.list', 'session.cancel',
   ])
 })
 
@@ -342,10 +347,11 @@ test('DSH permission preset failure stops before skill invocation or work prompt
   const fake = visibleSessionFetch()
   const fetchImpl = async (url, options) => {
     const request = JSON.parse(options.body)
-    if (request.method === 'session.prompt'
-      && request.payload.content[0]?.text === '/permission danger-full-access') {
+    if (request.method === 'commands/execute') {
       fake.calls.push(request)
-      return rpcResponse(request, { code: 'command-error', message: 'unknown permission preset' }, false)
+      return rpcResponse(request, {
+        commandId: 'command-permission', result: { kind: 'error', text: 'unknown permission preset' },
+      })
     }
     return fake.fetchImpl(url, options)
   }
@@ -353,9 +359,29 @@ test('DSH permission preset failure stops before skill invocation or work prompt
     baseUrl: 'http://127.0.0.1:3080', taskId: 'select-permission', cwd: 'F:\\runner\\checkout',
     title: 'Select permission', prompt: 'Work.', modelSelection: dshModel, ...dshPresets,
     requiredSkill: AGENT_ISSUE_SKILL, fetchImpl, sleep: async () => undefined,
-  }), /session\.prompt failed: command-error/)
+  }), /did not apply permission preset danger-full-access: unknown permission preset/)
   assert.deepEqual(fake.calls.map(call => call.method), [
-    'session.create', 'session.selectModel', 'session.rename', 'session.prompt', 'session.cancel',
+    'session.create', 'session.selectModel', 'session.rename', 'commands/execute', 'session.cancel',
+  ])
+})
+
+test('DSH permission selection rejects a Host without command admission before work starts', async () => {
+  const fake = visibleSessionFetch()
+  const fetchImpl = async (url, options) => {
+    const request = JSON.parse(options.body)
+    if (request.method === 'commands/execute') {
+      fake.calls.push(request)
+      return rpcResponse(request, undefined)
+    }
+    return fake.fetchImpl(url, options)
+  }
+  await assert.rejects(runDshWebSession({
+    baseUrl: 'http://127.0.0.1:3080', taskId: 'missing-command', cwd: 'F:\\runner\\checkout',
+    title: 'Missing command', prompt: 'Work.', modelSelection: dshModel, ...dshPresets,
+    requiredSkill: AGENT_ISSUE_SKILL, fetchImpl, sleep: async () => undefined,
+  }), /did not apply permission preset danger-full-access/)
+  assert.deepEqual(fake.calls.map(call => call.method), [
+    'session.create', 'session.selectModel', 'session.rename', 'commands/execute', 'session.cancel',
   ])
 })
 
@@ -407,10 +433,10 @@ test('a lost prompt response resumes the one durable DSH prompt instead of dupli
     }
     if (request.method === 'session.selectModel') return rpcResponse(request, { selected: true })
     if (request.method === 'session.rename') return rpcResponse(request, { title: request.payload.title, seq: 1 })
+    if (request.method === 'commands/execute') {
+      return rpcResponse(request, { commandId: 'command-permission', result: { kind: 'success' } })
+    }
     if (request.method === 'session.prompt') {
-      if (request.payload.content[0]?.text === '/permission danger-full-access') {
-        return rpcResponse(request, { accepted: true, command: { kind: 'success' } })
-      }
       promptRpcId = request.rpcId
       recorded = true
       const error = new Error('socket reset after admission')
@@ -436,7 +462,7 @@ test('a lost prompt response resumes the one durable DSH prompt instead of dupli
     fetchImpl, sleep: async () => undefined,
   })
   assert.equal(result.reason, 'completed')
-  assert.equal(methods.filter(method => method === 'session.prompt').length, 2)
+  assert.equal(methods.filter(method => method === 'session.prompt').length, 1)
 })
 
 test('a bounded transient DSH failure remains classified for the durable dead-letter', async () => {
