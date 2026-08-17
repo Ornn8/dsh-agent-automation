@@ -98,7 +98,12 @@ export function createAgentAdapters({
             output: result.finalMessage,
           }
         } finally {
-          await rm(taskCwd, { recursive: true, force: true })
+          await rm(taskCwd, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100,
+          })
         }
       },
       health: async ({ worker }) => {

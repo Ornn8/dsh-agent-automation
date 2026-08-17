@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -66,6 +67,7 @@ import {
   reviewTurnPermissions,
   reviewTaskIdsToArchive,
   reviewThreadConfig,
+  stopCodexAppServer,
 } from '../src/codex-session.mjs'
 import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
 import { parseAgentWork } from '../src/agent-work.mjs'
@@ -786,6 +788,53 @@ test('review uses one controller-owned slot and verifies the exact pair before t
   assert.match(source, /requiredEnv\('AGENT_REPLICA_ID'\)/)
   assert.match(source, /taskProjectCwd = reviewCheckout/)
   assert.match(source, /projectCwd: taskProjectCwd/)
+})
+
+test('Codex review waits for its App Server to release workspace handles', async () => {
+  const child = new EventEmitter()
+  child.exitCode = null
+  child.signalCode = null
+  child.stdin = {
+    destroyed: false,
+    writableEnded: false,
+    end() {
+      this.writableEnded = true
+      setImmediate(() => {
+        child.exitCode = 0
+        child.emit('exit', 0, null)
+      })
+    },
+  }
+  child.kill = () => assert.fail('graceful App Server shutdown must not be killed')
+
+  await stopCodexAppServer(child, { gracefulExitMs: 100, forcedExitMs: 100 })
+
+  assert.equal(child.stdin.writableEnded, true)
+  assert.equal(child.exitCode, 0)
+})
+
+test('Codex review bounds App Server shutdown before cleanup', async () => {
+  const child = new EventEmitter()
+  child.exitCode = null
+  child.signalCode = null
+  child.stdin = {
+    destroyed: false,
+    writableEnded: false,
+    end() { this.writableEnded = true },
+  }
+  let kills = 0
+  child.kill = () => {
+    kills += 1
+    setImmediate(() => {
+      child.signalCode = 'SIGTERM'
+      child.emit('exit', null, 'SIGTERM')
+    })
+  }
+
+  await stopCodexAppServer(child, { gracefulExitMs: 1, forcedExitMs: 100 })
+
+  assert.equal(kills, 1)
+  assert.equal(child.signalCode, 'SIGTERM')
 })
 
 test('base reconciliation updates a behind default-branch pull request before review', async () => {
