@@ -28,6 +28,7 @@ import {
   acquireReviewWorkspace,
   prepareReviewWorkspace,
   releaseReviewWorkspace,
+  reviewReplicaIdForRunner,
 } from './review-workspace.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
@@ -113,7 +114,11 @@ if (reviewStage.procedure !== AGENT_REVIEW_SKILL) {
 }
 const workerId = resolveRepositoryWorker(config, repository, reviewStage.role)
 const expectedBaseRef = pullRequest.baseRefName
-const replicaId = requiredEnv('AGENT_REPLICA_ID')
+const replicaId = await reviewReplicaIdForRunner({
+  stateRoot: config.operations.stateRoot,
+  runnerName: requiredEnv('RUNNER_NAME'),
+  repository,
+})
 const workspace = await acquireReviewWorkspace({
   stateRoot: config.operations.stateRoot,
   replicaId,

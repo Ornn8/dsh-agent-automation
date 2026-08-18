@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
+  registeredReviewReplica,
   registeredReviewWorkspace,
   reviewWorkspaceLeaseDecision,
   reviewWorkspacePaths,
@@ -37,6 +38,34 @@ test('only a manifest-registered review instance authorizes its derived slot', (
     stateRoot,
     replicaId,
   }), /stateRoot/)
+})
+
+test('the selected GitHub runner resolves to exactly one repository-authorized review replica', () => {
+  const runnerName = 'review-owner-repository-host'
+  const manifest = {
+    schemaVersion: 1,
+    stateRoot,
+    instances: [{
+      id: replicaId,
+      role: 'review',
+      repository: 'owner/repository',
+      registrationKind: 'repository',
+      runnerName,
+      taskEnabled: true,
+    }],
+  }
+  assert.equal(registeredReviewReplica({
+    manifest, stateRoot, runnerName, repository: 'owner/repository',
+  }), replicaId)
+  assert.throws(() => registeredReviewReplica({
+    manifest, stateRoot, runnerName, repository: 'owner/other',
+  }), /registered review runner/)
+  assert.throws(() => registeredReviewReplica({
+    manifest: { ...manifest, instances: [...manifest.instances, ...manifest.instances] },
+    stateRoot,
+    runnerName,
+    repository: 'owner/repository',
+  }), /registered review runner/)
 })
 
 test('lease decisions hold live work and reclaim bounded stale work', () => {
