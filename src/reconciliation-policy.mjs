@@ -4,6 +4,14 @@ export function needsDefaultBranchUpdate({ defaultBranch, defaultBranchHead, mer
     && mergeBaseSha !== defaultBranchHead
 }
 
+/** Return the Governor transition for one exact default-branch target. */
+export function baseReconcileTransition(defaultBranchHead) {
+  if (!/^[0-9a-f]{40}$/i.test(defaultBranchHead || '')) {
+    throw new Error('Default-branch head must be a full commit SHA')
+  }
+  return `base-reconcile:${defaultBranchHead.toLowerCase()}`
+}
+
 /** Return whether a default-branch change requires a fresh exact-pair review. */
 export function needsExactReview({ repository, defaultBranch, pullRequest, reviewProof }) {
   if (pullRequest.draft

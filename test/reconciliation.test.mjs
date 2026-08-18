@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { needsDefaultBranchUpdate, needsExactReview } from '../src/reconciliation-policy.mjs'
+import { baseReconcileTransition, needsDefaultBranchUpdate, needsExactReview } from '../src/reconciliation-policy.mjs'
 
 test('base reconciliation compares immutable commits instead of transient mergeability', () => {
   const currentBase = 'b'.repeat(40)
@@ -17,6 +17,12 @@ test('base reconciliation compares immutable commits instead of transient mergea
   assert.equal(needsDefaultBranchUpdate({
     defaultBranch: 'master', defaultBranchHead: currentBase, mergeBaseSha: currentBase, pullRequest,
   }), false)
+})
+
+test('base reconciliation identity changes only when the target default head changes', () => {
+  assert.equal(baseReconcileTransition('A'.repeat(40)), `base-reconcile:${'a'.repeat(40)}`)
+  assert.equal(baseReconcileTransition('b'.repeat(40)), `base-reconcile:${'b'.repeat(40)}`)
+  assert.throws(() => baseReconcileTransition('main'), /full commit SHA/)
 })
 
 test('base reconciliation reviews only a default-branch pair without trusted exact-pair evidence', () => {
