@@ -4,6 +4,7 @@ import { lstat, open, readFile, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { parseJson, run } from './common.mjs'
 import {
+  registeredReviewReplica,
   registeredReviewWorkspace,
   reviewWorkspaceLeaseDecision,
 } from './review-workspace-policy.mjs'
@@ -63,6 +64,14 @@ function defaultProcessAlive(pid) {
 function hasErrorCode(error, code) {
   return typeof error === 'object' && error !== null && 'code' in error
     && /** @type {{code?: unknown}} */ (error).code === code
+}
+
+/** Resolve the selected GitHub runner to its controller-owned review slot. */
+/** @param {{stateRoot: string, runnerName: string, repository: string}} input @returns {Promise<string>} */
+export async function reviewReplicaIdForRunner({ stateRoot, runnerName, repository }) {
+  const manifestPath = join(stateRoot, 'install-manifest.json')
+  const manifest = parseJson(await readFile(manifestPath, 'utf8'), 'install manifest')
+  return registeredReviewReplica({ manifest, stateRoot, runnerName, repository })
 }
 
 /** @param {string} stateRoot @param {string} replicaId @returns {Promise<ReviewWorkspace>} */

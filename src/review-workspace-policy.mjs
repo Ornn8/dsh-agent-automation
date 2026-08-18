@@ -52,6 +52,34 @@ export function registeredReviewWorkspace({ manifest, stateRoot, replicaId }) {
   return reviewWorkspacePaths(stateRoot, replicaId)
 }
 
+/** Resolve the exact installed review replica selected by the GitHub runner. */
+/**
+ * @param {{manifest: {schemaVersion?: number, stateRoot?: string, instances?: Array<{id?: string, role?: string, repository?: string, registrationKind?: string, runnerName?: string, taskEnabled?: boolean}>}, stateRoot: string, runnerName: string, repository: string}} input
+ */
+export function registeredReviewReplica({ manifest, stateRoot, runnerName, repository }) {
+  if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.instances)) {
+    throw new Error('Install manifest is missing or invalid')
+  }
+  if (typeof manifest.stateRoot !== 'string'
+    || !samePath(resolve(manifest.stateRoot), resolve(stateRoot))) {
+    throw new Error('Install manifest stateRoot does not match the runner configuration')
+  }
+  if (typeof runnerName !== 'string' || !runnerName.trim() || /[\r\n]/.test(runnerName)) {
+    throw new Error('GitHub runner name must be non-empty one-line text')
+  }
+  if (typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+    throw new Error('Review runner repository must be owner/name')
+  }
+  const matches = manifest.instances.filter(instance => instance?.runnerName === runnerName
+    && instance.role === 'review' && instance.taskEnabled === true
+    && (instance.registrationKind === 'organization' || instance.repository === repository))
+  if (matches.length !== 1 || typeof matches[0].id !== 'string'
+    || !REVIEW_REPLICA_PATTERN.test(matches[0].id)) {
+    throw new Error(`${runnerName} is not one enabled registered review runner for ${repository}`)
+  }
+  return matches[0].id
+}
+
 /** Decide whether an existing local lease must remain held or can be reclaimed. */
 /**
  * @param {{lease: {expiresAt?: string}, now?: number, pidAlive: boolean, workRequestTerminal?: boolean, workRequestSuperseded?: boolean}} input
