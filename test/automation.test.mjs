@@ -862,6 +862,8 @@ test('base reconciliation updates a behind default-branch pull request before re
   const workflow = await readFile(new URL('../.github/workflows/reconcile-reviews.yml', import.meta.url), 'utf8')
   assert.match(source, /pulls\/\$\{pullRequest\.number\}\/update-branch/)
   assert.match(source, /needsDefaultBranchUpdate/)
+  assert.match(source, /baseReconcileTransition\(defaultBranchHead\)/)
+  assert.match(source, /budgetTransition: 'base-reconcile'/)
   assert.doesNotMatch(source, /mergeable_state === 'behind'/)
   assert.match(source, /expected_head_sha=/)
   assert.match(source, /waitForUpdatedPair/)

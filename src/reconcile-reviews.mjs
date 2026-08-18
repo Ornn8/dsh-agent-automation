@@ -7,7 +7,7 @@ import {
   run,
   verifyGithubIdentity,
 } from './common.mjs'
-import { needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
+import { baseReconcileTransition, needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
 import { hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import {
   governorBudgetDecision,
@@ -222,9 +222,11 @@ for (const summary of summaries.flat()) {
     throw new Error(`Pull request #${summary.number} comparison did not return a merge-base commit`)
   }
   if (needsDefaultBranchUpdate({ defaultBranch, defaultBranchHead, mergeBaseSha, pullRequest })) {
-    const governed = await governTransition(pullRequest, 'base-reconcile', {
+    const transition = baseReconcileTransition(defaultBranchHead)
+    const governed = await governTransition(pullRequest, transition, {
       limit: 3,
       workIdentity: `branch:${pullRequest.head.ref}`,
+      budgetTransition: 'base-reconcile',
     })
     if (!governed.execute) continue
     await run(githubExecutable, [
@@ -232,7 +234,7 @@ for (const summary of summaries.flat()) {
       '-f', `expected_head_sha=${pullRequest.head.sha}`,
     ], { env: githubEnvironment })
     await waitForUpdatedPair(pullRequest)
-    await markGovernorApplied(pullRequest, 'base-reconcile', governed)
+    await markGovernorApplied(pullRequest, transition, governed)
     reconciled += 1
     process.stdout.write(`Updated pull request #${pullRequest.number} from ${defaultBranch}; GitHub will deliver its new exact pair to CI and review listeners.\n`)
     continue
