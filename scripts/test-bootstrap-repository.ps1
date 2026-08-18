@@ -142,7 +142,8 @@ try {
   Assert-True ($issuesWorkflow -match 'requested_issue_number:.*github\.event\.issue\.number.*github\.event\.client_payload\.issue_number') 'Agent Issues does not preserve the exact Issue across independent wake observations.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
   Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR CI Repair, Agent PR Review\]\r?$') 'Agent Recovery must include each trusted model-backed entry workflow.'
-  Assert-True ($recoveryWorkflow -match [Regex]::Escape('contains(fromJSON(''["failure", "cancelled", "timed_out", "startup_failure", "stale"]''), github.event.workflow_run.conclusion)')) 'Agent Recovery must retain every terminal infrastructure conclusion.'
+  Assert-True ($recoveryWorkflow -match '(?m)^    if: always\(\)\r?$') 'Agent Recovery must run the pinned controller for every workflow completion.'
+  Assert-True (-not ($recoveryWorkflow -match 'github\.event\.workflow_run\.conclusion')) 'Agent Recovery must leave terminal-failure classification to the pinned controller.'
   foreach ($permission in @('actions: read', 'checks: read', 'contents: write', 'issues: write', 'pull-requests: write')) {
     Assert-True ($recoveryWorkflow -match "(?m)^  $([Regex]::Escape($permission))\r?$") "Agent Recovery omitted caller permission $permission."
   }
