@@ -1,8 +1,6 @@
 {
   "version": 2,
-  "stableRevision": "69cb3077fd000c3bfbd8b8e3214616cbf92f3054",
-  "pendingRevisions": [
-    "e0a382935476711188f9e64fc0b8c785e02df069"
-  ],
-  "lastPromotionDay": "2026-08-17"
+  "stableRevision": "e0a382935476711188f9e64fc0b8c785e02df069",
+  "pendingRevisions": [],
+  "lastPromotionDay": "2026-08-18"
 }
