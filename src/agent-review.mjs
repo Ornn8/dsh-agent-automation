@@ -23,6 +23,7 @@ import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { reviewMarker } from './review-authority.mjs'
 import { reviewObservations } from './review-observations.mjs'
+import { agentFailureCode, classifyAgentFailure } from './failure-classification.mjs'
 import {
   acquireReviewWorkspace,
   prepareReviewWorkspace,
@@ -88,6 +89,7 @@ async function writeOutput(key, value) {
   await appendFile(requiredEnv('GITHUB_OUTPUT'), `${key}=${value}\n`)
 }
 
+async function reviewPullRequest() {
 const pullRequest = await ghJson([
   'pr', 'view', String(pullRequestNumber), '--repo', repository,
   '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,title,url',
@@ -302,4 +304,15 @@ if (review.verdict === 'block') {
 }
 } finally {
   await releaseReviewWorkspace(workspace)
+}
+}
+
+try {
+  await reviewPullRequest()
+} catch (error) {
+  const classified = classifyAgentFailure(error)
+  const failureClass = classified === 'task' ? 'host' : classified
+  await writeOutput('failure_class', failureClass)
+  await writeOutput('failure_code', agentFailureCode(error, failureClass))
+  throw error
 }

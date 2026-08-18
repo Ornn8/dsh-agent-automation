@@ -24,6 +24,7 @@ import {
   recordFaultAttempt,
 } from './fault-record.mjs'
 import { parseFaultProjection } from './fault-projection.mjs'
+import { trustedFaultProjectionRun } from './fault-observation.mjs'
 import { observeFaultHealth, parseFaultHealthState } from './fault-health.mjs'
 import { parseMaintenanceProfile } from './maintenance-profile.mjs'
 import { parseReviewMessage } from './review-protocol.mjs'
@@ -81,14 +82,10 @@ async function appendRecord(repository, issueNumber, record) {
 }
 
 async function verifyProjection(issue, projection) {
-  if (issue.user?.login !== 'github-actions[bot]' || projection.repository !== issue.repository_url?.split('/repos/').at(-1)) return false
   const runValue = await ghJson(['api', `repos/${projection.repository}/actions/runs/${projection.projectionRunId}`], 'fault projection workflow run')
-  return runValue.repository?.full_name === projection.repository
-    && runValue.status === 'completed' && runValue.conclusion === 'success'
-    && runValue.event === 'workflow_run'
-    && runValue.referenced_workflows?.some(reference => reference.path
-      === `${projection.controllerRepository}/.github/workflows/recover-backlog.yml@${projection.controllerSha}`
-      && reference.sha === projection.controllerSha)
+  return trustedFaultProjectionRun({
+    issue, projection, run: runValue, trustedControllerRepository: controllerRepository,
+  })
 }
 
 async function localStateVersion(projection, healthGeneration) {

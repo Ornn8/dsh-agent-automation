@@ -92,6 +92,8 @@ jobs:
           PR_NUMBER: ${{ inputs.pull_request_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REVIEW_CHECK_ID: ${{ steps.review.outputs.review_check_id }}
+          REVIEW_FAILURE_CLASS: ${{ steps.review.outputs.failure_class }}
+          REVIEW_FAILURE_CODE: ${{ steps.review.outputs.failure_code }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/review-failure.mjs
 

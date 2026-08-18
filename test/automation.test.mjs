@@ -43,7 +43,7 @@ import {
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
 import { validateReviewFindings } from '../src/review-evidence.mjs'
-import { classifyAgentFailure, recordedFailureClass } from '../src/failure-classification.mjs'
+import { agentFailureCode, classifyAgentFailure, recordedFailureClass } from '../src/failure-classification.mjs'
 import {
   dshModelSelection,
   dshRpc,
@@ -778,6 +778,26 @@ test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispat
   assert.match(workflow, /pull-requests: write/)
 })
 
+test('review infrastructure faults are observed on hosted compute before bounded recovery runs', async () => {
+  const target = await readFile(new URL('../templates/target/.github/workflows/agent-recovery.yml', import.meta.url), 'utf8')
+  const observer = await readFile(new URL('../.github/workflows/observe-agent-fault.yml', import.meta.url), 'utf8')
+  const review = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
+  const failure = await readFile(new URL('../src/review-failure.mjs', import.meta.url), 'utf8')
+  assert.match(target, /uses: .*\/observe-agent-fault\.yml@/)
+  assert.doesNotMatch(target, /workflow_dispatch:/)
+  assert.match(target, /needs: observe/)
+  assert.match(target, /if: >-\r?\n\s+always\(\)/)
+  assert.match(observer, /runs-on: ubuntu-latest/)
+  for (const permission of ['actions: read', 'checks: read', 'contents: read', 'issues: write']) {
+    assert.match(observer, new RegExp(`^      ${permission}$`, 'm'))
+  }
+  assert.doesNotMatch(observer, /contents: write|pull-requests: write/)
+  assert.match(review, /writeOutput\('failure_class'/)
+  assert.match(review, /writeOutput\('failure_code'/)
+  assert.match(failure, /Failure class:/)
+  assert.match(failure, /Error code:/)
+})
+
 test('review uses one controller-owned slot and verifies the exact pair before the Agent reads it', async () => {
   const workflow = await readFile(new URL('../.github/workflows/agent-review.yml', import.meta.url), 'utf8')
   const source = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
@@ -879,8 +899,12 @@ test('agent failure classes separate backoff, infrastructure, protocol, and task
   assert.equal(classifyAgentFailure(reset), 'transport')
   assert.equal(classifyAgentFailure(new Error('Provider quota exceeded')), 'auth-quota')
   assert.equal(classifyAgentFailure(new Error('invalid RPC receipt')), 'protocol')
+  const workspaceError = new Error("EBUSY: resource busy or locked, rmdir 'review-slot'")
+  assert.equal(classifyAgentFailure(workspaceError), 'host')
+  assert.equal(agentFailureCode(workspaceError, 'host'), 'review-workspace-busy')
   assert.equal(classifyAgentFailure(new Error('Tests still fail')), 'task')
   assert.equal(recordedFailureClass('- Failure class: `transport`'), 'transport')
+  assert.equal(recordedFailureClass('- Failure class: `host`'), 'host')
 })
 
 test('unattended health combines a hosted queue watchdog, replica heartbeats, and real daily canaries', async () => {

@@ -10,16 +10,23 @@ if (!config.repositories.includes(repository)) throw new Error(`${repository} is
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) throw new Error('Invalid PR_NUMBER')
 
 const runUrl = requiredEnv('RUN_URL')
+const failureClass = process.env.REVIEW_FAILURE_CLASS?.trim() || 'host'
+const failureCode = process.env.REVIEW_FAILURE_CODE?.trim() || 'review-infrastructure-failure'
+if (!['transport', 'auth-quota', 'protocol', 'task', 'host', 'permissions'].includes(failureClass)
+  || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(failureCode)) {
+  throw new Error('Review failure identity is invalid')
+}
+const summary = `Agent review infrastructure did not return a verdict. Failure class: ${failureClass}. Error code: ${failureCode}.`
 const checkId = Number.parseInt(process.env.REVIEW_CHECK_ID || '', 10)
 if (Number.isSafeInteger(checkId) && checkId > 0) {
   await completeReviewCheck({
     ghExecutable: config.ghExecutable, repository, checkId, runUrl, conclusion: 'failure',
-    summary: 'Agent review infrastructure did not return a verdict.', env: githubEnvironment,
+    summary, env: githubEnvironment,
   })
 } else {
   await failReviewCheck({
     ghExecutable: config.ghExecutable, repository, head, runUrl,
-    summary: 'Agent review infrastructure did not return a verdict.', env: githubEnvironment,
+    summary, env: githubEnvironment,
   })
 }
 
