@@ -2,6 +2,7 @@ import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './com
 import {
   evaluateLanding,
   hasTrustedExactReviewRun,
+  normalizeMergeableStatus,
   reviewRunIdFromCheckRun,
 } from './landing-policy.mjs'
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
@@ -46,10 +47,11 @@ if (pullRequestNumber === 0) {
 }
 
 async function readPullRequest() {
-  return ghJson([
+  const pullRequest = await ghJson([
     'pr', 'view', String(pullRequestNumber), '--repo', repository,
     '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,mergeStateStatus,mergeable,url,body,labels,closingIssuesReferences',
   ], 'pull request for landing')
+  return { ...pullRequest, mergeable: normalizeMergeableStatus(pullRequest.mergeable) }
 }
 
 async function closeLinkedIssues(pullRequest) {
