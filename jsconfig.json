@@ -11,6 +11,7 @@
   },
   "files": [
     "src/controller-mutation-marker.mjs",
+    "src/advancement-policy.mjs",
     "src/landing-policy.mjs",
     "src/machine-config.mjs",
     "src/review-authority.mjs",
