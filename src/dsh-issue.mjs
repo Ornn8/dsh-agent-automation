@@ -106,7 +106,8 @@ function statusBody(status, branch, detail, failureClass) {
     '_The selected change Worker owns implementation, validation, commits, pushes, and the pull request._',
     '',
     controllerMutationMarker({
-      version: 1,
+      version: 2,
+      author: markerAuthor,
       operation: 'change-worker',
       repository,
       subject: { type: 'issue', number: issueNumber },

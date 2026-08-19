@@ -9,18 +9,11 @@ export async function trustedWorkerIdentity(comment, subject, operation, reposit
   try {
     const record = await trustedControllerMutation({
       comment,
-      markerAuthor: comment.user.login,
       expectedRepository: repository,
       expectedSubject: subject,
       loadRun,
     })
     if (record.operation !== operation) return null
-    const runId = Number.parseInt(/\/actions\/runs\/(\d+)/.exec(record.runUrl)?.[1] || '', 10)
-    const run = await loadRun(runId)
-    const login = comment.user.login.toLowerCase()
-    const actors = [run?.actor?.login, run?.triggering_actor?.login]
-      .filter(value => typeof value === 'string').map(value => value.toLowerCase())
-    if (!actors.includes(login)) return null
     return parseWorkflowIdentity(comment.body)
   } catch {
     return null

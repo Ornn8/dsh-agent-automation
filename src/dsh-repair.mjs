@@ -196,7 +196,8 @@ async function upsertStatus(status, branch, detail, failureClass) {
     '_DSH owns the technical response and any implementation changes._',
     '',
     controllerMutationMarker({
-      version: 1,
+      version: 2,
+      author: markerAuthor,
       operation: 'repair-worker',
       repository,
       subject: { type: 'pull-request', number: pullRequestNumber },
