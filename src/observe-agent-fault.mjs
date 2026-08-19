@@ -1,6 +1,6 @@
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
 import { observeReviewInfrastructureFault, recordedReviewFailure } from './fault-observation.mjs'
-import { workflowFailureSignature } from './failure-classification.mjs'
+import { classifyControllerFailure, workflowFailureSignature } from './failure-classification.mjs'
 import { faultIdentity } from './fault-record.mjs'
 import { faultProjectionBody, faultProjectionMarker, parseFaultProjection } from './fault-projection.mjs'
 
@@ -102,5 +102,12 @@ const observation = {
   controllerSha,
 }
 delete observation.subject
+const classification = classifyControllerFailure({
+  run: sourceRun,
+  jobs: sourceJobs,
+  provenance: { trusted: true, workflow: '.github/workflows/agent-review.yml' },
+  failureClass: observation.failureClass,
+})
 const issueNumber = await upsertFault(observation)
+process.stdout.write(`Failure classification: ${JSON.stringify(classification)}\n`)
 process.stdout.write(`Fault observer projected review infrastructure fault as Issue #${issueNumber}.\n`)

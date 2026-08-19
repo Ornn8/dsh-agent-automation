@@ -43,7 +43,12 @@ import {
   parseReviewMessage,
 } from '../src/review-protocol.mjs'
 import { validateReviewFindings } from '../src/review-evidence.mjs'
-import { agentFailureCode, classifyAgentFailure, recordedFailureClass } from '../src/failure-classification.mjs'
+import {
+  agentFailureCode,
+  classifyAgentFailure,
+  classifyControllerFailure,
+  recordedFailureClass,
+} from '../src/failure-classification.mjs'
 import {
   dshModelSelection,
   dshRpc,
@@ -71,6 +76,7 @@ import {
 } from '../src/codex-session.mjs'
 import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
 import { parseAgentWork } from '../src/agent-work.mjs'
+import { intentionalReviewBlock } from '../src/recovery-policy.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -91,6 +97,154 @@ function dshFinalMessage(automationResult = {
 }) {
   return `本地会话结束。\n<!-- agent-automation-result\n${JSON.stringify(automationResult)}\n-->`
 }
+
+test('controller classifies a trusted review BLOCK as review with auditable evidence', () => {
+  const result = classifyControllerFailure({
+    run: {
+      name: 'Agent PR Review', event: 'pull_request_target', status: 'completed', conclusion: 'failure',
+    },
+    jobs: [{
+      name: 'agent-review / agent/review', conclusion: 'failure', steps: [
+        { name: 'Publish an independent change work request', conclusion: 'success' },
+        { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
+      ],
+    }],
+    provenance: { trusted: true, workflow: '.github/workflows/agent-review.yml' },
+  })
+
+  assert.deepEqual(result, {
+    category: 'review',
+    reason: 'trusted review worker published an intentional BLOCK',
+    evidence: {
+      workflow: 'Agent PR Review',
+      event: 'pull_request_target',
+      conclusion: 'failure',
+      failedJobs: [{
+        name: 'agent-review / agent/review',
+        conclusion: 'failure',
+        failedSteps: ['Preserve the blocking review conclusion'],
+      }],
+    },
+  })
+})
+
+test('controller classifies trusted required CI failure as implementation', () => {
+  const result = classifyControllerFailure({
+    run: { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'failure' },
+    jobs: [{ name: 'test', conclusion: 'failure', steps: [{ name: 'unit tests', conclusion: 'failure' }] }],
+    provenance: { trusted: true, workflow: '.github/workflows/ci.yml' },
+    failureClass: 'task',
+  })
+  assert.equal(result.category, 'implementation')
+  assert.equal(result.reason, 'trusted required CI reported a target failure')
+  assert.deepEqual(result.evidence.failedJobs[0].failedSteps, ['unit tests'])
+})
+
+test('controller classifies provider failure as ci-environment and protocol failure as orchestration', () => {
+  const provider = classifyControllerFailure({
+    run: { name: 'Agent PR Review', event: 'pull_request_target', status: 'completed', conclusion: 'failure' },
+    jobs: [{ name: 'agent-review / agent/review', conclusion: 'failure', steps: [{ name: 'Provider request', conclusion: 'failure' }] }],
+    provenance: { trusted: true, workflow: '.github/workflows/agent-review.yml' },
+    failureClass: 'transport',
+  })
+  assert.equal(provider.category, 'ci-environment')
+
+  const protocol = classifyControllerFailure({
+    run: { name: 'Agent Recovery', event: 'workflow_run', status: 'completed', conclusion: 'failure' },
+    jobs: [{ name: 'recovery', conclusion: 'failure', steps: [{ name: 'Parse receipt', conclusion: 'failure' }] }],
+    provenance: { trusted: true, workflow: '.github/workflows/agent-recovery.yml' },
+    failureClass: 'protocol',
+  })
+  assert.equal(protocol.category, 'orchestration')
+})
+
+test('controller reports unknown when trusted evidence cannot establish a category', () => {
+  const result = classifyControllerFailure({
+    run: { name: 'Custom Workflow', event: 'workflow_dispatch', status: 'completed', conclusion: 'failure' },
+    jobs: [{ name: 'custom', conclusion: 'failure', steps: [{ name: 'unknown', conclusion: 'failure' }] }],
+    provenance: { trusted: true, workflow: '.github/workflows/custom.yml' },
+  })
+  assert.equal(result.category, 'unknown')
+  assert.match(result.reason, /does not identify/)
+})
+
+test('controller does not classify untrusted failure claims', () => {
+  const result = classifyControllerFailure({
+    run: { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'failure' },
+    jobs: [{ name: 'test', conclusion: 'failure', steps: [] }],
+    provenance: { trusted: false, workflow: '.github/workflows/ci.yml' },
+    failureClass: 'task',
+  })
+  assert.equal(result.category, 'unknown')
+  assert.equal(result.reason, 'failure provenance is not trusted')
+})
+
+test('controller classifies no successful or nonterminal workflow as a failure', () => {
+  for (const run of [
+    { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'success' },
+    { name: 'CI', event: 'pull_request', status: 'queued', conclusion: null },
+    { name: 'CI', event: 'pull_request', status: 'in_progress', conclusion: null },
+    { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'cancelled' },
+  ]) {
+    const result = classifyControllerFailure({
+      run,
+      jobs: [{ name: 'test', conclusion: run.conclusion, steps: [] }],
+      provenance: { trusted: true, workflow: '.github/workflows/ci.yml' },
+      failureClass: 'task',
+    })
+    assert.equal(result.category, 'unknown')
+  }
+  const withoutFailures = classifyControllerFailure({
+    run: { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'failure' },
+    jobs: [{ name: 'test', conclusion: 'success', steps: [{ name: 'unit tests', conclusion: 'success' }] }],
+    provenance: { trusted: true, workflow: '.github/workflows/ci.yml' },
+    failureClass: 'task',
+  })
+  assert.equal(withoutFailures.category, 'unknown')
+})
+
+test('controller classifies a DSH task failure as implementation before workflow fallback', () => {
+  for (const workflow of ['.github/workflows/dsh-issue.yml', '.github/workflows/dsh-repair.yml']) {
+    const result = classifyControllerFailure({
+      run: { name: 'Agent work', event: 'repository_dispatch', status: 'completed', conclusion: 'failure' },
+      jobs: [{ name: 'agent', conclusion: 'failure', steps: [{ name: 'Execute task', conclusion: 'failure' }] }],
+      provenance: { trusted: true, workflow },
+      failureClass: 'task',
+    })
+    assert.equal(result.category, 'implementation')
+  }
+})
+
+test('controller bounds audit evidence and reports omitted jobs and steps', () => {
+  const jobs = Array.from({ length: 25 }, (_, jobIndex) => ({
+    name: `job-${jobIndex}-${'x'.repeat(300)}`,
+    conclusion: 'failure',
+    steps: Array.from({ length: 25 }, (_, stepIndex) => ({ name: `step-${stepIndex}-${'y'.repeat(300)}`, conclusion: 'failure' })),
+  }))
+  const result = classifyControllerFailure({
+    run: { name: 'CI' + 'z'.repeat(300), event: 'pull_request', status: 'completed', conclusion: 'failure' },
+    jobs,
+    provenance: { trusted: true, workflow: '.github/workflows/ci.yml' },
+    failureClass: 'task',
+  })
+  assert.equal(result.evidence.failedJobs.length, 20)
+  assert.equal(result.evidence.omittedJobCount, 5)
+  assert.equal(result.evidence.failedJobs[0].failedSteps.length, 20)
+  assert.equal(result.evidence.failedJobs[0].omittedStepCount, 5)
+  assert.ok(result.evidence.workflow.length <= 200)
+  assert.ok(result.evidence.failedJobs[0].name.length <= 200)
+  assert.ok(result.evidence.failedJobs[0].failedSteps[0].length <= 200)
+})
+
+test('controller review classification uses the shared intentional BLOCK authority', () => {
+  const run = { name: 'Agent PR Review', event: 'pull_request_target', status: 'completed', conclusion: 'failure' }
+  const jobs = [{ name: 'agent-review / agent/review', conclusion: 'failure', steps: [
+    { name: 'Publish an independent change work request', conclusion: 'success' },
+    { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
+  ] }]
+  assert.equal(intentionalReviewBlock(run, jobs), true)
+  assert.equal(classifyControllerFailure({ run, jobs, provenance: { trusted: true, workflow: '.github/workflows/agent-review.yml' } }).category, 'review')
+})
 
 function visibleSessionFetch(reason = 'completed', automationResult, finalMessage) {
   const calls = []
