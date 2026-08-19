@@ -307,3 +307,152 @@ Describe 'Effective configuration explanation' {
     @($missing | Where-Object Override) | Should -HaveCount 0
   }
 }
+
+Describe 'Owned process record removal races' {
+  It 'runs compare and delete under the same record lock' {
+    $operations = [pscustomobject]@{ stateRoot = (Join-Path $TestDrive 'process-record-state-locked') }
+    New-Item -ItemType Directory -Path (Join-Path $operations.stateRoot 'pids') -Force | Out-Null
+    $path = Get-OwnedProcessRecordPath -Operations $operations -InstanceId 'race'
+    [IO.File]::WriteAllText($path, '{"schemaVersion":1,"instanceId":"race","rootPid":42,"rootStartTimeUtc":"2026-01-02T03:04:05.0000000Z"}', [Text.UTF8Encoding]::new($false))
+    $state = @{ locked = $false; comparedUnderLock = $false; deletedUnderLock = $false }
+    $lock = {
+      param($Operations, $InstanceId, $Action)
+      $state.locked = $true
+      try { & $Action } finally { $state.locked = $false }
+    }.GetNewClosure()
+    $reader = {
+      param($Operations, $InstanceId)
+      $state.comparedUnderLock = $state.locked
+      [pscustomobject]@{ schemaVersion = 1; instanceId = 'race'; rootPid = 42; rootStartTimeUtc = '2026-01-02T03:04:05.0000000Z' }
+    }.GetNewClosure()
+    $remover = {
+      param($Path)
+      $state.deletedUnderLock = $state.locked
+      Remove-Item -LiteralPath $Path -Force
+    }.GetNewClosure()
+
+    { Remove-OwnedProcessRecord -Operations $operations -InstanceId 'race' -RootPid 42 -RecordReader $reader -RecordRemover $remover -LockInvoker $lock } | Should -Not -Throw
+    $state.comparedUnderLock | Should -BeTrue
+    $state.deletedUnderLock | Should -BeTrue
+    Test-Path -LiteralPath $path | Should -BeFalse
+  }
+
+  It 'passes the complete process identity to supervisor cleanup' {
+    foreach ($scriptName in @('runner-supervisor.ps1', 'dsh-web-host-supervisor.ps1')) {
+      $scriptPath = Join-Path $script:RepositoryRoot "ops\$scriptName"
+      $source = Get-Content -LiteralPath $scriptPath -Raw
+      $source | Should -Match '\$processStartTimeUtc = \$process\.StartTime\.ToUniversalTime\(\)\.ToString\('\''O'\''\)'
+      $source | Should -Match 'Remove-OwnedProcessRecord[^\r\n]+-RootPid \$process\.Id -RootStartTimeUtc \$processStartTimeUtc'
+    }
+  }
+
+  It 'serializes stale record replacement with the new owner identity' {
+    $operations = [pscustomobject]@{ stateRoot = (Join-Path $TestDrive 'process-record-state-write') }
+    New-Item -ItemType Directory -Path (Join-Path $operations.stateRoot 'pids') -Force | Out-Null
+    $path = Get-OwnedProcessRecordPath -Operations $operations -InstanceId 'stale'
+    [IO.File]::WriteAllText($path, '{"schemaVersion":1,"instanceId":"stale","rootPid":1,"rootStartTimeUtc":"2000-01-01T00:00:00.0000000Z"}', [Text.UTF8Encoding]::new($false))
+
+    { Write-OwnedProcessRecord -Operations $operations -InstanceId 'stale' -Process ([Diagnostics.Process]::GetCurrentProcess()) } | Should -Not -Throw
+    (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).rootPid | Should -Be ([Diagnostics.Process]::GetCurrentProcess().Id)
+  }
+
+  It 'treats a record removed during identity read as successful' {
+    $operations = [pscustomobject]@{ stateRoot = (Join-Path $TestDrive 'process-record-state-missing') }
+    New-Item -ItemType Directory -Path (Join-Path $operations.stateRoot 'pids') -Force | Out-Null
+    $path = Get-OwnedProcessRecordPath -Operations $operations -InstanceId 'race'
+    [IO.File]::WriteAllText($path, '{"schemaVersion":1,"instanceId":"race","rootPid":42,"rootStartTimeUtc":"2026-01-02T03:04:05.0000000Z"}', [Text.UTF8Encoding]::new($false))
+    $state = @{ removed = $false }
+    $reader = {
+      param($Operations, $InstanceId)
+      Remove-Item -LiteralPath $path -Force
+      return $null
+    }.GetNewClosure()
+    $remover = {
+      param($Path)
+      $state.removed = $true
+      Remove-Item -LiteralPath $Path -Force
+    }.GetNewClosure()
+
+    { Remove-OwnedProcessRecord -Operations $operations -InstanceId 'race' -RootPid 42 -RootStartTimeUtc '2026-01-02T03:04:05.0000000Z' -RecordReader $reader -RecordRemover $remover } | Should -Not -Throw
+    $state.removed | Should -BeFalse
+    Test-Path -LiteralPath $path | Should -BeFalse
+  }
+
+  It 'does not remove a replacement record with a different PID' {
+    $operations = [pscustomobject]@{ stateRoot = (Join-Path $TestDrive 'process-record-state-replaced') }
+    New-Item -ItemType Directory -Path (Join-Path $operations.stateRoot 'pids') -Force | Out-Null
+    $path = Get-OwnedProcessRecordPath -Operations $operations -InstanceId 'race'
+    [IO.File]::WriteAllText($path, '{"schemaVersion":1,"instanceId":"race","rootPid":42,"rootStartTimeUtc":"2026-01-02T03:04:05.0000000Z"}', [Text.UTF8Encoding]::new($false))
+    $state = @{ removed = $false }
+    $replacement = [ordered]@{
+      schemaVersion = 1
+      instanceId = 'race'
+      rootPid = 99
+      rootStartTimeUtc = '2026-01-02T03:04:06.0000000Z'
+    }
+    $reader = {
+      param($Operations, $InstanceId)
+      [IO.File]::WriteAllText($path, ($replacement | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+      return [pscustomobject]$replacement
+    }.GetNewClosure()
+    $remover = {
+      param($Path)
+      $state.removed = $true
+      Remove-Item -LiteralPath $Path -Force
+    }.GetNewClosure()
+
+    { Remove-OwnedProcessRecord -Operations $operations -InstanceId 'race' -RootPid 42 -RecordReader $reader -RecordRemover $remover } | Should -Not -Throw
+    $state.removed | Should -BeFalse
+    (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).rootPid | Should -Be 99
+  }
+
+  It 'does not remove a replacement record with a different process start time' {
+    $operations = [pscustomobject]@{ stateRoot = (Join-Path $TestDrive 'process-record-state-restarted') }
+    New-Item -ItemType Directory -Path (Join-Path $operations.stateRoot 'pids') -Force | Out-Null
+    $path = Get-OwnedProcessRecordPath -Operations $operations -InstanceId 'race'
+    [IO.File]::WriteAllText($path, '{"schemaVersion":1,"instanceId":"race","rootPid":42,"rootStartTimeUtc":"2026-01-02T03:04:05.0000000Z"}', [Text.UTF8Encoding]::new($false))
+    $state = @{ removed = $false }
+    $replacement = [ordered]@{
+      schemaVersion = 1
+      instanceId = 'race'
+      rootPid = 42
+      rootStartTimeUtc = '2026-01-02T03:04:06.0000000Z'
+    }
+    $reader = {
+      param($Operations, $InstanceId)
+      [IO.File]::WriteAllText($path, ($replacement | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+      return [pscustomobject]$replacement
+    }.GetNewClosure()
+    $remover = {
+      param($Path)
+      $state.removed = $true
+      Remove-Item -LiteralPath $Path -Force
+    }.GetNewClosure()
+
+    { Remove-OwnedProcessRecord -Operations $operations -InstanceId 'race' -RootPid 42 -RootStartTimeUtc '2026-01-02T03:04:05.0000000Z' -RecordReader $reader -RecordRemover $remover } | Should -Not -Throw
+    $state.removed | Should -BeFalse
+    (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).rootStartTimeUtc.ToUniversalTime().ToString('O') | Should -Be '2026-01-02T03:04:06.0000000Z'
+  }
+
+  It 'fails closed when a replacement record is invalid' {
+    $operations = [pscustomobject]@{ stateRoot = (Join-Path $TestDrive 'process-record-state-invalid') }
+    New-Item -ItemType Directory -Path (Join-Path $operations.stateRoot 'pids') -Force | Out-Null
+    $path = Get-OwnedProcessRecordPath -Operations $operations -InstanceId 'race'
+    [IO.File]::WriteAllText($path, '{"schemaVersion":1,"instanceId":"race","rootPid":42,"rootStartTimeUtc":"2026-01-02T03:04:05.0000000Z"}', [Text.UTF8Encoding]::new($false))
+    $state = @{ removed = $false }
+    $reader = {
+      param($Operations, $InstanceId)
+      [IO.File]::WriteAllText($path, '{"invalid":true}', [Text.UTF8Encoding]::new($false))
+      throw 'invalid replacement record'
+    }.GetNewClosure()
+    $remover = {
+      param($Path)
+      $state.removed = $true
+      Remove-Item -LiteralPath $Path -Force
+    }.GetNewClosure()
+
+    { Remove-OwnedProcessRecord -Operations $operations -InstanceId 'race' -RootPid 42 -RecordReader $reader -RecordRemover $remover } | Should -Throw 'invalid replacement record'
+    $state.removed | Should -BeFalse
+    Test-Path -LiteralPath $path | Should -BeTrue
+  }
+}

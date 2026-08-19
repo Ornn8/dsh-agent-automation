@@ -24,6 +24,7 @@ while ($true) {
   $startInfo.CreateNoWindow = $true
   foreach ($argument in @($hostConfig.arguments)) { [void]$startInfo.ArgumentList.Add([string]$argument) }
   $process = [Diagnostics.Process]::Start($startInfo)
+  $processStartTimeUtc = $process.StartTime.ToUniversalTime().ToString('O')
   try {
     Write-OwnedProcessRecord -Operations $ops -InstanceId 'dsh-web' -Process $process
   } catch {
@@ -46,7 +47,7 @@ while ($true) {
     }
   } finally {
     try { $process.Refresh() } catch { }
-    if ($process.HasExited) { Remove-OwnedProcessRecord -Operations $ops -InstanceId 'dsh-web' -RootPid $process.Id }
+    if ($process.HasExited) { Remove-OwnedProcessRecord -Operations $ops -InstanceId 'dsh-web' -RootPid $process.Id -RootStartTimeUtc $processStartTimeUtc }
   }
   $restartAttempt = if (([DateTime]::UtcNow - $startedAt).TotalMinutes -ge 5) { 1 } else { $restartAttempt + 1 }
   $delaySeconds = [Math]::Min(300, 5 * [Math]::Pow(2, [Math]::Min(6, $restartAttempt - 1)))
