@@ -90,7 +90,7 @@ export function recoveryDecision({ run, jobs, repository, trust, subject, curren
   const role = trustedFailedAgentRun({ run, repository, trust })
   if ((role !== subject?.type && !(role === 'review' && subject?.type === 'pull-request'))
     || !validSubject(subject, current, repository)) return { action: 'ignore' }
-  if (role === 'review' && intentionalReviewBlock(run, jobs)) return { action: 'ignore' }
+  if (role === 'review' && intentionalReviewJobBlock(jobs)) return { action: 'ignore' }
   const completed = (attempts || []).filter(value => Number.isSafeInteger(value?.attempt) && value.attempt > 0)
   const attempt = completed.reduce((max, value) => Math.max(max, value.attempt), 0)
   if (['auth-quota', 'protocol'].includes(failureClass)) {

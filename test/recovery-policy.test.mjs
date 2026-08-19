@@ -111,6 +111,23 @@ test('a trusted intentional review BLOCK never schedules a second review, while 
     run: reviewRun, repository, trust: { controllerRepository: controller, controllerSha: sha }, subject, current, attempts: [],
   }
   assert.deepEqual(recoveryDecision({ ...arguments_, jobs: intentionalBlock }), { action: 'ignore' })
+  assert.deepEqual(recoveryDecision({
+    ...arguments_,
+    run: { ...reviewRun, conclusion: 'cancelled' },
+    jobs: [...intentionalBlock, {
+      name: 'caller / unrelated', conclusion: 'cancelled', steps: [
+        { name: 'Unrelated caller step', conclusion: 'cancelled' },
+      ],
+    }],
+  }), { action: 'ignore' })
+  assert.deepEqual(recoveryDecision({
+    ...arguments_,
+    run: { ...reviewRun, conclusion: 'cancelled' },
+    jobs: [{ name: 'agent-review / agent/review', conclusion: 'cancelled', steps: [
+      { name: 'Review exact PR head with the configured Agent', conclusion: 'cancelled' },
+    ] }],
+    failureClass: 'transport',
+  }), { action: 'retry', attempt: 1, requestId: 'recovery-81-1', delaySeconds: 30 })
   assert.deepEqual(recoveryDecision({ ...arguments_, jobs: [{ ...intentionalBlock[0], steps: intentionalBlock[0].steps.filter(step => step.name !== 'Publish an independent change work request') }] }), {
     action: 'retry', attempt: 1, requestId: 'recovery-81-1',
   })
