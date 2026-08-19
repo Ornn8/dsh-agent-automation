@@ -59,6 +59,33 @@ test('removed entry points and cross-domain Worker reuse fail before an Adapter 
   assert.throws(() => resolve(reused), /cannot serve both review and maintenance trust domains/)
 })
 
+test('repository mappings cannot select the Controller itself, regardless of case', async () => {
+  const [defaults, input] = await Promise.all([
+    readJson('ops/config.defaults.json'), readJson('config.minimal.json'),
+  ])
+  const selfTarget = structuredClone(input)
+  selfTarget.operations.controller.repository = 'Ornn8/dsh-agent-automation'
+  selfTarget.operations.repositoryMappings[0].repository = 'ornn8/DSH-AGENT-AUTOMATION'
+
+  assert.throws(
+    () => resolveMachineConfig({ defaults, input: selfTarget, configurationPath: `${root}/config.minimal.json` }),
+    /repositoryMappings.*must not target the controller repository/i,
+  )
+})
+
+test('repository mappings continue to accept an ordinary product target', async () => {
+  const [defaults, input] = await Promise.all([
+    readJson('ops/config.defaults.json'), readJson('config.minimal.json'),
+  ])
+  const target = structuredClone(input)
+  target.operations.controller.repository = 'Ornn8/dsh-agent-automation'
+  target.operations.repositoryMappings[0].repository = 'Ornn8/shanyin-tea-commerce'
+
+  assert.doesNotThrow(() => resolveMachineConfig({
+    defaults, input: target, configurationPath: `${root}/config.minimal.json`,
+  }))
+})
+
 test('every public schema property is visible in the minimal file or configuration reference', async () => {
   const [schema, minimal, defaults, reference] = await Promise.all([
     readJson('ops/config.schema.json'),

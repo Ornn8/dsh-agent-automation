@@ -356,6 +356,15 @@ function Get-RepositoryKey {
   return "$slug-$hash"
 }
 
+function Get-CanonicalRepository {
+  param(
+    [Parameter(Mandatory)][string]$Repository,
+    [Parameter(Mandatory)][string]$Name
+  )
+  if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "$Name must be owner/repository" }
+  return $Repository.ToLowerInvariant()
+}
+
 function Get-ReviewWorkspacePaths {
   param(
     [Parameter(Mandatory)][string]$StateRoot,
@@ -627,6 +636,7 @@ function Read-OperationsConfig {
   Assert-PathInside -Child $ops.logsRoot -Parent $ops.stateRoot -Name 'operations.logsRoot'
   if (-not $AllowExamplePlaceholders) { Assert-PathInside -Child $configurationPath -Parent $ops.stateRoot -Name 'machine-local configuration' }
   if ($ops.controller.repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw 'operations.controller.repository must be owner/repository' }
+  $controllerRepositoryKey = Get-CanonicalRepository -Repository $ops.controller.repository -Name 'operations.controller.repository'
   if ($ops.controller.registrationScope -notin @('organization', 'target-repositories')) { throw 'registrationScope must be organization or target-repositories' }
   if ($ops.controller.registrationScope -eq 'organization' -and $ops.controller.organization -notmatch '^[A-Za-z0-9_.-]+$') { throw 'organization registration requires operations.controller.organization' }
 
@@ -698,9 +708,10 @@ function Read-OperationsConfig {
   $mappings = @($ops.repositoryMappings)
   if (-not $mappings.Count -or $mappings.Count -gt 32) { throw 'repositoryMappings must contain between 1 and 32 entries' }
   $mapped = @($mappings | ForEach-Object { $_.repository })
-  if (@($mapped | Select-Object -Unique).Count -ne $mapped.Count) { throw 'repositoryMappings must not contain duplicate repositories' }
+  $mappedKeys = @($mapped | ForEach-Object { Get-CanonicalRepository -Repository ([string]$_) -Name 'repositoryMappings.repository' })
+  if (@($mappedKeys | Where-Object { $_ -eq $controllerRepositoryKey }).Count) { throw 'repositoryMappings must not target the controller repository' }
+  if (@($mappedKeys | Select-Object -Unique).Count -ne $mappedKeys.Count) { throw 'repositoryMappings must not contain duplicate repositories' }
   if ($mapped.Count -gt 32) { throw 'repositoryMappings is limited to 32 entries per host' }
-  foreach ($repository in $mapped) { if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Invalid repository mapping: $repository" } }
   $config | Add-Member -NotePropertyName repositories -NotePropertyValue $mapped -Force
   foreach ($mapping in $mappings) {
     foreach ($field in 'ciWorkflows', 'requiredChecks') {
