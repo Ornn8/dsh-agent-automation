@@ -50,7 +50,6 @@ import {
   FAILURE_CATEGORIES,
   recordedFailureClass,
   verifyAgentFailureRole,
-  verifyControllerOrchestrationRole,
   verifyReviewInfrastructureFailureEvidence,
   verifyReviewEvidenceDisagreement,
   verifyTargetCiFailureRole,
@@ -142,10 +141,6 @@ function reviewFailureRun(overrides = {}) {
   })
 }
 
-function orchestrationRole(run, jobs, workflowPath = '.github/workflows/recover-backlog.yml') {
-  return verifyControllerOrchestrationRole({ run, jobs, repository: targetRepository, controllerRepository, controllerSha, workflowPath })
-}
-
 function ciFailureRun(overrides = {}) {
   return { id: 202, name: 'CI', path: '.github/workflows/ci.yml', event: 'pull_request', status: 'completed', conclusion: 'failure', head_sha: 'a'.repeat(40), repository: { full_name: targetRepository }, pull_requests: [{ number: 12 }], ...overrides }
 }
@@ -220,7 +215,7 @@ test('controller classifies trusted required CI failure as implementation', () =
   assert.deepEqual(result.evidence.failedJobs[0].failedSteps, ['unit tests'])
 })
 
-test('controller classifies provider failure as ci-environment and protocol failure as orchestration', () => {
+test('controller classifies verified review infrastructure failure as ci-environment', () => {
   const reviewRun = reviewFailureRun()
   const reviewJobs = failedJobs('agent-review / agent/review', 'Provider request')
   const reviewRole = agentRole(reviewRun, reviewJobs)
@@ -231,17 +226,6 @@ test('controller classifies provider failure as ci-environment and protocol fail
     failureEvidence: verifyReviewInfrastructureFailureEvidence({ run: reviewRun, jobs: reviewJobs, provenance: reviewRole }),
   })
   assert.equal(provider.category, 'ci-environment')
-
-  const recoveryPath = '.github/workflows/recover-backlog.yml'
-  const recoveryRun = { id: 303, name: 'Agent Recovery', path: '.github/workflows/agent-recovery.yml', event: 'workflow_run', status: 'completed', conclusion: 'failure', head_sha: 'a'.repeat(40), repository: { full_name: targetRepository }, referenced_workflows: [{ path: `${controllerRepository}/${recoveryPath}@${controllerSha}`, sha: controllerSha }] }
-  const recoveryJobs = failedJobs('recovery', 'Parse receipt')
-  const recoveryRole = orchestrationRole(recoveryRun, recoveryJobs, recoveryPath)
-  const protocol = classifyControllerFailure({
-    run: recoveryRun,
-    jobs: recoveryJobs,
-    provenance: recoveryRole,
-  })
-  assert.equal(protocol.category, 'orchestration')
 })
 
 test('controller reports unknown when trusted evidence cannot establish a category', () => {
@@ -344,10 +328,8 @@ test('failure classification cannot cross verified role boundaries', () => {
   ] }]
   assert.equal(classifyControllerFailure({ run: reviewRun, jobs: reviewJobs, provenance: agentRole(reviewRun, reviewJobs) }).category, 'review')
 
-  const orchestrationPath = '.github/workflows/recover-backlog.yml'
-  const orchestrationRun = { id: 303, name: 'Controller', path: '.github/workflows/agent-recovery.yml', event: 'workflow_run', status: 'completed', conclusion: 'failure', head_sha: 'a'.repeat(40), repository: { full_name: targetRepository }, referenced_workflows: [{ path: `${controllerRepository}/${orchestrationPath}@${controllerSha}`, sha: controllerSha }] }
-  const verifiedOrchestrationRole = orchestrationRole(orchestrationRun, reviewJobs, orchestrationPath)
-  assert.notEqual(classifyControllerFailure({ run: orchestrationRun, jobs: reviewJobs, provenance: verifiedOrchestrationRole }).category, 'review')
+  const orchestrationRun = { id: 303, name: 'Controller', path: '.github/workflows/agent-recovery.yml', event: 'workflow_run', status: 'completed', conclusion: 'failure', head_sha: 'a'.repeat(40), repository: { full_name: targetRepository } }
+  assert.equal(classifyControllerFailure({ run: orchestrationRun, jobs: reviewJobs, provenance: null }).category, 'unknown')
   const alteredReviewJobs = failedJobs('review', 'task')
   assert.notEqual(classifyControllerFailure({ run: reviewRun, jobs: alteredReviewJobs, provenance: agentRole(reviewRun, alteredReviewJobs) }).category, 'implementation')
 
@@ -360,13 +342,8 @@ test('failure classification cannot cross verified role boundaries', () => {
 })
 
 test('verified failure roles and evidence cannot be replayed across runs or altered jobs', () => {
-  const orchestrationPath = '.github/workflows/recover-backlog.yml'
   const run = reviewFailureRun({
     id: 401,
-    referenced_workflows: [
-      { path: `${controllerRepository}/.github/workflows/agent-review.yml@${controllerSha}`, sha: controllerSha },
-      { path: `${controllerRepository}/${orchestrationPath}@${controllerSha}`, sha: controllerSha },
-    ],
   })
   const jobs = failedJobs('agent-review / agent/review', 'Provider request')
   const provenance = agentRole(run, jobs)
@@ -380,8 +357,8 @@ test('verified failure roles and evidence cannot be replayed across runs or alte
   alteredJobs[0].steps[0].name = 'Different failure'
   assert.equal(classifyControllerFailure({ run, jobs: alteredJobs, provenance, failureEvidence }).category, 'unknown')
 
-  const controllerRole = orchestrationRole(run, jobs, orchestrationPath)
-  assert.equal(classifyControllerFailure({ run, jobs, provenance: controllerRole, failureEvidence }).category, 'unknown')
+  const forgedControllerRole = { kind: 'controller-orchestration', repository: targetRepository, evidenceSignature: provenance.evidenceSignature }
+  assert.equal(classifyControllerFailure({ run, jobs, provenance: forgedControllerRole, failureEvidence }).category, 'unknown')
 })
 
 test('required CI role requires configured workflow path, check app, and exact run identity', () => {
@@ -424,7 +401,7 @@ test('required CI role requires configured workflow path, check app, and exact r
   }), null)
 })
 
-test('controller orchestration role rejects noncanonical SHA and arbitrary workflow authority', () => {
+test('controller orchestration stays unknown until job-level reusable-call provenance exists', () => {
   const workflowPath = '.github/workflows/recover-backlog.yml'
   const jobs = failedJobs('recovery', 'Parse receipt')
   const run = {
@@ -432,18 +409,10 @@ test('controller orchestration role rejects noncanonical SHA and arbitrary workf
     head_sha: 'a'.repeat(40), repository: { full_name: targetRepository },
     referenced_workflows: [{ path: `${controllerRepository}/${workflowPath}@${controllerSha}`, sha: controllerSha }],
   }
-  assert.ok(orchestrationRole(run, jobs))
-  assert.equal(verifyControllerOrchestrationRole({
-    run, jobs, repository: targetRepository, controllerRepository, controllerSha: controllerSha.toUpperCase(), workflowPath,
-  }), null)
-  const arbitraryPath = '.github/workflows/arbitrary.yml'
-  const arbitraryRun = { ...run, path: arbitraryPath, referenced_workflows: [{ path: `${controllerRepository}/${arbitraryPath}@${controllerSha}`, sha: controllerSha }] }
-  assert.equal(verifyControllerOrchestrationRole({
-    run: arbitraryRun, jobs, repository: targetRepository, controllerRepository, controllerSha, workflowPath: arbitraryPath,
-  }), null)
+  assert.equal(classifyControllerFailure({ run, jobs, provenance: null }).category, 'unknown')
 })
 
-test('controller orchestration does not derive classification from Error text or a free failure class', () => {
+test('controller orchestration does not derive classification from run-wide provenance, Error text, or a free failure class', () => {
   const workflowPath = '.github/workflows/recover-backlog.yml'
   const run = {
     id: 303, name: 'Agent Recovery', path: '.github/workflows/agent-recovery.yml', event: 'workflow_run', status: 'completed', conclusion: 'failure',
@@ -451,9 +420,8 @@ test('controller orchestration does not derive classification from Error text or
     referenced_workflows: [{ path: `${controllerRepository}/${workflowPath}@${controllerSha}`, sha: controllerSha }],
   }
   const jobs = failedJobs('recovery', 'Parse receipt')
-  const provenance = orchestrationRole(run, jobs, workflowPath)
-  assert.equal(classifyControllerFailure({ run, jobs, provenance, failureClass: 'transport', error: new Error('ETIMEDOUT') }).category, 'orchestration')
-  assert.equal(classifyControllerFailure({ run, jobs, provenance, failureEvidence: { failureClass: 'transport' } }).category, 'unknown')
+  assert.equal(classifyControllerFailure({ run, jobs, provenance: null, failureClass: 'transport', error: new Error('ETIMEDOUT') }).category, 'unknown')
+  assert.equal(classifyControllerFailure({ run, jobs, provenance: null, failureEvidence: { failureClass: 'transport' } }).category, 'unknown')
 })
 
 test('review evidence disagreement is a closed auditable category', () => {

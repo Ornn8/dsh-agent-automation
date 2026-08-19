@@ -110,6 +110,14 @@ test('an intentional BLOCK and an untrusted review run never become infrastructu
   })
   assert.equal(decision.classification.category, 'review')
   assert.equal(decision.observation, null)
+
+  const contradicted = reviewFaultAuditDecision({
+    run: reviewRun(), jobs: blockJobs, repository,
+    trust: { controllerRepository, controllerSha }, current: currentPullRequest,
+    checkRuns: [successfulReviewCheck()],
+  })
+  assert.equal(contradicted.classification.category, 'review-evidence-disagreement')
+  assert.equal(contradicted.observation, null)
 })
 
 test('a fault projection is authorized only by the exact hosted observer workflow provenance', () => {
@@ -174,25 +182,88 @@ test('the hosted observer accepts failure identity only from the exact Actions-o
   assert.equal(recordedReviewFailure([{ ...check, app: { id: 1 } }], 81, repository), null)
 })
 
-test('observer records exact-pair review disagreement before routing and creates no fault', async () => {
+test('observer records authoritative review disagreement for every recoverable conclusion before routing', async () => {
+  for (const conclusion of ['failure', 'cancelled', 'timed_out', 'startup_failure', 'stale']) {
+    const run = reviewRun({ conclusion })
+    const jobs = conclusion === 'failure' ? infrastructureJobs : [{
+      id: 501, name: 'agent-review / agent/review', status: 'completed', conclusion,
+      steps: [{ number: 1, name: 'Review exact PR head with the configured Agent', status: 'completed', conclusion }],
+    }]
+    const decision = reviewFaultAuditDecision({
+      run, jobs, repository,
+      trust: { controllerRepository, controllerSha },
+      current: currentPullRequest,
+      checkRuns: [successfulReviewCheck()],
+    })
+    assert.equal(decision.classification.category, 'review-evidence-disagreement', conclusion)
+    assert.equal(decision.observation, null)
+
+    const effects = []
+    const result = await applyReviewFaultDecision(decision, {
+      writeAudit(value) { effects.push(['audit', value.category]) },
+      async upsertFault() { effects.push(['fault']); return 99 },
+    })
+    assert.equal(result, null)
+    assert.deepEqual(effects, [['audit', 'review-evidence-disagreement']])
+  }
+})
+
+test('repository-dispatch review disagreement requires an independently verified live pair', () => {
+  const run = reviewRun({
+    event: 'repository_dispatch',
+    head_sha: base,
+    head_branch: 'main',
+    pull_requests: [],
+  })
   const decision = reviewFaultAuditDecision({
-    run: reviewRun(),
+    run,
     jobs: infrastructureJobs,
     repository,
     trust: { controllerRepository, controllerSha },
+    expectedSubject: { repository, number: 25, base, head },
     current: currentPullRequest,
     checkRuns: [successfulReviewCheck()],
   })
   assert.equal(decision.classification.category, 'review-evidence-disagreement')
   assert.equal(decision.observation, null)
 
-  const effects = []
-  const result = await applyReviewFaultDecision(decision, {
-    writeAudit(value) { effects.push(['audit', value.category]) },
-    async upsertFault() { effects.push(['fault']); return 99 },
+  const stale = reviewFaultAuditDecision({
+    run,
+    jobs: infrastructureJobs,
+    repository,
+    trust: { controllerRepository, controllerSha },
+    expectedSubject: { repository, number: 25, base, head },
+    current: { ...currentPullRequest, base: { ...currentPullRequest.base, sha: 'd'.repeat(40) } },
+    checkRuns: [successfulReviewCheck()],
   })
-  assert.equal(result, null)
-  assert.deepEqual(effects, [['audit', 'review-evidence-disagreement']])
+  assert.equal(stale.classification.category, 'unknown')
+  assert.equal(stale.observation, null)
+
+  const missingExpectedSubject = reviewFaultAuditDecision({
+    run,
+    jobs: infrastructureJobs,
+    repository,
+    trust: { controllerRepository, controllerSha },
+    current: currentPullRequest,
+    checkRuns: [successfulReviewCheck()],
+  })
+  assert.equal(missingExpectedSubject.classification.category, 'unknown')
+  assert.equal(missingExpectedSubject.observation, null)
+})
+
+test('CheckRun summary prose never changes verified review infrastructure classification', () => {
+  const decision = reviewFaultAuditDecision({
+    run: reviewRun(), jobs: infrastructureJobs, repository,
+    trust: { controllerRepository, controllerSha }, current: currentPullRequest,
+    checkRuns: [{
+      ...successfulReviewCheck(),
+      conclusion: 'failure',
+      output: { summary: 'Failure class: protocol. Error code: arbitrary-prose.' },
+    }],
+  })
+  assert.equal(decision.classification.category, 'ci-environment')
+  assert.equal(decision.observation.failureClass, 'host')
+  assert.equal(decision.observation.errorCode, 'review-infrastructure-failure')
 })
 
 test('observer emits unknown audit for stale exact pairs without writing a fault', async () => {

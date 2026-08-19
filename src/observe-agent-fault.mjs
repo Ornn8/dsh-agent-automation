@@ -1,9 +1,8 @@
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
-import { observeReviewInfrastructureFault } from './fault-observation.mjs'
 import { workflowFailureSignature } from './failure-classification.mjs'
 import { faultIdentity } from './fault-record.mjs'
 import { faultProjectionBody, faultProjectionMarker, parseFaultProjection } from './fault-projection.mjs'
-import { applyReviewFaultDecision, reviewFaultAuditDecision } from './review-fault-audit.mjs'
+import { applyReviewFaultDecision, reviewFaultAuditDecision, reviewFaultSubject } from './review-fault-audit.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('FAULT_SOURCE_RUN_ID')
@@ -74,12 +73,7 @@ if (!Number.isSafeInteger(projectionRunId) || projectionRunId < 1
   || String(sourceRunNumber) !== sourceRunId) throw new Error('Fault observer run identity is invalid')
 const sourceRun = await ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'fault source workflow run')
 const sourceJobs = await pages(`repos/${repository}/actions/runs/${sourceRunId}/jobs`, 'fault source workflow jobs', 'jobs')
-const candidate = observeReviewInfrastructureFault({
-  run: sourceRun,
-  jobs: sourceJobs,
-  repository,
-  trust: { controllerRepository, controllerSha },
-})
+const candidate = reviewFaultSubject(sourceRun, repository)
 let current = null
 let checkRuns = []
 if (candidate) {

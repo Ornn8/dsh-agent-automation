@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto'
 import { validateRepositoryAutomationConfig } from './common.mjs'
-import { recordedReviewFailure } from './fault-observation.mjs'
-import { GOVERNOR_WORKFLOW_PATHS } from './governor-state.mjs'
 import { hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { intentionalReviewBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { trustedCiFailure } from './dispatch-policy.mjs'
@@ -21,23 +19,10 @@ const MAX_EVIDENCE_STEPS = 20
 const MAX_EVIDENCE_TEXT = 200
 const FULL_SHA = /^[0-9a-f]{40}$/
 const GITHUB_ACTIONS_APP_ID = 15368
-const CONTROLLER_ORCHESTRATION_PATHS = new Set([
-  ...GOVERNOR_WORKFLOW_PATHS.filter(path => ![
-    '.github/workflows/agent-review.yml',
-    '.github/workflows/dsh-repair.yml',
-  ].includes(path)),
-  '.github/workflows/controller-maintenance-readiness.yml',
-  '.github/workflows/controller-maintenance.yml',
-  '.github/workflows/land-pr.yml',
-  '.github/workflows/observe-agent-fault.yml',
-  '.github/workflows/pipeline-health.yml',
-  '.github/workflows/reconcile-landing.yml',
-  '.github/workflows/runner-watchdog.yml',
-])
 const VERIFIED_ROLES = new WeakSet()
 const VERIFIED_FAILURE_EVIDENCE = new WeakSet()
 
-/** @typedef {'target-required-ci' | 'agent-review' | 'controller-orchestration'} VerifiedFailureRoleKind */
+/** @typedef {'target-required-ci' | 'agent-review'} VerifiedFailureRoleKind */
 /** @typedef {{ kind: VerifiedFailureRoleKind, repository: string, evidenceSignature: string, controllerSha?: string, workflowName?: string, workflowPath?: string }} VerifiedFailureRole */
 /** @typedef {{ failureClass: string, evidenceSignature: string, roleKind: VerifiedFailureRoleKind, source: string }} VerifiedFailureEvidence */
 
@@ -180,17 +165,6 @@ export function verifyTargetCiFailureRole({ run, jobs, checkRun, config, reposit
   }, run, jobs)
 }
 
-/** Verify one immutable reusable Controller workflow reference and return its orchestration role. @param {object} input @returns {VerifiedFailureRole | null} */
-export function verifyControllerOrchestrationRole({ run, jobs, repository, controllerRepository, controllerSha, workflowPath }) {
-  const expected = `${controllerRepository}/${workflowPath}@${controllerSha}`
-  if (run?.repository?.full_name !== repository || run.status !== 'completed'
-    || !FULL_SHA.test(controllerSha || '')
-    || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(controllerRepository || '')
-    || !CONTROLLER_ORCHESTRATION_PATHS.has(workflowPath)
-    || !run.referenced_workflows?.some(reference => reference.path === expected && reference.sha === controllerSha)) return null
-  return verifiedRole({ kind: 'controller-orchestration', repository, controllerSha, workflowPath }, run, jobs)
-}
-
 function boundedEvidenceText(value) {
   return String(value || '').slice(0, MAX_EVIDENCE_TEXT)
 }
@@ -219,13 +193,6 @@ export function verifyReviewInfrastructureFailureEvidence({ run, jobs, provenanc
   return verifiedFailureEvidence({ failureClass, source: 'review-workflow' }, run, jobs, provenance)
 }
 
-/** Verify one Actions-owned review failure record and bind its class to the source run evidence. @param {object} input @returns {VerifiedFailureEvidence | null} */
-export function verifyRecordedReviewFailureEvidence({ run, jobs, provenance, checkRuns, repository }) {
-  if (!verifiedForEvidence(provenance, VERIFIED_ROLES, run, jobs) || provenance.kind !== 'agent-review') return null
-  const recorded = recordedReviewFailure(checkRuns, run.id, repository)
-  return recorded ? verifiedFailureEvidence({ failureClass: recorded.failureClass, source: 'review-check-run' }, run, jobs, provenance) : null
-}
-
 /** Verify a contradiction between one trusted review workflow failure and its Actions-owned CheckRun. @param {object} input @returns {VerifiedFailureEvidence | null} */
 export function verifyReviewEvidenceDisagreement({ run, jobs, provenance, pullRequest, reviewProof, trustedReview }) {
   const checkRun = reviewProof?.checkRun
@@ -237,7 +204,6 @@ export function verifyReviewEvidenceDisagreement({ run, jobs, provenance, pullRe
     || workflowEvidenceIdentity(reviewProof?.run, jobs) !== provenance.evidenceSignature
     || !hasTrustedExactReviewRun({ pullRequest, reviewProof, trustedReview })
     || String(checkRun.conclusion).toUpperCase() !== 'SUCCESS'
-    || run.conclusion !== 'failure'
     || reviewProof.run.id !== run.id) return null
   return verifiedFailureEvidence({
     failureClass: 'review-evidence-disagreement',
@@ -337,7 +303,6 @@ export function classifyControllerFailure({ run, jobs, provenance, failureEviden
   if (!run || typeof run !== 'object' || !Array.isArray(jobs)) {
     return unknownFailure(run, jobs, 'workflow failure evidence is incomplete')
   }
-  if (!hasTerminalFailure(run, jobs)) return unknownFailure(run, jobs, 'workflow has no trusted terminal failure evidence')
   if (failureEvidence !== undefined && (!verifiedForEvidence(failureEvidence, VERIFIED_FAILURE_EVIDENCE, run, jobs)
     || failureEvidence.roleKind !== provenance.kind)) {
     return unknownFailure(run, jobs, 'failure evidence is not controller-verified for this workflow run')
@@ -348,6 +313,7 @@ export function classifyControllerFailure({ run, jobs, provenance, failureEviden
   if (verifiedFailureClass === 'review-evidence-disagreement') {
     return { category: 'review-evidence-disagreement', reason: 'trusted review workflow and CheckRun evidence disagree', evidence }
   }
+  if (!hasTerminalFailure(run, jobs)) return unknownFailure(run, jobs, 'workflow has no trusted terminal failure evidence')
   if (provenance.kind === 'agent-review' && intentionalReviewBlock(run, jobs)) {
     return { category: 'review', reason: 'trusted review worker published an intentional BLOCK', evidence }
   }
@@ -360,9 +326,6 @@ export function classifyControllerFailure({ run, jobs, provenance, failureEviden
   }
   if (provenance.kind === 'target-required-ci') {
     return { category: 'implementation', reason: 'trusted required CI reported a target failure', evidence }
-  }
-  if (provenance.kind === 'controller-orchestration') {
-    return { category: 'orchestration', reason: 'trusted controller workflow failed', evidence }
   }
   return unknownFailure(run, jobs, 'trusted evidence does not identify a supported failure class')
 }

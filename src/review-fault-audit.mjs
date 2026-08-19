@@ -1,8 +1,7 @@
-import { observeReviewInfrastructureFault, recordedReviewFailure } from './fault-observation.mjs'
+import { observeReviewInfrastructureFault } from './fault-observation.mjs'
 import {
   classifyControllerFailure,
   verifyAgentFailureRole,
-  verifyRecordedReviewFailureEvidence,
   verifyReviewEvidenceDisagreement,
   verifyReviewInfrastructureFailureEvidence,
 } from './failure-classification.mjs'
@@ -10,14 +9,30 @@ import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { REVIEW_CHECK_NAME, REVIEW_WORKFLOW_PATH } from './review-authority.mjs'
 
 const GITHUB_ACTIONS_APP_ID = 15368
+const FULL_SHA = /^[0-9a-f]{40}$/
 
-function exactCurrentPullRequest(observation, current, repository) {
-  if (current?.number !== observation.subject.number
+/** Return the exact pull-request subject carried by a pull-request-target review run. @param {object} run @param {string} repository @returns {{number: number, base: string, head: string} | null} */
+export function reviewFaultSubject(run, repository) {
+  if (run?.event !== 'pull_request_target'
+    || run.repository?.full_name !== repository
+    || run.head_repository?.full_name !== repository) return null
+  const candidates = (run.pull_requests || []).filter(candidate => Number.isSafeInteger(candidate?.number)
+    && candidate.number > 0
+    && FULL_SHA.test(candidate.base?.sha || '')
+    && FULL_SHA.test(candidate.head?.sha || '')
+    && candidate.head.sha === run.head_sha)
+  return candidates.length === 1
+    ? { number: candidates[0].number, base: candidates[0].base.sha, head: candidates[0].head.sha }
+    : null
+}
+
+function exactCurrentPullRequest(run, current, repository, expectedSubject) {
+  if (!Number.isSafeInteger(current?.number) || current.number < 1
     || current.state !== 'open'
-    || current.base?.sha !== observation.subject.base
-    || current.head?.sha !== observation.subject.head
+    || !FULL_SHA.test(current.base?.sha || '')
+    || !FULL_SHA.test(current.head?.sha || '')
     || current.head?.repo?.full_name !== repository) return null
-  return {
+  const pullRequest = {
     number: current.number,
     repository,
     state: 'OPEN',
@@ -28,6 +43,22 @@ function exactCurrentPullRequest(observation, current, repository) {
     mergeStateStatus: '',
     mergeable: null,
   }
+  if (run.event === 'repository_dispatch') {
+    return expectedSubject?.repository === repository
+      && expectedSubject.number === pullRequest.number
+      && expectedSubject.base === pullRequest.baseRefOid
+      && expectedSubject.head === pullRequest.headRefOid
+      && run.repository?.full_name === repository
+      && run.head_repository?.full_name === repository
+      && run.head_sha === pullRequest.baseRefOid
+      && run.head_branch === pullRequest.baseRefName
+      ? pullRequest : null
+  }
+  const subject = reviewFaultSubject(run, repository)
+  return subject?.number === pullRequest.number
+    && subject.base === pullRequest.baseRefOid
+    && subject.head === pullRequest.headRefOid
+    ? pullRequest : null
 }
 
 function unknownAudit(run, jobs) {
@@ -37,10 +68,10 @@ function unknownAudit(run, jobs) {
 /**
  * Decide the auditable classification and optional infrastructure projection for one review run.
  *
- * @param {object} input Exact workflow, job, pull-request, and CheckRun snapshot.
+ * @param {object} input Exact workflow, job, pull-request, and CheckRun snapshot. Repository-dispatch runs also require a controller-owned expected subject.
  * @returns {{classification: object, observation: object | null, reason: string}}
  */
-export function reviewFaultAuditDecision({ run, jobs, repository, trust, current, checkRuns = [] }) {
+export function reviewFaultAuditDecision({ run, jobs, repository, trust, expectedSubject, current, checkRuns = [] }) {
   const provenance = verifyAgentFailureRole({ run, jobs, repository, trust })
   const preliminaryEvidence = verifyReviewInfrastructureFailureEvidence({ run, jobs, provenance })
   const preliminaryClassification = classifyControllerFailure({
@@ -49,10 +80,7 @@ export function reviewFaultAuditDecision({ run, jobs, repository, trust, current
     provenance,
     failureEvidence: preliminaryEvidence || undefined,
   })
-  const observed = observeReviewInfrastructureFault({ run, jobs, repository, trust })
-  if (!observed) return { classification: preliminaryClassification, observation: null, reason: 'not an infrastructure fault' }
-
-  const pullRequest = exactCurrentPullRequest(observed, current, repository)
+  const pullRequest = exactCurrentPullRequest(run, current, repository, expectedSubject)
   if (!pullRequest) return { classification: unknownAudit(run, jobs), observation: null, reason: 'stale pull request pair' }
 
   const exactReviewChecks = checkRuns.filter(check => check?.name === REVIEW_CHECK_NAME
@@ -85,19 +113,16 @@ export function reviewFaultAuditDecision({ run, jobs, repository, trust, current
     }
   }
 
-  const recorded = recordedReviewFailure(exactReviewChecks, run.id, repository)
-  const recordedEvidence = verifyRecordedReviewFailureEvidence({
-    run, jobs, provenance, checkRuns: exactReviewChecks, repository,
-  })
-  const classification = classifyControllerFailure({
-    run,
-    jobs,
-    provenance,
-    failureEvidence: recordedEvidence || preliminaryEvidence || undefined,
-  })
+  const observed = observeReviewInfrastructureFault({ run, jobs, repository, trust })
+  if (!observed) return { classification: preliminaryClassification, observation: null, reason: 'not an infrastructure fault' }
+  if (observed.subject.number !== pullRequest.number
+    || observed.subject.base !== pullRequest.baseRefOid
+    || observed.subject.head !== pullRequest.headRefOid) {
+    return { classification: unknownAudit(run, jobs), observation: null, reason: 'review observation pair changed' }
+  }
   return {
-    classification,
-    observation: { ...observed, ...(recorded || {}) },
+    classification: preliminaryClassification,
+    observation: observed,
     reason: 'qualified review infrastructure fault',
   }
 }
