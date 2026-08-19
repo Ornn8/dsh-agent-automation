@@ -19,6 +19,8 @@ const MAX_EVIDENCE_STEPS = 20
 const MAX_EVIDENCE_TEXT = 200
 const FULL_SHA = /^[0-9a-f]{40}$/
 const GITHUB_ACTIONS_APP_ID = 15368
+const REVIEW_JOB_NAME = 'agent-review / agent/review'
+const RECOVERABLE_REVIEW_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'startup_failure', 'stale'])
 const VERIFIED_ROLES = new WeakSet()
 const VERIFIED_FAILURE_EVIDENCE = new WeakSet()
 
@@ -90,6 +92,18 @@ function workflowEvidenceIdentity(run, jobs) {
   return normalized ? createHash('sha256').update(JSON.stringify(normalized)).digest('hex') : null
 }
 
+/** Return the one reusable review job only when its machine conclusion is recoverable. @param {object[]} jobs @returns {object[] | null} */
+export function reviewWorkflowFailureJobs(jobs) {
+  if (!Array.isArray(jobs)) return null
+  const matches = jobs.filter(job => job?.name === REVIEW_JOB_NAME)
+  return matches.length === 1 && RECOVERABLE_REVIEW_CONCLUSIONS.has(String(matches[0].conclusion || '').toLowerCase())
+    ? matches : null
+}
+
+function roleEvidenceJobs(value, jobs) {
+  return (value?.kind || value?.roleKind) === 'agent-review' ? reviewWorkflowFailureJobs(jobs) : jobs
+}
+
 function actionsRunIdFromDetailsUrl(detailsUrl, repository) {
   try {
     const url = new URL(detailsUrl)
@@ -104,7 +118,7 @@ function actionsRunIdFromDetailsUrl(detailsUrl, repository) {
 
 /** @param {Omit<VerifiedFailureRole, 'evidenceSignature'>} value @param {object} run @param {object[]} jobs @returns {VerifiedFailureRole | null} */
 function verifiedRole(value, run, jobs) {
-  const evidenceSignature = workflowEvidenceIdentity(run, jobs)
+  const evidenceSignature = workflowEvidenceIdentity(run, roleEvidenceJobs(value, jobs))
   if (!evidenceSignature) return null
   const role = Object.freeze({ ...value, evidenceSignature })
   VERIFIED_ROLES.add(role)
@@ -114,7 +128,7 @@ function verifiedRole(value, run, jobs) {
 /** @param {Omit<VerifiedFailureEvidence, 'evidenceSignature' | 'roleKind'>} value @param {object} run @param {object[]} jobs @param {VerifiedFailureRole} provenance @returns {VerifiedFailureEvidence | null} */
 function verifiedFailureEvidence(value, run, jobs, provenance) {
   if (!verifiedForEvidence(provenance, VERIFIED_ROLES, run, jobs)) return null
-  const evidenceSignature = workflowEvidenceIdentity(run, jobs)
+  const evidenceSignature = workflowEvidenceIdentity(run, roleEvidenceJobs(provenance, jobs))
   if (!evidenceSignature) return null
   const evidence = Object.freeze({ ...value, roleKind: provenance.kind, evidenceSignature })
   VERIFIED_FAILURE_EVIDENCE.add(evidence)
@@ -122,13 +136,13 @@ function verifiedFailureEvidence(value, run, jobs, provenance) {
 }
 
 function verifiedForEvidence(value, registry, run, jobs) {
-  return value && registry.has(value) && value.evidenceSignature === workflowEvidenceIdentity(run, jobs)
+  return value && registry.has(value) && value.evidenceSignature === workflowEvidenceIdentity(run, roleEvidenceJobs(value, jobs))
 }
 
 /** Verify one existing Agent workflow and return its closed failure-classification role. @param {object} input @returns {VerifiedFailureRole | null} */
 export function verifyAgentFailureRole({ run, jobs, repository, trust }) {
   const subjectRole = trustedFailedAgentRun({ run, repository, trust })
-  if (subjectRole !== 'review') return null
+  if (subjectRole !== 'review' || !reviewWorkflowFailureJobs(jobs)) return null
   return verifiedRole({ kind: 'agent-review', repository, controllerSha: trust.controllerSha }, run, jobs)
 }
 
@@ -196,12 +210,13 @@ export function verifyReviewInfrastructureFailureEvidence({ run, jobs, provenanc
 /** Verify a contradiction between one trusted review workflow failure and its Actions-owned CheckRun. @param {object} input @returns {VerifiedFailureEvidence | null} */
 export function verifyReviewEvidenceDisagreement({ run, jobs, provenance, pullRequest, reviewProof, trustedReview }) {
   const checkRun = reviewProof?.checkRun
+  const reviewJobs = roleEvidenceJobs(provenance, jobs)
   if (!verifiedForEvidence(provenance, VERIFIED_ROLES, run, jobs)
     || provenance.kind !== 'agent-review'
     || !FULL_SHA.test(pullRequest?.baseRefOid || '')
     || !FULL_SHA.test(pullRequest?.headRefOid || '')
     || checkRun?.head_sha !== pullRequest.headRefOid
-    || workflowEvidenceIdentity(reviewProof?.run, jobs) !== provenance.evidenceSignature
+    || workflowEvidenceIdentity(reviewProof?.run, reviewJobs) !== provenance.evidenceSignature
     || !hasTrustedExactReviewRun({ pullRequest, reviewProof, trustedReview })
     || String(checkRun.conclusion).toUpperCase() !== 'SUCCESS'
     || reviewProof.run.id !== run.id) return null
@@ -303,18 +318,20 @@ export function classifyControllerFailure({ run, jobs, provenance, failureEviden
   if (!run || typeof run !== 'object' || !Array.isArray(jobs)) {
     return unknownFailure(run, jobs, 'workflow failure evidence is incomplete')
   }
+  const evidenceJobs = roleEvidenceJobs(provenance, jobs)
+  if (!evidenceJobs) return unknownFailure(run, jobs, 'workflow role job evidence is missing or ambiguous')
   if (failureEvidence !== undefined && (!verifiedForEvidence(failureEvidence, VERIFIED_FAILURE_EVIDENCE, run, jobs)
     || failureEvidence.roleKind !== provenance.kind)) {
     return unknownFailure(run, jobs, 'failure evidence is not controller-verified for this workflow run')
   }
 
-  const evidence = auditFailureEvidence(run, jobs)
+  const evidence = auditFailureEvidence(run, evidenceJobs)
   const verifiedFailureClass = failureEvidence?.failureClass
   if (verifiedFailureClass === 'review-evidence-disagreement') {
     return { category: 'review-evidence-disagreement', reason: 'trusted review workflow and CheckRun evidence disagree', evidence }
   }
-  if (!hasTerminalFailure(run, jobs)) return unknownFailure(run, jobs, 'workflow has no trusted terminal failure evidence')
-  if (provenance.kind === 'agent-review' && intentionalReviewBlock(run, jobs)) {
+  if (!hasTerminalFailure(run, evidenceJobs)) return unknownFailure(run, evidenceJobs, 'workflow has no trusted terminal failure evidence')
+  if (provenance.kind === 'agent-review' && intentionalReviewBlock(run, evidenceJobs)) {
     return { category: 'review', reason: 'trusted review worker published an intentional BLOCK', evidence }
   }
 

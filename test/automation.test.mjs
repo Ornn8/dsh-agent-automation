@@ -237,7 +237,7 @@ test('controller reports unknown when trusted evidence cannot establish a catego
     provenance: agentRole(run, jobs),
   })
   assert.equal(result.category, 'unknown')
-  assert.match(result.reason, /does not identify/)
+  assert.equal(result.reason, 'failure role is not controller-verified')
 })
 
 test('controller does not classify a caller-forged failure role', () => {

@@ -26,7 +26,7 @@ export function reviewFaultSubject(run, repository) {
     : null
 }
 
-function exactCurrentPullRequest(run, current, repository, expectedSubject) {
+function exactCurrentPullRequest(run, current, repository) {
   if (!Number.isSafeInteger(current?.number) || current.number < 1
     || current.state !== 'open'
     || !FULL_SHA.test(current.base?.sha || '')
@@ -43,17 +43,6 @@ function exactCurrentPullRequest(run, current, repository, expectedSubject) {
     mergeStateStatus: '',
     mergeable: null,
   }
-  if (run.event === 'repository_dispatch') {
-    return expectedSubject?.repository === repository
-      && expectedSubject.number === pullRequest.number
-      && expectedSubject.base === pullRequest.baseRefOid
-      && expectedSubject.head === pullRequest.headRefOid
-      && run.repository?.full_name === repository
-      && run.head_repository?.full_name === repository
-      && run.head_sha === pullRequest.baseRefOid
-      && run.head_branch === pullRequest.baseRefName
-      ? pullRequest : null
-  }
   const subject = reviewFaultSubject(run, repository)
   return subject?.number === pullRequest.number
     && subject.base === pullRequest.baseRefOid
@@ -68,10 +57,10 @@ function unknownAudit(run, jobs) {
 /**
  * Decide the auditable classification and optional infrastructure projection for one review run.
  *
- * @param {object} input Exact workflow, job, pull-request, and CheckRun snapshot. Repository-dispatch runs also require a controller-owned expected subject.
+ * @param {object} input Exact workflow, job, pull-request, and CheckRun snapshot.
  * @returns {{classification: object, observation: object | null, reason: string}}
  */
-export function reviewFaultAuditDecision({ run, jobs, repository, trust, expectedSubject, current, checkRuns = [] }) {
+export function reviewFaultAuditDecision({ run, jobs, repository, trust, current, checkRuns = [] }) {
   const provenance = verifyAgentFailureRole({ run, jobs, repository, trust })
   const preliminaryEvidence = verifyReviewInfrastructureFailureEvidence({ run, jobs, provenance })
   const preliminaryClassification = classifyControllerFailure({
@@ -80,7 +69,7 @@ export function reviewFaultAuditDecision({ run, jobs, repository, trust, expecte
     provenance,
     failureEvidence: preliminaryEvidence || undefined,
   })
-  const pullRequest = exactCurrentPullRequest(run, current, repository, expectedSubject)
+  const pullRequest = exactCurrentPullRequest(run, current, repository)
   if (!pullRequest) return { classification: unknownAudit(run, jobs), observation: null, reason: 'stale pull request pair' }
 
   const exactReviewChecks = checkRuns.filter(check => check?.name === REVIEW_CHECK_NAME
@@ -125,6 +114,19 @@ export function reviewFaultAuditDecision({ run, jobs, repository, trust, expecte
     observation: observed,
     reason: 'qualified review infrastructure fault',
   }
+}
+
+/** Load one exact pull-request-target snapshot and decide its fault audit. @param {object} input Trusted run evidence and read-only GitHub readers. @returns {Promise<{classification: object, observation: object | null, reason: string}>} */
+export async function loadReviewFaultAuditDecision({ run, jobs, repository, trust, readPullRequest, readCheckRuns }) {
+  const subject = reviewFaultSubject(run, repository)
+  if (!subject) return reviewFaultAuditDecision({ run, jobs, repository, trust, current: null, checkRuns: [] })
+  const current = await readPullRequest(subject.number)
+  const exact = current?.state === 'open'
+    && current.base?.sha === subject.base
+    && current.head?.sha === subject.head
+    && current.head?.repo?.full_name === repository
+  const checkRuns = exact ? await readCheckRuns(subject.head) : []
+  return reviewFaultAuditDecision({ run, jobs, repository, trust, current, checkRuns })
 }
 
 /**

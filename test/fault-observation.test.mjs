@@ -6,7 +6,7 @@ import {
   recordedReviewFailure,
   trustedFaultProjectionRun,
 } from '../src/fault-observation.mjs'
-import { applyReviewFaultDecision, reviewFaultAuditDecision } from '../src/review-fault-audit.mjs'
+import { applyReviewFaultDecision, loadReviewFaultAuditDecision, reviewFaultAuditDecision } from '../src/review-fault-audit.mjs'
 
 const repository = 'owner/product'
 const controllerRepository = 'owner/controller'
@@ -208,7 +208,7 @@ test('observer records authoritative review disagreement for every recoverable c
   }
 })
 
-test('repository-dispatch review disagreement requires an independently verified live pair', () => {
+test('repository-dispatch review evidence remains unknown without a production trusted subject input', () => {
   const run = reviewRun({
     event: 'repository_dispatch',
     head_sha: base,
@@ -220,11 +220,10 @@ test('repository-dispatch review disagreement requires an independently verified
     jobs: infrastructureJobs,
     repository,
     trust: { controllerRepository, controllerSha },
-    expectedSubject: { repository, number: 25, base, head },
     current: currentPullRequest,
     checkRuns: [successfulReviewCheck()],
   })
-  assert.equal(decision.classification.category, 'review-evidence-disagreement')
+  assert.equal(decision.classification.category, 'unknown')
   assert.equal(decision.observation, null)
 
   const stale = reviewFaultAuditDecision({
@@ -232,7 +231,6 @@ test('repository-dispatch review disagreement requires an independently verified
     jobs: infrastructureJobs,
     repository,
     trust: { controllerRepository, controllerSha },
-    expectedSubject: { repository, number: 25, base, head },
     current: { ...currentPullRequest, base: { ...currentPullRequest.base, sha: 'd'.repeat(40) } },
     checkRuns: [successfulReviewCheck()],
   })
@@ -249,6 +247,50 @@ test('repository-dispatch review disagreement requires an independently verified
   })
   assert.equal(missingExpectedSubject.classification.category, 'unknown')
   assert.equal(missingExpectedSubject.observation, null)
+})
+
+test('observer snapshot loader carries a pull-request-target subject into audit and fault decision', async () => {
+  const calls = []
+  const decision = await loadReviewFaultAuditDecision({
+    run: reviewRun(),
+    jobs: infrastructureJobs,
+    repository,
+    trust: { controllerRepository, controllerSha },
+    async readPullRequest(number) {
+      calls.push(['pull', number])
+      return currentPullRequest
+    },
+    async readCheckRuns(exactHead) {
+      calls.push(['checks', exactHead])
+      return []
+    },
+  })
+  assert.deepEqual(calls, [['pull', 25], ['checks', head]])
+  assert.equal(decision.classification.category, 'ci-environment')
+  assert.equal(decision.observation.sourceRunId, 81)
+})
+
+test('failed sibling job cannot turn a successful reusable review job into a review-worker fault', () => {
+  const jobs = [{
+    id: 501,
+    name: 'agent-review / agent/review',
+    status: 'completed',
+    conclusion: 'success',
+    steps: [{ number: 1, name: 'Review exact PR head with the configured Agent', status: 'completed', conclusion: 'success' }],
+  }, {
+    id: 502,
+    name: 'caller / unrelated',
+    status: 'completed',
+    conclusion: 'failure',
+    steps: [{ number: 1, name: 'Unrelated caller step', status: 'completed', conclusion: 'failure' }],
+  }]
+  const decision = reviewFaultAuditDecision({
+    run: reviewRun(), jobs, repository,
+    trust: { controllerRepository, controllerSha }, current: currentPullRequest,
+    checkRuns: [successfulReviewCheck()],
+  })
+  assert.equal(decision.classification.category, 'unknown')
+  assert.equal(decision.observation, null)
 })
 
 test('CheckRun summary prose never changes verified review infrastructure classification', () => {

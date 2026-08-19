@@ -2,7 +2,7 @@ import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './com
 import { workflowFailureSignature } from './failure-classification.mjs'
 import { faultIdentity } from './fault-record.mjs'
 import { faultProjectionBody, faultProjectionMarker, parseFaultProjection } from './fault-projection.mjs'
-import { applyReviewFaultDecision, reviewFaultAuditDecision, reviewFaultSubject } from './review-fault-audit.mjs'
+import { applyReviewFaultDecision, loadReviewFaultAuditDecision } from './review-fault-audit.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('FAULT_SOURCE_RUN_ID')
@@ -73,25 +73,17 @@ if (!Number.isSafeInteger(projectionRunId) || projectionRunId < 1
   || String(sourceRunNumber) !== sourceRunId) throw new Error('Fault observer run identity is invalid')
 const sourceRun = await ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'fault source workflow run')
 const sourceJobs = await pages(`repos/${repository}/actions/runs/${sourceRunId}/jobs`, 'fault source workflow jobs', 'jobs')
-const candidate = reviewFaultSubject(sourceRun, repository)
-let current = null
-let checkRuns = []
-if (candidate) {
-  current = await ghJson(['api', `repos/${repository}/pulls/${candidate.subject.number}`], `pull request #${candidate.subject.number}`)
-  if (current.state === 'open'
-    && current.base?.sha === candidate.subject.base
-    && current.head?.sha === candidate.subject.head
-    && current.head?.repo?.full_name === repository) {
-    checkRuns = await pages(`repos/${repository}/commits/${candidate.subject.head}/check-runs`, 'exact-head review checks', 'check_runs')
-  }
-}
-const audit = reviewFaultAuditDecision({
+const audit = await loadReviewFaultAuditDecision({
   run: sourceRun,
   jobs: sourceJobs,
   repository,
   trust: { controllerRepository, controllerSha },
-  current,
-  checkRuns,
+  readPullRequest(number) {
+    return ghJson(['api', `repos/${repository}/pulls/${number}`], `pull request #${number}`)
+  },
+  readCheckRuns(head) {
+    return pages(`repos/${repository}/commits/${head}/check-runs`, 'exact-head review checks', 'check_runs')
+  },
 })
 if (audit.observation) {
   audit.observation = {
