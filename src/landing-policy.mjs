@@ -6,7 +6,7 @@ import { parseReviewCheckIdentity } from './review-check.mjs'
 const GITHUB_ACTIONS_APP_ID = 15368
 
 /** @typedef {{ id?: number, __typename?: string, context?: string, name?: string, state?: string, status?: string, conclusion?: string, app?: { id?: number }, external_id?: string, details_url?: string }} RepositoryCheck */
-/** @typedef {{ number: number, repository: string, state: string, isDraft: boolean, baseRefName: string, baseRefOid: string, headRefOid: string, mergeStateStatus: string }} LandingPullRequest */
+/** @typedef {{ number: number, repository: string, state: string, isDraft: boolean, baseRefName: string, baseRefOid: string, headRefOid: string, mergeStateStatus: string, mergeable: boolean | null }} LandingPullRequest */
 /** @typedef {{ id: number, event: string, status: string, conclusion?: string, head_sha: string, head_branch?: string, repository?: { full_name?: string }, head_repository?: { full_name?: string }, pull_requests?: Array<{ number?: number, base?: { sha?: string }, head?: { sha?: string } }>, referenced_workflows?: Array<{ path?: string, sha?: string }> }} WorkflowRun */
 /** @typedef {{ checkRun: RepositoryCheck, run: WorkflowRun }} ReviewProof */
 /** @typedef {{ controllerRepository: string, controllerSha: string, workflowPath: string }} TrustedReview */
@@ -116,8 +116,8 @@ export function evaluateLanding({ pullRequest, expectedHead, requiredChecks, che
   if (pullRequest.headRefOid !== expectedHead) {
     return { ready: false, reason: 'pull request head changed' }
   }
-  if (pullRequest.mergeStateStatus !== 'CLEAN') {
-    return { ready: false, reason: `merge state is ${pullRequest.mergeStateStatus}` }
+  if (pullRequest.mergeable !== true) {
+    return { ready: false, reason: 'pull request is not mergeable' }
   }
   if (!hasTrustedExactReviewProof({ pullRequest, reviewProof, trustedReview })) {
     return { ready: false, reason: 'no trusted exact-pair Agent PASS exists' }

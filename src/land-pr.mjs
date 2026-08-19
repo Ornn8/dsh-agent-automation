@@ -48,7 +48,7 @@ if (pullRequestNumber === 0) {
 async function readPullRequest() {
   return ghJson([
     'pr', 'view', String(pullRequestNumber), '--repo', repository,
-    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,mergeStateStatus,url,body,labels,closingIssuesReferences',
+    '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,mergeStateStatus,mergeable,url,body,labels,closingIssuesReferences',
   ], 'pull request for landing')
 }
 
