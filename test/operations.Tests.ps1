@@ -75,6 +75,33 @@ Describe 'Branch protection authority migration' {
 }
 
 Describe 'Installer and uninstaller fail-closed guards' {
+  It 'rejects a repository mapping that selects the Controller itself, regardless of case' {
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
+    $config.operations.controller.repository = 'Ornn8/dsh-agent-automation'
+    $config.operations.repositoryMappings[0].repository = 'ornn8/DSH-AGENT-AUTOMATION'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue (Join-Path $script:RepositoryRoot '.test-controller-self-target-runtime')
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue (Join-Path $script:RepositoryRoot '.test-controller-self-target-state')
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $config.operations.stateRoot 'logs')
+    $path = Join-Path $TestDrive 'controller-self-target.json'
+    [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+
+    { Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders } | Should -Throw '*repositoryMappings must not target the controller repository*'
+  }
+
+  It 'accepts an ordinary product repository mapping' {
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
+    $config.operations.controller.repository = 'Ornn8/dsh-agent-automation'
+    $config.operations.repositoryMappings[0].repository = 'Ornn8/shanyin-tea-commerce'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue (Join-Path $script:RepositoryRoot '.test-product-target-runtime')
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue (Join-Path $script:RepositoryRoot '.test-product-target-state')
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $config.operations.stateRoot 'logs')
+    $path = Join-Path $TestDrive 'product-target.json'
+    [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+
+    $loaded = Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders
+    @($loaded.Config.repositories) | Should -BeExactly @('Ornn8/shanyin-tea-commerce')
+  }
+
   It 'authorizes destructive review cleanup only for a registered review workspace' {
     $stateRoot = Join-Path $TestDrive 'state'
     $registered = Join-Path $stateRoot 'workspaces\target-owner-repository-a1b2c3d4e5f6-review'

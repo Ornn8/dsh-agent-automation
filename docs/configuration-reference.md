@@ -56,7 +56,7 @@ Each entry in `artifacts` is named `windows-x64`, `windows-arm64`, `linux-x64`, 
 
 ### Repository mappings
 
-Each item requires `repository`, `ciWorkflows`, and `requiredChecks`. Both lists contain unique, nonempty GitHub display names. Installation projects them to `DSH_AUTOMATION_CI_WORKFLOWS` and `DSH_AUTOMATION_REQUIRED_CHECKS`. Those repository variables are mutable routing configuration, not authority; `doctor.ps1 -Explain` shows when they override the file. The trusted review check is controller-owned and must not appear in `requiredChecks`.
+Each item requires `repository`, `ciWorkflows`, and `requiredChecks`. `repositoryMappings` is the product-target allowlist: a mapping must not equal `controller.repository`, even with different letter casing. Both lists contain unique, nonempty GitHub display names. Installation projects them to `DSH_AUTOMATION_CI_WORKFLOWS` and `DSH_AUTOMATION_REQUIRED_CHECKS`. Those repository variables are mutable routing configuration, not authority; `doctor.ps1 -Explain` shows when they override the file. The trusted review check is controller-owned and must not appear in `requiredChecks`. The Node and PowerShell loaders reject a self-target before installation, planning, or Worker startup.
 
 ### Roles
 

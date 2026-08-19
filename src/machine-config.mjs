@@ -53,6 +53,15 @@ function expandConfigurationDirectory(value, configurationDirectory) {
   return isAbsolute(expanded) ? resolve(expanded) : expanded
 }
 
+/** Normalize and validate a GitHub owner/repository identity for comparisons. */
+/** @param {unknown} value @param {string} field @returns {string} */
+function canonicalRepository(value, field) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) {
+    throw new Error(`${field} must be owner/repository`)
+  }
+  return value.toLowerCase()
+}
+
 /** Return the Worker ids assigned to one role. */
 /** @param {MachineConfig} config @param {string} role @returns {string[]} */
 export function roleWorkerIds(config, role) {
@@ -125,8 +134,19 @@ export function resolveMachineConfig({ defaults, input, configurationPath }) {
   if (!Array.isArray(mappings) || mappings.length === 0) {
     throw new Error('runner configuration operations.repositoryMappings must be a non-empty array')
   }
+  const controllerRepository = canonicalRepository(
+    config?.operations?.controller?.repository,
+    'operations.controller.repository',
+  )
   config.repositories = mappings.map(mapping => mapping?.repository)
-  if (new Set(config.repositories).size !== config.repositories.length) {
+  const mappingRepositories = []
+  for (const repository of /** @type {unknown[]} */ (config.repositories)) {
+    mappingRepositories.push(canonicalRepository(repository, 'operations.repositoryMappings.repository'))
+  }
+  if (mappingRepositories.some(repository => repository === controllerRepository)) {
+    throw new Error('operations.repositoryMappings must not target the controller repository')
+  }
+  if (new Set(mappingRepositories).size !== mappingRepositories.length) {
     throw new Error('runner configuration repositoryMappings must not contain duplicate repositories')
   }
   const assigned = new Map()
