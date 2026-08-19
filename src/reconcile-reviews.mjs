@@ -323,7 +323,7 @@ for (const summary of summaries.flat()) {
       ? await targetProfile(reviewConfiguration?.profileId || 'github-pr-cycle', pullRequest.base.sha)
       : null
     const repairStage = repairProfile ? resolveRepairEntryStage(repairProfile.definition) : null
-    const repairLimit = repairStage?.stage.retry?.limit
+    const repairLimit = repairStage?.stage.retry?.limit ?? (pendingTransition === 'workflow-recovery' ? 3 : undefined)
     if (!Number.isSafeInteger(repairLimit)) throw new Error('Repair Profile must declare a bounded retry limit')
     const governed = await governTransition(pullRequest, pendingTransition, {
       limit: repairLimit,

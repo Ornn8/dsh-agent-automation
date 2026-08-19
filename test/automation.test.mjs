@@ -1128,7 +1128,7 @@ test('WorkRequest repository dispatch uses one extensible payload envelope', asy
   assert.match(repairCaller, /toJSON\(github\.event\.client_payload\.work_request\)/)
   assert.doesNotMatch(repairCaller, /work_request\.workflowId == 'repair'|work_request\.stageId == 'change'/)
   assert.match(reconcileSource, /const admitted = records\.find/)
-  assert.match(reconcileSource, /decision\.action !== 'wait'/)
+  assert.match(reconcileSource, /pendingTransition === 'workflow-recovery' \? 3/)
   assert.ok(
     reconcileSource.indexOf('JSON.stringify(repositoryDispatchBody(request))')
       < reconcileSource.lastIndexOf('await markGovernorApplied(pullRequest, pendingTransition, governed)'),
