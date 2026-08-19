@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { evaluateLanding } from '../src/landing-policy.mjs'
+import { evaluateLanding, normalizeMergeableStatus } from '../src/landing-policy.mjs'
+
+test('landing normalizes GitHub CLI mergeability enums', () => {
+  assert.equal(normalizeMergeableStatus('MERGEABLE'), true)
+  assert.equal(normalizeMergeableStatus('CONFLICTING'), false)
+  assert.equal(normalizeMergeableStatus('UNKNOWN'), null)
+})
 
 const pullRequest = (baseRefOid, headRefOid) => ({
   number: 12, repository: 'owner/repository', state: 'OPEN',
@@ -9,6 +15,7 @@ const pullRequest = (baseRefOid, headRefOid) => ({
   baseRefOid,
   headRefOid,
   mergeStateStatus: 'CLEAN',
+  mergeable: true,
 })
 const proof = (base, head) => ({ checkRun: {
   name: 'agent/review', status: 'completed', conclusion: 'success', app: { id: 15368 },
@@ -30,6 +37,28 @@ test('landing accepts only a current exact-pair PASS with every required check g
     requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: proof(base, head), trustedReview,
   })
   assert.deepEqual(decision, { ready: true, reason: 'exact review and required checks passed' })
+})
+
+test('landing accepts mergeable pull requests when GitHub leaves mergeStateStatus unstable', () => {
+  const base = 'a'.repeat(40)
+  const head = 'b'.repeat(40)
+  const decision = evaluateLanding({
+    pullRequest: { ...pullRequest(base, head), mergeStateStatus: 'UNSTABLE' },
+    expectedHead: head,
+    requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: proof(base, head), trustedReview,
+  })
+  assert.deepEqual(decision, { ready: true, reason: 'exact review and required checks passed' })
+})
+
+test('landing rejects a pull request GitHub does not currently report as mergeable', () => {
+  const base = 'a'.repeat(40)
+  const head = 'b'.repeat(40)
+  const decision = evaluateLanding({
+    pullRequest: { ...pullRequest(base, head), mergeStateStatus: 'CLEAN', mergeable: false },
+    expectedHead: head,
+    requiredChecks: ['all checks passed'], checkRuns: checks, reviewProof: proof(base, head), trustedReview,
+  })
+  assert.deepEqual(decision, { ready: false, reason: 'pull request is not mergeable' })
 })
 
 test('landing requires every configured CI check rather than one aggregate name', () => {

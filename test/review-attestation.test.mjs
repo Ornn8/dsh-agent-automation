@@ -17,7 +17,7 @@ const head = 'b'.repeat(40)
 function pullRequest() {
   return {
     number: 12, repository, state: 'OPEN', isDraft: false, baseRefName: 'main', baseRefOid: base,
-    headRefOid: head, mergeStateStatus: 'CLEAN', statusCheckRollup: [],
+    headRefOid: head, mergeStateStatus: 'CLEAN', mergeable: true, statusCheckRollup: [],
   }
 }
 
