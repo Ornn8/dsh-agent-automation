@@ -1,6 +1,12 @@
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
 import { observeReviewInfrastructureFault, recordedReviewFailure } from './fault-observation.mjs'
-import { classifyControllerFailure, verifyAgentFailureRole, workflowFailureSignature } from './failure-classification.mjs'
+import {
+  classifyControllerFailure,
+  verifyAgentFailureRole,
+  verifyRecordedReviewFailureEvidence,
+  verifyReviewInfrastructureFailureEvidence,
+  workflowFailureSignature,
+} from './failure-classification.mjs'
 import { faultIdentity } from './fault-record.mjs'
 import { faultProjectionBody, faultProjectionMarker, parseFaultProjection } from './fault-projection.mjs'
 
@@ -75,13 +81,20 @@ const sourceRun = await ghJson(['api', `repos/${repository}/actions/runs/${sourc
 const sourceJobs = await pages(`repos/${repository}/actions/runs/${sourceRunId}/jobs`, 'fault source workflow jobs', 'jobs')
 const verifiedRole = verifyAgentFailureRole({
   run: sourceRun,
+  jobs: sourceJobs,
   repository,
   trust: { controllerRepository, controllerSha },
+})
+const preliminaryFailureEvidence = verifyReviewInfrastructureFailureEvidence({
+  run: sourceRun,
+  jobs: sourceJobs,
+  provenance: verifiedRole,
 })
 const preliminaryClassification = classifyControllerFailure({
   run: sourceRun,
   jobs: sourceJobs,
   provenance: verifiedRole,
+  failureEvidence: preliminaryFailureEvidence || undefined,
 })
 const observed = observeReviewInfrastructureFault({
   run: sourceRun,
@@ -104,6 +117,13 @@ if (current.state !== 'open'
 }
 const checkRuns = await pages(`repos/${repository}/commits/${observed.subject.head}/check-runs`, 'exact-head review checks', 'check_runs')
 const recordedFailure = recordedReviewFailure(checkRuns, sourceRunNumber, repository)
+const recordedFailureEvidence = verifyRecordedReviewFailureEvidence({
+  run: sourceRun,
+  jobs: sourceJobs,
+  provenance: verifiedRole,
+  checkRuns,
+  repository,
+})
 const observation = {
   ...observed,
   ...(recordedFailure || {}),
@@ -117,7 +137,7 @@ const classification = classifyControllerFailure({
   run: sourceRun,
   jobs: sourceJobs,
   provenance: verifiedRole,
-  failureClass: observation.failureClass,
+  failureEvidence: recordedFailureEvidence || preliminaryFailureEvidence || undefined,
 })
 const issueNumber = await upsertFault(observation)
 process.stdout.write(`Failure classification: ${JSON.stringify(classification)}\n`)
