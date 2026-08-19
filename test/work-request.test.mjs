@@ -7,6 +7,7 @@ import {
   advancementRepairObservationId,
   isReviewRepairRequestId,
   parseAgentWorkRequest,
+  resolveRepairEntryStage,
   reviewRepairTransition,
   repositoryDispatchBody,
 } from '../src/work-request.mjs'
@@ -70,9 +71,15 @@ test('review repair resolves the unique repair Stage from a custom Profile workf
   definition.profileId = 'custom-profile'
   definition.workflows['pull-request-fix'] = {
     ...definition.workflows.repair,
-    stages: [{ ...definition.workflows.repair.stages[0], id: 'repair-change' }],
+    stages: structuredClone(definition.workflows.repair.stages),
   }
+  const stages = definition.workflows['pull-request-fix'].stages
+  stages.find(stage => stage.id === 'change').id = 'repair-change'
+  stages.find(stage => stage.id === 'review').after = ['repair-change']
   delete definition.workflows.repair
+  const invalid = structuredClone(definition)
+  invalid.workflows['pull-request-fix'].stages.find(stage => stage.id === 'review').after = []
+  assert.throws(() => resolveRepairEntryStage(invalid), /cycle Stages/)
   const request = createReviewRepairRequest({
     definition,
     definitionHash: workflowDefinitionHash(definition),

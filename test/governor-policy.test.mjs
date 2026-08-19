@@ -270,7 +270,7 @@ test('replaying one recovery observation consumes its independent budget once', 
     workIdentity: 'branch:agent/fix',
     observationId: 'recovery-run-400',
     limit: 3,
-    records: [],
+    records: [{ status: 'admitted', observationId: 'candidate-400' }],
   })
   assert.equal(first.action, 'attempt')
   assert.equal(first.record.attempt, 1)

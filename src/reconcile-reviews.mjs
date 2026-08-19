@@ -110,27 +110,27 @@ async function governTransition(pullRequest, transition, { limit, workIdentity, 
   const subject = pullRequestGovernorSubject(pullRequest)
   const stateVersion = subjectStateVersion(subject)
   const records = await pullRequestGovernorRecords(pullRequest.number)
-  const admitted = records.some(record => record.status === 'admitted'
+  const admitted = records.find(record => record.status === 'admitted'
     && record.transition === transition && record.stateVersion === stateVersion)
   const decision = governorDecision({
     transition, subject, stateVersion, observationId: governorObservationId, records,
   })
   if (decision.record) await writeGovernorRecord(pullRequest.number, decision.record)
-  if (!decision.execute) {
-    if (!admitted || decision.action !== 'wait') return { execute: false, action: decision.action }
-    return { execute: true, replay: true, subject, stateVersion }
+  if (!decision.execute && (!admitted || decision.action !== 'wait')) {
+    return { execute: false, action: decision.action }
   }
+  if (!decision.execute && !limit) return { execute: true, replay: true, subject, stateVersion }
   if (limit) {
     const budget = governorBudgetDecision({
       transition: budgetTransition,
       subject: { type: subject.type, number: subject.number },
       workIdentity,
-      observationId: governorObservationId,
+      observationId: decision.record?.observationId || admitted?.observationId || governorObservationId,
       limit,
       records,
     })
     if (budget.record) await writeGovernorRecord(pullRequest.number, budget.record)
-    if (!budget.execute) {
+    if (!budget.execute && !(admitted && budget.action === 'noop')) {
       if (budget.action !== 'pause') return { execute: false, action: budget.action }
       await run(githubExecutable, [
         'label', 'create', 'automation/paused', '--repo', repository,
@@ -143,7 +143,7 @@ async function governTransition(pullRequest, transition, { limit, workIdentity, 
       return { execute: false, action: 'pause' }
     }
   }
-  return { execute: true, subject, stateVersion }
+  return { execute: true, ...(admitted ? { replay: true } : {}), subject, stateVersion }
 }
 
 async function markGovernorApplied(pullRequest, transition, governed) {

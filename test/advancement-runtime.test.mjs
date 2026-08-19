@@ -76,9 +76,7 @@ test('duplicate wakes keep one stable transition identity and stale wakes perfor
   assert.equal(advancementTransitionIdentity(value), advancementTransitionIdentity(structuredClone(value)))
   const effects = []
   await consumePullRequestAdvancement(decision('stale'), {
-    requestReview: entry => effects.push(entry),
-    requestRepair: entry => effects.push(entry),
-    requestLanding: entry => effects.push(entry),
+    requestReview: entry => effects.push(entry), requestRepair: entry => effects.push(entry), requestLanding: entry => effects.push(entry),
   })
   assert.deepEqual(effects, [])
 })
@@ -121,9 +119,7 @@ test('a durable applied transition makes duplicate landing wakes one effective r
     markApplied: value => applied.add(value.transitionIdentity),
   }
   const route = {
-    requestReview: value => effects.push(['review', value.transitionIdentity]),
-    requestRepair: value => effects.push(['repair', value.transitionIdentity]),
-    requestLanding: value => effects.push(['landing', value.transitionIdentity]),
+    requestReview: value => effects.push(['review', value.transitionIdentity]), requestRepair: value => effects.push(['repair', value.transitionIdentity]), requestLanding: value => effects.push(['landing', value.transitionIdentity]),
   }
   await consumePullRequestAdvancement(decision('request-landing'), route, journal)
   const duplicate = await consumePullRequestAdvancement(decision('request-landing'), route, journal)
@@ -142,9 +138,7 @@ test('parallel duplicate wakes share one claim and one effective mutation', asyn
     markApplied: () => undefined,
   }
   const route = {
-    requestReview: () => { effects += 1 },
-    requestRepair: () => { effects += 1 },
-    requestLanding: async () => { await Promise.resolve(); effects += 1 },
+    requestReview: () => { effects += 1 }, requestRepair: () => { effects += 1 }, requestLanding: async () => { await Promise.resolve(); effects += 1 },
   }
   await Promise.all([
     consumePullRequestAdvancement(decision('request-landing'), route, journal),
@@ -156,9 +150,7 @@ test('a transient applied-record failure retries the journal without replaying t
   let effects = 0
   let marks = 0
   await consumePullRequestAdvancement(decision('request-landing'), {
-    requestReview: () => undefined,
-    requestRepair: () => undefined,
-    requestLanding: () => { effects += 1 },
+    requestReview: () => undefined, requestRepair: () => undefined, requestLanding: () => { effects += 1 },
   }, {
     claim: () => true,
     markApplied: () => {

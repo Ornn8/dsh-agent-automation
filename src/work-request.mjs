@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { workflowDefinitionHash } from './workflow-definition.mjs'
 import { resolveIssueEntryStage, resolveWorkflowStage } from './workflow-profile.mjs'
 
@@ -180,8 +181,8 @@ export function resolveRepairEntryStage(definition) {
   const candidates = Object.entries(definition?.workflows || {}).filter(([, workflow]) =>
     workflow.stages.some(stage => stage.uses === 'worker' && stage.procedure === 'github-pr-repair'))
   if (candidates.length !== 1) throw new Error('Profile must define exactly one github-pr-repair workflow')
-  const [workflowId, workflow] = candidates[0]
-  const stage = workflow.stages.find(candidate => candidate.uses === 'worker' && candidate.procedure === 'github-pr-repair')
+  const [workflowId] = candidates[0]
+  const { change: stage } = resolveGithubPrCycle(definition, workflowId)
   if (stage.role !== 'change') throw new Error('github-pr-repair Stage must use the change role')
   return { workflowId, stage }
 }
