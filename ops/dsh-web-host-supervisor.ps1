@@ -8,6 +8,7 @@ $loaded = Read-OperationsConfig -Configuration $Configuration
 $ops = $loaded.Operations
 $hostConfig = $ops.dshWebHost
 if (-not $hostConfig.enabled) { exit 0 }
+$workerRoutes = @(Get-DshWebWorkerRoutes -Workers $loaded.Config.workers -BaseUrl $hostConfig.baseUrl)
 $logFile = Join-Path $ops.logsRoot 'dsh-web-host.log'
 $faultFile = Join-Path $ops.stateRoot (Join-Path 'faults' 'dsh-web.restart')
 $failures = 0
@@ -36,7 +37,7 @@ while ($true) {
       Start-Sleep -Seconds 10
       $restart = Test-Path -LiteralPath $faultFile
       if ($restart) { Remove-Item -LiteralPath $faultFile -Force; Write-OperationLog -Message 'DSH Web Host fault marker consumed' -Level WARN -LogFile $logFile }
-      $healthy = Test-DshWebHost -HostConfig $hostConfig
+      $healthy = Test-DshWebHost -HostConfig $hostConfig -WorkerRoutes $workerRoutes
       $failures = if ($healthy) { 0 } else { $failures + 1 }
       if ($restart -or $failures -ge [int]$hostConfig.restartAfterFailures) {
         Write-OperationLog -Message 'Restarting owned DSH Web Host after health/fault condition' -Level WARN -LogFile $logFile

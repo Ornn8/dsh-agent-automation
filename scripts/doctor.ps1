@@ -172,8 +172,9 @@ if ($ops.dshWebHost.enabled) {
     Add-Finding 'DSH Web Host task runtime' $taskRuntime.Ok $taskRuntime.Detail
   }
   if ($Online) {
-    $dshHealthy = Test-DshWebHost -HostConfig $ops.dshWebHost
-    $dshDetail = if ($dshHealthy) { 'valid session.list response' } else { 'unreachable or invalid session.list response' }
+    $dshWorkerRoutes = @(Get-DshWebWorkerRoutes -Workers $loaded.Config.workers -BaseUrl $ops.dshWebHost.baseUrl)
+    $dshHealthy = Test-DshWebHost -HostConfig $ops.dshWebHost -WorkerRoutes $dshWorkerRoutes
+    $dshDetail = if ($dshHealthy) { 'valid session.list and configured worker route responses' } else { 'unreachable or invalid session.list or configured worker route response' }
     Add-Finding 'DSH Web Host RPC' $dshHealthy $dshDetail
   }
 }

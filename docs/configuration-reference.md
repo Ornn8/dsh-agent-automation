@@ -66,7 +66,7 @@ Each role may set `runnerNamePrefix`, `replicas`, and `labels`. Defaults are `ag
 
 ### DSH Web Host
 
-`dshWebHost.enabled` defaults to false. When true, `executable`, `arguments`, `workingDirectory`, and loopback `baseUrl` are required. `restartAfterFailures` defaults to 3. The health endpoint is the fixed protocol path `/api/session.list`; it is not configurable because changing it would change the Adapter protocol rather than deployment policy.
+`dshWebHost.enabled` defaults to false. When true, `executable`, `arguments`, `workingDirectory`, and loopback `baseUrl` are required. `restartAfterFailures` defaults to 3. Health uses the fixed protocol path `/api/session.list` and also verifies `/api/llm.providers` and `/api/llm.models` for every configured `dsh-web` worker on that base URL; these paths are not configurable because changing them would change the Adapter protocol rather than deployment policy.
 
 ## Removed machine fields
 
