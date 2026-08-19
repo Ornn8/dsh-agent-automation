@@ -28,6 +28,7 @@ while ($true) {
   }
   Write-OperationLog -Message "Starting runner $($instance.Id)" -LogFile $instance.LogFile
   $process = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/c', 'run.cmd') -WorkingDirectory $instance.RunnerRoot -WindowStyle Hidden -PassThru
+  $processStartTimeUtc = $process.StartTime.ToUniversalTime().ToString('O')
   try {
     Write-OwnedProcessRecord -Operations $loaded.Operations -InstanceId $instance.Id -Process $process
   } catch {
@@ -53,7 +54,7 @@ while ($true) {
     }
   } finally {
     try { $process.Refresh() } catch { }
-    if ($process.HasExited) { Remove-OwnedProcessRecord -Operations $loaded.Operations -InstanceId $instance.Id -RootPid $process.Id }
+    if ($process.HasExited) { Remove-OwnedProcessRecord -Operations $loaded.Operations -InstanceId $instance.Id -RootPid $process.Id -RootStartTimeUtc $processStartTimeUtc }
   }
   $restartAttempt = if (([DateTime]::UtcNow - $startedAt).TotalMinutes -ge 5) { 1 } else { $restartAttempt + 1 }
   $delaySeconds = [Math]::Min(300, 10 * [Math]::Pow(2, [Math]::Min(5, $restartAttempt - 1)))

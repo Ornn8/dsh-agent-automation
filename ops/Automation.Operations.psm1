@@ -1373,32 +1373,69 @@ function Get-OwnedProcessRecordPath {
   return Join-Path $Operations.stateRoot (Join-Path 'pids' "$InstanceId.json")
 }
 
+function Get-OwnedProcessRecordLockName {
+  param([Parameter(Mandatory)]$Operations, [Parameter(Mandatory)][string]$InstanceId)
+  $path = Get-OwnedProcessRecordPath -Operations $Operations -InstanceId $InstanceId
+  $canonicalPath = [IO.Path]::GetFullPath($path).ToUpperInvariant()
+  $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonicalPath))).ToLowerInvariant()
+  return "Global\DSH-Agent-Automation-OwnedProcessRecord-$hash"
+}
+
+function Invoke-WithOwnedProcessRecordLock {
+  param(
+    [Parameter(Mandatory)]$Operations,
+    [Parameter(Mandatory)][string]$InstanceId,
+    [Parameter(Mandatory)][scriptblock]$Action,
+    [int]$TimeoutMilliseconds = 5000
+  )
+  $createdNew = $false
+  $mutex = [Threading.Mutex]::new($false, (Get-OwnedProcessRecordLockName -Operations $Operations -InstanceId $InstanceId), [ref]$createdNew)
+  $acquired = $false
+  try {
+    try { $acquired = $mutex.WaitOne($TimeoutMilliseconds) } catch [Threading.AbandonedMutexException] { $acquired = $true }
+    if (-not $acquired) { throw "Timed out waiting for owned process record lock for $InstanceId" }
+    return & $Action
+  } finally {
+    try {
+      if ($acquired) { $mutex.ReleaseMutex() }
+    } finally {
+      $mutex.Dispose()
+    }
+  }
+}
+
 function Write-OwnedProcessRecord {
   param([Parameter(Mandatory)]$Operations, [Parameter(Mandatory)][string]$InstanceId, [Parameter(Mandatory)][Diagnostics.Process]$Process)
   $directory = Join-Path $Operations.stateRoot 'pids'
   Initialize-PrivateDirectory -Path $directory
-  $existing = Test-OwnedProcessRecord -Operations $Operations -InstanceId $InstanceId
-  if ($existing.Running) { throw "Refusing to overwrite a live owned process record for $InstanceId" }
-  if (-not $existing.Ok) {
-    if ($existing.Detail -notin @('stale process record', 'PID was reused by another process')) { throw "Cannot replace process record for ${InstanceId}: $($existing.Detail)" }
-    Remove-OwnedProcessRecord -Operations $Operations -InstanceId $InstanceId
-  }
-  $path = Get-OwnedProcessRecordPath -Operations $Operations -InstanceId $InstanceId
-  $record = [ordered]@{
-    schemaVersion = 1
-    instanceId = $InstanceId
-    rootPid = $Process.Id
-    rootStartTimeUtc = $Process.StartTime.ToUniversalTime().ToString('O')
-    supervisorPid = $PID
-    recordedAtUtc = [DateTime]::UtcNow.ToString('O')
-  }
-  $temporary = Join-Path $directory "$InstanceId.$([Guid]::NewGuid().ToString('N')).tmp"
-  try {
-    $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temporary -Encoding utf8
-    Move-Item -LiteralPath $temporary -Destination $path -Force
-  } finally {
-    if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
-  }
+  $getStartTimeText = { param($Record) if ($Record.rootStartTimeUtc -is [DateTime]) { return $Record.rootStartTimeUtc.ToUniversalTime().ToString('O') }; return [string]$Record.rootStartTimeUtc }.GetNewClosure()
+  $action = {
+    $existing = Test-OwnedProcessRecord -Operations $Operations -InstanceId $InstanceId
+    if ($existing.Running) { throw "Refusing to overwrite a live owned process record for $InstanceId" }
+    if (-not $existing.Ok) {
+      if ($existing.Detail -notin @('stale process record', 'PID was reused by another process')) { throw "Cannot replace process record for ${InstanceId}: $($existing.Detail)" }
+      if ($existing.Record) {
+        Remove-OwnedProcessRecord -Operations $Operations -InstanceId $InstanceId -RootPid ([int]$existing.Record.rootPid) -RootStartTimeUtc (& $getStartTimeText $existing.Record)
+      }
+    }
+    $path = Get-OwnedProcessRecordPath -Operations $Operations -InstanceId $InstanceId
+    $record = [ordered]@{
+      schemaVersion = 1
+      instanceId = $InstanceId
+      rootPid = $Process.Id
+      rootStartTimeUtc = $Process.StartTime.ToUniversalTime().ToString('O')
+      supervisorPid = $PID
+      recordedAtUtc = [DateTime]::UtcNow.ToString('O')
+    }
+    $temporary = Join-Path $directory "$InstanceId.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+      $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temporary -Encoding utf8
+      Move-Item -LiteralPath $temporary -Destination $path -Force
+    } finally {
+      if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+  }.GetNewClosure()
+  Invoke-WithOwnedProcessRecordLock -Operations $Operations -InstanceId $InstanceId -Action $action
 }
 
 function Read-OwnedProcessRecord {
@@ -1430,24 +1467,51 @@ function Test-OwnedProcessIdentity {
 
 function Test-OwnedProcessRecord {
   param([Parameter(Mandatory)]$Operations, [Parameter(Mandatory)][string]$InstanceId)
-  try { $record = Read-OwnedProcessRecord -Operations $Operations -InstanceId $InstanceId } catch { return [pscustomobject]@{ Ok = $false; Running = $false; Detail = $_.Exception.Message } }
-  if (-not $record) { return [pscustomobject]@{ Ok = $true; Running = $false; Detail = 'no owned process record' } }
+  try { $record = Read-OwnedProcessRecord -Operations $Operations -InstanceId $InstanceId } catch { return [pscustomobject]@{ Ok = $false; Running = $false; Detail = $_.Exception.Message; Record = $null } }
+  if (-not $record) { return [pscustomobject]@{ Ok = $true; Running = $false; Detail = 'no owned process record'; Record = $null } }
   $process = Get-Process -Id ([int]$record.rootPid) -ErrorAction SilentlyContinue
-  return Test-OwnedProcessIdentity -Record $record -Process $process
+  $status = Test-OwnedProcessIdentity -Record $record -Process $process
+  return [pscustomobject]@{ Ok = $status.Ok; Running = $status.Running; Detail = $status.Detail; Record = $record }
 }
 
 function Remove-OwnedProcessRecord {
-  param([Parameter(Mandatory)]$Operations, [Parameter(Mandatory)][string]$InstanceId, [int]$RootPid)
-  $path = Get-OwnedProcessRecordPath -Operations $Operations -InstanceId $InstanceId
-  if (Test-Path -LiteralPath $path) {
-    $item = Get-Item -LiteralPath $path -Force
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Process record is a reparse point: $path" }
-    if ($RootPid) {
-      $record = Read-OwnedProcessRecord -Operations $Operations -InstanceId $InstanceId
-      if ([int]$record.rootPid -ne $RootPid) { return }
+  param(
+    [Parameter(Mandatory)]$Operations,
+    [Parameter(Mandatory)][string]$InstanceId,
+    [int]$RootPid,
+    [string]$RootStartTimeUtc,
+    [scriptblock]$RecordReader = { param($OwnedOperations, $OwnedInstanceId) Read-OwnedProcessRecord -Operations $OwnedOperations -InstanceId $OwnedInstanceId },
+    [scriptblock]$RecordRemover = { param($RecordPath) Remove-Item -LiteralPath $RecordPath -Force },
+    [scriptblock]$LockInvoker
+  )
+  $getStartTimeText = { param($Record) if ($Record.rootStartTimeUtc -is [DateTime]) { return $Record.rootStartTimeUtc.ToUniversalTime().ToString('O') }; return [string]$Record.rootStartTimeUtc }.GetNewClosure()
+  $action = {
+    $path = Get-OwnedProcessRecordPath -Operations $Operations -InstanceId $InstanceId
+    if (Test-Path -LiteralPath $path) {
+      try { $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop } catch {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+        throw
+      }
+      if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Process record is a reparse point: $path" }
+      if ($RootPid) {
+        try { $record = & $RecordReader $Operations $InstanceId } catch {
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+          throw
+        }
+        if (-not $record -or [int]$record.rootPid -ne $RootPid -or ($RootStartTimeUtc -and (& $getStartTimeText $record) -ne $RootStartTimeUtc)) { return }
+        try { & $RecordRemover $path } catch {
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+          throw
+        }
+        return
+      }
+      try { & $RecordRemover $path } catch {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+        throw
+      }
     }
-    Remove-Item -LiteralPath $path -Force
-  }
+  }.GetNewClosure()
+  if ($LockInvoker) { & $LockInvoker $Operations $InstanceId $action } else { Invoke-WithOwnedProcessRecordLock -Operations $Operations -InstanceId $InstanceId -Action $action }
 }
 
 function Stop-OwnedProcessTree {
@@ -1459,13 +1523,13 @@ function Stop-OwnedProcessTree {
     [scriptblock]$ProcessResolver = { param($RootProcessId) Get-Process -Id $RootProcessId -ErrorAction SilentlyContinue },
     [scriptblock]$TreeTerminator = { param($RootProcessId) & taskkill.exe /pid $RootProcessId /t /f 1>$null 2>$null },
     [scriptblock]$Sleeper = { param($Milliseconds) Start-Sleep -Milliseconds $Milliseconds },
-    [scriptblock]$RecordRemover = { param($OwnedOperations, $OwnedInstanceId, $RootProcessId) Remove-OwnedProcessRecord -Operations $OwnedOperations -InstanceId $OwnedInstanceId -RootPid $RootProcessId }
+    [scriptblock]$RecordRemover = { param($OwnedOperations, $OwnedInstanceId, $RootProcessId, $RootStartTimeUtc) Remove-OwnedProcessRecord -Operations $OwnedOperations -InstanceId $OwnedInstanceId -RootPid $RootProcessId -RootStartTimeUtc $RootStartTimeUtc }
   )
   $record = if ($PSBoundParameters.ContainsKey('Record')) { $Record } else { Read-OwnedProcessRecord -Operations $Operations -InstanceId $InstanceId }
   if (-not $record) { return [pscustomobject]@{ Stopped = $true; Detail = 'no owned process record' } }
   $process = & $ProcessResolver ([int]$record.rootPid)
   if (-not $process) {
-    & $RecordRemover $Operations $InstanceId ([int]$record.rootPid)
+    & $RecordRemover $Operations $InstanceId ([int]$record.rootPid) (Get-OwnedProcessStartTimeUtcText -Record $record)
     return [pscustomobject]@{ Stopped = $true; Detail = 'owned process already exited' }
   }
   $recordedStart = Get-OwnedProcessStartTimeUtcText -Record $record
@@ -1483,7 +1547,7 @@ function Stop-OwnedProcessTree {
   if ($remaining -and $remaining.StartTime.ToUniversalTime().ToString('O') -eq $recordedStart) {
     throw "Owned process tree for $InstanceId did not exit within $TimeoutSeconds seconds"
   }
-  & $RecordRemover $Operations $InstanceId ([int]$record.rootPid)
+  & $RecordRemover $Operations $InstanceId ([int]$record.rootPid) $recordedStart
   return [pscustomobject]@{ Stopped = $true; Detail = 'owned process tree stopped' }
 }
 
@@ -2128,13 +2192,13 @@ function Invoke-OperationsSelfTest {
   $jsonRoundTripRecord = $ownedRecord | ConvertTo-Json -Compress | ConvertFrom-Json
   $results += [pscustomobject]@{ Name = 'owned PID identity accepts PowerShell date deserialization'; Passed = (Test-OwnedProcessIdentity -Record $jsonRoundTripRecord -Process $ownedProcess).Ok }
   $results += [pscustomobject]@{ Name = 'owned PID identity rejects PID reuse'; Passed = (-not (Test-OwnedProcessIdentity -Record $ownedRecord -Process $reusedProcess).Ok) }
-  $terminationState = @{ Terminated = $false; TerminatedPid = 0; RemovedPid = 0 }
+  $terminationState = @{ Terminated = $false; TerminatedPid = 0; RemovedPid = 0; RemovedStart = $null }
   $processResolver = { param($RootProcessId) if ($terminationState.Terminated) { return $null }; return $ownedProcess }
   $treeTerminator = { param($RootProcessId) $terminationState.TerminatedPid = $RootProcessId; $terminationState.Terminated = $true }
   $noSleep = { param($Milliseconds) }
-  $recordRemover = { param($OwnedOperations, $OwnedInstanceId, $RootProcessId) $terminationState.RemovedPid = $RootProcessId }
+  $recordRemover = { param($OwnedOperations, $OwnedInstanceId, $RootProcessId, $RootStartTimeUtc) $terminationState.RemovedPid = $RootProcessId; $terminationState.RemovedStart = $RootStartTimeUtc }
   $terminationResult = Stop-OwnedProcessTree -Operations $fakeOps -InstanceId 'target-test-change' -Record $ownedRecord -TimeoutSeconds 1 -ProcessResolver $processResolver -TreeTerminator $treeTerminator -Sleeper $noSleep -RecordRemover $recordRemover
-  $results += [pscustomobject]@{ Name = 'owned tree stop invokes exact recursive terminator and confirms exit'; Passed = ($terminationResult.Stopped -and $terminationState.TerminatedPid -eq 42 -and $terminationState.RemovedPid -eq 42) }
+  $results += [pscustomobject]@{ Name = 'owned tree stop invokes exact recursive terminator and confirms exit'; Passed = ($terminationResult.Stopped -and $terminationState.TerminatedPid -eq 42 -and $terminationState.RemovedPid -eq 42 -and $terminationState.RemovedStart -eq $ownedRecord.rootStartTimeUtc) }
 
   $manifest = [pscustomobject][ordered]@{
     schemaVersion = 1
