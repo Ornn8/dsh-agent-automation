@@ -4,6 +4,7 @@ import {
   createReviewRepairRequest,
   createIssueImplementationRequest,
   createStageWorkRequest,
+  advancementRepairObservationId,
   isReviewRepairRequestId,
   parseAgentWorkRequest,
   reviewRepairTransition,
@@ -48,7 +49,7 @@ test('review repair is an immutable Stage request rather than an agent command',
 })
 
 test('advancement repair ids bind the complete deterministic transition identity', () => {
-  const observationId = `advance-${'d'.repeat(64)}`
+  const observationId = advancementRepairObservationId('d'.repeat(64))
   const request = createReviewRepairRequest({
     ...profile,
     repository: 'owner/repository',
@@ -58,6 +59,8 @@ test('advancement repair ids bind the complete deterministic transition identity
     reviewObservationId: observationId,
   })
   assert.equal(reviewRepairTransition(observationId), `review-repair:${observationId}`)
+  assert.equal(request.requestId.length, 100)
+  assert.equal(parseAgentWorkRequest(request).requestId, request.requestId)
   assert.equal(isReviewRepairRequestId(request.requestId, head), true)
   assert.equal(isReviewRepairRequestId(request.requestId, base), false)
 })

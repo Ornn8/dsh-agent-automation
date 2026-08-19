@@ -38,10 +38,16 @@ function generatedRequestId(value) {
 
 function reviewObservationId(value) {
   const text = requiredText(value, 'review repair observation id', 72)
-  if (!/^(?:run-[1-9][0-9]{0,19}|comment-[1-9][0-9]{0,19}|advance-[0-9a-f]{64})$/.test(text)) {
+  if (!/^(?:run-[1-9][0-9]{0,19}|comment-[1-9][0-9]{0,19}|advance-[0-9a-f]{64}|a-[A-Za-z0-9_-]{43})$/.test(text)) {
     throw new Error('review repair observation id must identify one trusted review run or advancement transition')
   }
   return text
+}
+
+/** Return a compact, lossless encoding of one SHA-256 advancement identity. */
+export function advancementRepairObservationId(identity) {
+  if (!SHA256.test(identity || '')) throw new Error('advancement repair identity must be a SHA-256 digest')
+  return `a-${Buffer.from(identity, 'hex').toString('base64url')}`
 }
 
 /** Return the distinct Governor transition for one authoritative review generation. */
@@ -62,7 +68,7 @@ export function reviewRepairRequestId(head, observationId) {
 
 /** Return whether a request id binds the supplied exact review head and one review generation. */
 export function isReviewRepairRequestId(value, expectedHead) {
-  const match = /^review-repair-([0-9a-f]{40})-((?:run-[1-9][0-9]{0,19}|comment-[1-9][0-9]{0,19}|advance-[0-9a-f]{64}))$/.exec(String(value || ''))
+  const match = /^review-repair-([0-9a-f]{40})-((?:run-[1-9][0-9]{0,19}|comment-[1-9][0-9]{0,19}|advance-[0-9a-f]{64}|a-[A-Za-z0-9_-]{43}))$/.exec(String(value || ''))
   return Boolean(match && FULL_SHA.test(expectedHead) && match[1] === expectedHead)
 }
 

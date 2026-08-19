@@ -8,6 +8,7 @@ import {
   verifyGithubIdentity,
 } from './common.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
+import { repairObservationIdFromGovernorRecord } from './advancement-runtime.mjs'
 import { baseReconcileTransition, needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
 import { hasTrustedExactReviewInvocation, hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
@@ -331,9 +332,7 @@ for (const summary of summaries.flat()) {
     })
     if (governed.execute) {
       if (reviewRepair) {
-        const observationId = pendingTransition.startsWith('review-repair:')
-          ? pendingTransition.slice('review-repair:'.length)
-          : pendingRecord.observationId
+        const observationId = repairObservationIdFromGovernorRecord(pendingTransition, pendingRecord)
         const request = createReviewRepairRequest({
           ...repairProfile,
           repository,
@@ -354,9 +353,7 @@ for (const summary of summaries.flat()) {
           pullRequestNumber: pullRequest.number,
           base: pullRequest.base.sha,
           head: pullRequest.head.sha,
-          reviewObservationId: pendingTransition.startsWith('merge-repair:')
-            ? pendingTransition.slice('merge-repair:'.length)
-            : pendingRecord.observationId,
+          reviewObservationId: repairObservationIdFromGovernorRecord(pendingTransition, pendingRecord),
         })
         const dispatch = repositoryDispatchBody(request)
         dispatch.client_payload.repair_cause = 'merge-conflict'

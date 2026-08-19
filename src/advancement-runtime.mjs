@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 import { governorDecision, unappliedGovernorCandidate } from './governor-policy.mjs'
-import { mergeRepairTransition, reviewRepairTransition } from './work-request.mjs'
+import { advancementRepairObservationId, mergeRepairTransition, reviewRepairTransition } from './work-request.mjs'
 
 const MUTATIONS = new Set(['request-review', 'request-repair', 'request-landing'])
 const TERMINAL_ACTIONS = new Set([
@@ -79,6 +79,22 @@ export function advancementTransitionIdentity(value) {
   })).digest('hex')
 }
 
+/** Recover the original review observation when replaying a Governor repair admission.
+ * @param {string} transition
+ * @param {{ status?: string, candidateObservationId?: string, observationId?: string }} record
+ * @returns {string}
+ */
+export function repairObservationIdFromGovernorRecord(transition, record) {
+  const prefix = transition?.startsWith('merge-repair:')
+    ? 'merge-repair:'
+    : transition?.startsWith('review-repair:') ? 'review-repair:' : ''
+  const observationId = prefix
+    ? transition.slice(prefix.length)
+    : record?.status === 'admitted' ? record.candidateObservationId : record?.observationId
+  if (typeof observationId !== 'string' || !observationId) throw new Error('Governor repair observation is missing')
+  return observationId
+}
+
 /**
  * Reuse one exact requested repair or create its decision-bound Governor candidate.
  * @param {{ records: GovernorRecord[], subject: RepairSubject, stateVersion: string, transitionIdentity: string, repairCause?: string }} input
@@ -88,7 +104,7 @@ export function advancementRepairCandidate({ records, subject, stateVersion, tra
   if (!Array.isArray(records) || !/^[0-9a-f]{64}$/.test(transitionIdentity || '')) {
     throw new Error('Advancement repair identity is incomplete')
   }
-  const observationId = `advance-${transitionIdentity}`
+  const observationId = advancementRepairObservationId(transitionIdentity)
   const transition = repairCause === 'merge-conflict'
     ? mergeRepairTransition(observationId)
     : reviewRepairTransition(observationId)
