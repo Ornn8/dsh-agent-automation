@@ -49,6 +49,20 @@ function latestRequiredCheck(checkRuns, required) {
     .sort((left, right) => (right.id ?? 0) - (left.id ?? 0))[0]
 }
 
+/** Return the authoritative state of one required check using the same newest-check rule as landing. */
+/** @param {RepositoryCheck[]} checkRuns @param {string | { context?: string, app_id?: number | null }} required @returns {'missing' | 'pending' | 'passed' | 'failed'} */
+export function requiredCheckStatus(checkRuns, required) {
+  const latest = latestRequiredCheck(checkRuns, required)
+  if (!latest) return 'missing'
+  if (latest.__typename === 'StatusContext') {
+    const state = String(latest.state).toUpperCase()
+    if (['PENDING', 'EXPECTED'].includes(state)) return 'pending'
+    return state === 'SUCCESS' ? 'passed' : 'failed'
+  }
+  if (String(latest.status).toUpperCase() !== 'COMPLETED') return 'pending'
+  return checkPassed(latest) ? 'passed' : 'failed'
+}
+
 /** Return the Actions run id only for a check URL belonging to this repository. */
 /** @param {unknown} value @param {unknown} repository @returns {number | null} */
 export function reviewRunIdFromDetailsUrl(value, repository) {
