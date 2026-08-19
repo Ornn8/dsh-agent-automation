@@ -1,6 +1,6 @@
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
 import { observeReviewInfrastructureFault, recordedReviewFailure } from './fault-observation.mjs'
-import { classifyControllerFailure, workflowFailureSignature } from './failure-classification.mjs'
+import { classifyControllerFailure, verifyAgentFailureRole, workflowFailureSignature } from './failure-classification.mjs'
 import { faultIdentity } from './fault-record.mjs'
 import { faultProjectionBody, faultProjectionMarker, parseFaultProjection } from './fault-projection.mjs'
 
@@ -73,6 +73,16 @@ if (!Number.isSafeInteger(projectionRunId) || projectionRunId < 1
   || String(sourceRunNumber) !== sourceRunId) throw new Error('Fault observer run identity is invalid')
 const sourceRun = await ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'fault source workflow run')
 const sourceJobs = await pages(`repos/${repository}/actions/runs/${sourceRunId}/jobs`, 'fault source workflow jobs', 'jobs')
+const verifiedRole = verifyAgentFailureRole({
+  run: sourceRun,
+  repository,
+  trust: { controllerRepository, controllerSha },
+})
+const preliminaryClassification = classifyControllerFailure({
+  run: sourceRun,
+  jobs: sourceJobs,
+  provenance: verifiedRole,
+})
 const observed = observeReviewInfrastructureFault({
   run: sourceRun,
   jobs: sourceJobs,
@@ -80,6 +90,7 @@ const observed = observeReviewInfrastructureFault({
   trust: { controllerRepository, controllerSha },
 })
 if (!observed) {
+  process.stdout.write(`Failure classification: ${JSON.stringify(preliminaryClassification)}\n`)
   process.stdout.write(`Fault observer ignored source workflow run ${sourceRunId}.\n`)
   process.exit(0)
 }
@@ -105,7 +116,7 @@ delete observation.subject
 const classification = classifyControllerFailure({
   run: sourceRun,
   jobs: sourceJobs,
-  provenance: { trusted: true, workflow: '.github/workflows/agent-review.yml' },
+  provenance: verifiedRole,
   failureClass: observation.failureClass,
 })
 const issueNumber = await upsertFault(observation)

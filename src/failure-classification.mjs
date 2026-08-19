@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { intentionalReviewBlock } from './recovery-policy.mjs'
+import { intentionalReviewBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
+import { trustedCiFailure } from './dispatch-policy.mjs'
 
 /** Controller-owned failure categories used by recovery and health projections. */
 export const FAILURE_CATEGORIES = Object.freeze([
@@ -14,6 +15,39 @@ const QUALIFIED_FAILURES = new Set(['failure', 'timed_out', 'startup_failure', '
 const MAX_EVIDENCE_JOBS = 20
 const MAX_EVIDENCE_STEPS = 20
 const MAX_EVIDENCE_TEXT = 200
+const VERIFIED_ROLES = new WeakSet()
+
+/** @typedef {'target-required-ci' | 'agent-review' | 'dsh-change' | 'dsh-repair' | 'controller-orchestration'} VerifiedFailureRoleKind */
+/** @typedef {{ kind: VerifiedFailureRoleKind, repository: string, controllerSha?: string, workflowName?: string, workflowPath?: string }} VerifiedFailureRole */
+
+/** @param {VerifiedFailureRole} value @returns {VerifiedFailureRole} */
+function verifiedRole(value) {
+  const role = Object.freeze(value)
+  VERIFIED_ROLES.add(role)
+  return role
+}
+
+/** Verify one existing Agent workflow and return its closed failure-classification role. @param {object} input @returns {VerifiedFailureRole | null} */
+export function verifyAgentFailureRole({ run, repository, trust }) {
+  const subjectRole = trustedFailedAgentRun({ run, repository, trust })
+  const kind = subjectRole === 'review' ? 'agent-review' : subjectRole === 'issue' ? 'dsh-change' : subjectRole === 'pull-request' ? 'dsh-repair' : null
+  if (!kind) return null
+  return verifiedRole({ kind, repository, controllerSha: trust.controllerSha })
+}
+
+/** Verify one configured target required-CI failure and return its closed role. @param {object} input @returns {VerifiedFailureRole | null} */
+export function verifyTargetCiFailureRole({ run, pullRequestNumber, expectedHead, workflowName, repository }) {
+  if (run?.repository?.full_name !== repository || !trustedCiFailure({ run, pullRequestNumber, expectedHead, workflowName })) return null
+  return verifiedRole({ kind: 'target-required-ci', repository, workflowName })
+}
+
+/** Verify one immutable reusable Controller workflow reference and return its orchestration role. @param {object} input @returns {VerifiedFailureRole | null} */
+export function verifyControllerOrchestrationRole({ run, repository, controllerRepository, controllerSha, workflowPath }) {
+  const expected = `${controllerRepository}/${workflowPath}@${controllerSha}`
+  if (run?.repository?.full_name !== repository || run.status !== 'completed'
+    || !run.referenced_workflows?.some(reference => reference.path === expected && reference.sha === controllerSha)) return null
+  return verifiedRole({ kind: 'controller-orchestration', repository, controllerSha, workflowPath })
+}
 
 function boundedEvidenceText(value) {
   return String(value || '').slice(0, MAX_EVIDENCE_TEXT)
@@ -118,8 +152,8 @@ function unknownFailure(run, jobs, reason) {
  * @returns {{category: string, reason: string, evidence: object}}
  */
 export function classifyControllerFailure({ run, jobs, provenance, failureClass } = {}) {
-  if (!provenance?.trusted || typeof provenance.workflow !== 'string' || !provenance.workflow) {
-    return unknownFailure(run, jobs, 'failure provenance is not trusted')
+  if (!provenance || !VERIFIED_ROLES.has(provenance)) {
+    return unknownFailure(run, jobs, 'failure role is not controller-verified')
   }
   if (!run || typeof run !== 'object' || !Array.isArray(jobs)) {
     return unknownFailure(run, jobs, 'workflow failure evidence is incomplete')
@@ -127,27 +161,23 @@ export function classifyControllerFailure({ run, jobs, provenance, failureClass 
   if (!hasTerminalFailure(run, jobs)) return unknownFailure(run, jobs, 'workflow has no trusted terminal failure evidence')
 
   const evidence = failureEvidence(run, jobs)
-  if (intentionalReviewBlock(run, jobs)) {
+  if (provenance.kind === 'agent-review' && intentionalReviewBlock(run, jobs)) {
     return { category: 'review', reason: 'trusted review worker published an intentional BLOCK', evidence }
   }
 
-  const workflow = provenance.workflow.toLowerCase()
   if (['transport', 'host', 'auth-quota'].includes(failureClass)) {
     return { category: 'ci-environment', reason: `trusted runner or provider failure: ${failureClass}`, evidence }
   }
   if (['protocol', 'permissions'].includes(failureClass)) {
     return { category: 'orchestration', reason: `trusted controller protocol failure: ${failureClass}`, evidence }
   }
-  if (workflow.endsWith('/ci.yml') || /^ci$/i.test(String(run.name || ''))) {
+  if (provenance.kind === 'target-required-ci') {
     return { category: 'implementation', reason: 'trusted required CI reported a target failure', evidence }
   }
-  if (failureClass === 'task') {
+  if (failureClass === 'task' && ['dsh-change', 'dsh-repair'].includes(provenance.kind)) {
     return { category: 'implementation', reason: 'trusted target task failed', evidence }
   }
-  const controllerWorkflow = workflow.includes('agent-')
-    || workflow.includes('reconcile') || workflow.includes('recovery')
-    || workflow.includes('dsh-issue') || workflow.includes('dsh-repair')
-  if (controllerWorkflow) {
+  if (provenance.kind === 'controller-orchestration') {
     return { category: 'orchestration', reason: 'trusted controller workflow failed', evidence }
   }
   return unknownFailure(run, jobs, 'trusted evidence does not identify a supported failure class')

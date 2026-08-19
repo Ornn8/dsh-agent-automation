@@ -48,6 +48,9 @@ import {
   classifyAgentFailure,
   classifyControllerFailure,
   recordedFailureClass,
+  verifyAgentFailureRole,
+  verifyControllerOrchestrationRole,
+  verifyTargetCiFailureRole,
 } from '../src/failure-classification.mjs'
 import {
   dshModelSelection,
@@ -98,18 +101,56 @@ function dshFinalMessage(automationResult = {
   return `本地会话结束。\n<!-- agent-automation-result\n${JSON.stringify(automationResult)}\n-->`
 }
 
+const controllerSha = 'c'.repeat(40)
+const targetRepository = 'owner/repository'
+const controllerRepository = 'owner/controller'
+
+function agentFailureRun(workflowPath, overrides = {}) {
+  return {
+    name: 'Agent work', event: 'repository_dispatch', status: 'completed', conclusion: 'failure',
+    repository: { full_name: targetRepository }, head_repository: { full_name: targetRepository }, head_sha: 'a'.repeat(40), head_branch: 'main',
+    referenced_workflows: [{ path: `${controllerRepository}/${workflowPath}@${controllerSha}`, sha: controllerSha }],
+    ...overrides,
+  }
+}
+
+function agentRole(run) {
+  return verifyAgentFailureRole({ run, repository: targetRepository, trust: { controllerRepository, controllerSha } })
+}
+
+function reviewFailureRun(overrides = {}) {
+  const base = 'b'.repeat(40)
+  const head = 'a'.repeat(40)
+  return agentFailureRun('.github/workflows/agent-review.yml', {
+    name: 'Agent PR Review', event: 'pull_request_target', head_sha: head,
+    pull_requests: [{ number: 12, base: { sha: base }, head: { sha: head } }],
+    ...overrides,
+  })
+}
+
+function orchestrationRole(run, workflowPath = '.github/workflows/agent-recovery.yml') {
+  return verifyControllerOrchestrationRole({ run, repository: targetRepository, controllerRepository, controllerSha, workflowPath })
+}
+
+function ciFailureRun(overrides = {}) {
+  return { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'failure', head_sha: 'a'.repeat(40), repository: { full_name: targetRepository }, pull_requests: [{ number: 12 }], ...overrides }
+}
+
+function ciRole(run) {
+  return verifyTargetCiFailureRole({ run, pullRequestNumber: 12, expectedHead: 'a'.repeat(40), workflowName: 'CI', repository: targetRepository })
+}
+
 test('controller classifies a trusted review BLOCK as review with auditable evidence', () => {
+  const run = reviewFailureRun()
   const result = classifyControllerFailure({
-    run: {
-      name: 'Agent PR Review', event: 'pull_request_target', status: 'completed', conclusion: 'failure',
-    },
+    run,
     jobs: [{
       name: 'agent-review / agent/review', conclusion: 'failure', steps: [
         { name: 'Publish an independent change work request', conclusion: 'success' },
         { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
       ],
     }],
-    provenance: { trusted: true, workflow: '.github/workflows/agent-review.yml' },
+    provenance: agentRole(run),
   })
 
   assert.deepEqual(result, {
@@ -129,10 +170,11 @@ test('controller classifies a trusted review BLOCK as review with auditable evid
 })
 
 test('controller classifies trusted required CI failure as implementation', () => {
+  const run = ciFailureRun()
   const result = classifyControllerFailure({
-    run: { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'failure' },
+    run,
     jobs: [{ name: 'test', conclusion: 'failure', steps: [{ name: 'unit tests', conclusion: 'failure' }] }],
-    provenance: { trusted: true, workflow: '.github/workflows/ci.yml' },
+    provenance: ciRole(run),
     failureClass: 'task',
   })
   assert.equal(result.category, 'implementation')
@@ -141,42 +183,45 @@ test('controller classifies trusted required CI failure as implementation', () =
 })
 
 test('controller classifies provider failure as ci-environment and protocol failure as orchestration', () => {
+  const reviewRun = reviewFailureRun()
   const provider = classifyControllerFailure({
-    run: { name: 'Agent PR Review', event: 'pull_request_target', status: 'completed', conclusion: 'failure' },
+    run: reviewRun,
     jobs: [{ name: 'agent-review / agent/review', conclusion: 'failure', steps: [{ name: 'Provider request', conclusion: 'failure' }] }],
-    provenance: { trusted: true, workflow: '.github/workflows/agent-review.yml' },
+    provenance: agentRole(reviewRun),
     failureClass: 'transport',
   })
   assert.equal(provider.category, 'ci-environment')
 
+  const recoveryRun = { name: 'Agent Recovery', event: 'workflow_run', status: 'completed', conclusion: 'failure', repository: { full_name: targetRepository }, referenced_workflows: [{ path: `${controllerRepository}/.github/workflows/agent-recovery.yml@${controllerSha}`, sha: controllerSha }] }
   const protocol = classifyControllerFailure({
-    run: { name: 'Agent Recovery', event: 'workflow_run', status: 'completed', conclusion: 'failure' },
+    run: recoveryRun,
     jobs: [{ name: 'recovery', conclusion: 'failure', steps: [{ name: 'Parse receipt', conclusion: 'failure' }] }],
-    provenance: { trusted: true, workflow: '.github/workflows/agent-recovery.yml' },
+    provenance: orchestrationRole(recoveryRun),
     failureClass: 'protocol',
   })
   assert.equal(protocol.category, 'orchestration')
 })
 
 test('controller reports unknown when trusted evidence cannot establish a category', () => {
+  const run = reviewFailureRun()
   const result = classifyControllerFailure({
-    run: { name: 'Custom Workflow', event: 'workflow_dispatch', status: 'completed', conclusion: 'failure' },
+    run,
     jobs: [{ name: 'custom', conclusion: 'failure', steps: [{ name: 'unknown', conclusion: 'failure' }] }],
-    provenance: { trusted: true, workflow: '.github/workflows/custom.yml' },
+    provenance: agentRole(run),
   })
   assert.equal(result.category, 'unknown')
   assert.match(result.reason, /does not identify/)
 })
 
-test('controller does not classify untrusted failure claims', () => {
+test('controller does not classify a caller-forged failure role', () => {
   const result = classifyControllerFailure({
     run: { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'failure' },
     jobs: [{ name: 'test', conclusion: 'failure', steps: [] }],
-    provenance: { trusted: false, workflow: '.github/workflows/ci.yml' },
+    provenance: { kind: 'target-required-ci', repository: targetRepository, workflowName: 'CI' },
     failureClass: 'task',
   })
   assert.equal(result.category, 'unknown')
-  assert.equal(result.reason, 'failure provenance is not trusted')
+  assert.equal(result.reason, 'failure role is not controller-verified')
 })
 
 test('controller classifies no successful or nonterminal workflow as a failure', () => {
@@ -189,15 +234,16 @@ test('controller classifies no successful or nonterminal workflow as a failure',
     const result = classifyControllerFailure({
       run,
       jobs: [{ name: 'test', conclusion: run.conclusion, steps: [] }],
-      provenance: { trusted: true, workflow: '.github/workflows/ci.yml' },
+      provenance: null,
       failureClass: 'task',
     })
     assert.equal(result.category, 'unknown')
   }
+  const noFailureRun = ciFailureRun()
   const withoutFailures = classifyControllerFailure({
-    run: { name: 'CI', event: 'pull_request', status: 'completed', conclusion: 'failure' },
+    run: noFailureRun,
     jobs: [{ name: 'test', conclusion: 'success', steps: [{ name: 'unit tests', conclusion: 'success' }] }],
-    provenance: { trusted: true, workflow: '.github/workflows/ci.yml' },
+    provenance: ciRole(noFailureRun),
     failureClass: 'task',
   })
   assert.equal(withoutFailures.category, 'unknown')
@@ -205,10 +251,11 @@ test('controller classifies no successful or nonterminal workflow as a failure',
 
 test('controller classifies a DSH task failure as implementation before workflow fallback', () => {
   for (const workflow of ['.github/workflows/dsh-issue.yml', '.github/workflows/dsh-repair.yml']) {
+    const run = agentFailureRun(workflow)
     const result = classifyControllerFailure({
-      run: { name: 'Agent work', event: 'repository_dispatch', status: 'completed', conclusion: 'failure' },
+      run,
       jobs: [{ name: 'agent', conclusion: 'failure', steps: [{ name: 'Execute task', conclusion: 'failure' }] }],
-      provenance: { trusted: true, workflow },
+      provenance: agentRole(run),
       failureClass: 'task',
     })
     assert.equal(result.category, 'implementation')
@@ -221,10 +268,11 @@ test('controller bounds audit evidence and reports omitted jobs and steps', () =
     conclusion: 'failure',
     steps: Array.from({ length: 25 }, (_, stepIndex) => ({ name: `step-${stepIndex}-${'y'.repeat(300)}`, conclusion: 'failure' })),
   }))
+  const run = ciFailureRun({ name: 'CI' + 'z'.repeat(300) })
   const result = classifyControllerFailure({
-    run: { name: 'CI' + 'z'.repeat(300), event: 'pull_request', status: 'completed', conclusion: 'failure' },
+    run,
     jobs,
-    provenance: { trusted: true, workflow: '.github/workflows/ci.yml' },
+    provenance: verifyTargetCiFailureRole({ run, pullRequestNumber: 12, expectedHead: 'a'.repeat(40), workflowName: run.name, repository: targetRepository }),
     failureClass: 'task',
   })
   assert.equal(result.evidence.failedJobs.length, 20)
@@ -237,13 +285,29 @@ test('controller bounds audit evidence and reports omitted jobs and steps', () =
 })
 
 test('controller review classification uses the shared intentional BLOCK authority', () => {
-  const run = { name: 'Agent PR Review', event: 'pull_request_target', status: 'completed', conclusion: 'failure' }
+  const run = reviewFailureRun()
   const jobs = [{ name: 'agent-review / agent/review', conclusion: 'failure', steps: [
     { name: 'Publish an independent change work request', conclusion: 'success' },
     { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
   ] }]
   assert.equal(intentionalReviewBlock(run, jobs), true)
-  assert.equal(classifyControllerFailure({ run, jobs, provenance: { trusted: true, workflow: '.github/workflows/agent-review.yml' } }).category, 'review')
+  assert.equal(classifyControllerFailure({ run, jobs, provenance: agentRole(run) }).category, 'review')
+})
+
+test('failure classification cannot cross verified role boundaries', () => {
+  const reviewRun = reviewFailureRun()
+  const reviewJobs = [{ name: 'agent-review / agent/review', conclusion: 'failure', steps: [
+    { name: 'Publish an independent change work request', conclusion: 'success' },
+    { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
+  ] }]
+  assert.equal(classifyControllerFailure({ run: reviewRun, jobs: reviewJobs, provenance: agentRole(reviewRun), failureClass: 'task' }).category, 'review')
+
+  const orchestrationRun = { name: 'Controller', event: 'workflow_run', status: 'completed', conclusion: 'failure', repository: { full_name: targetRepository }, referenced_workflows: [{ path: `${controllerRepository}/.github/workflows/agent-recovery.yml@${controllerSha}`, sha: controllerSha }] }
+  assert.notEqual(classifyControllerFailure({ run: orchestrationRun, jobs: reviewJobs, provenance: orchestrationRole(orchestrationRun), failureClass: 'task' }).category, 'review')
+  assert.notEqual(classifyControllerFailure({ run: reviewRun, jobs: [{ name: 'review', conclusion: 'failure', steps: [{ name: 'task', conclusion: 'failure' }] }], provenance: agentRole(reviewRun), failureClass: 'task' }).category, 'implementation')
+
+  const wrongCi = ciFailureRun({ name: 'Controller CI' })
+  assert.equal(verifyTargetCiFailureRole({ run: wrongCi, pullRequestNumber: 12, expectedHead: 'a'.repeat(40), workflowName: 'CI', repository: targetRepository }), null)
 })
 
 function visibleSessionFetch(reason = 'completed', automationResult, finalMessage) {
