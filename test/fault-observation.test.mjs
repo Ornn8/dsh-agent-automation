@@ -138,6 +138,54 @@ test('an intentional BLOCK and an untrusted review run never become infrastructu
   assert.equal(contradicted.observation, null)
 })
 
+test('authoritative BLOCK job evidence is independent of aggregate cancellation and sibling jobs', () => {
+  const blockJob = {
+    id: 501,
+    name: 'agent-review / agent/review',
+    status: 'completed',
+    conclusion: 'failure',
+    steps: [
+      { number: 1, name: 'Publish an independent change work request', status: 'completed', conclusion: 'success' },
+      { number: 2, name: 'Preserve the blocking review conclusion', status: 'completed', conclusion: 'failure' },
+    ],
+  }
+  const variants = [
+    { run: reviewRun({ conclusion: 'failure' }), jobs: [blockJob] },
+    {
+      run: reviewRun({ conclusion: 'cancelled' }),
+      jobs: [blockJob, {
+        id: 502,
+        name: 'caller / unrelated',
+        status: 'completed',
+        conclusion: 'cancelled',
+        steps: [{ number: 1, name: 'Unrelated caller step', status: 'completed', conclusion: 'cancelled' }],
+      }],
+    },
+  ]
+  const decisions = variants.map(({ run, jobs }) => {
+    assert.equal(observeReviewInfrastructureFault({
+      run,
+      jobs,
+      repository,
+      trust: { controllerRepository, controllerSha },
+    }), null)
+    return reviewFaultAuditDecision({
+      run,
+      jobs,
+      repository,
+      trust: { controllerRepository, controllerSha },
+      current: currentPullRequest,
+      checkRuns: [],
+    })
+  })
+  for (const decision of decisions) {
+    assert.equal(decision.classification.category, 'review')
+    assert.equal(decision.classification.reason, 'trusted review worker published an intentional BLOCK')
+    assert.equal(decision.observation, null)
+  }
+  assert.deepEqual(decisions[0].classification.evidence.failedJobs, decisions[1].classification.evidence.failedJobs)
+})
+
 test('a fault projection is authorized only by the exact hosted observer workflow provenance', () => {
   const projection = {
     repository,

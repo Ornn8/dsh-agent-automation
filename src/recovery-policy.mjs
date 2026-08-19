@@ -69,13 +69,20 @@ function validSubject(subject, current, repository) {
     && current.head?.repo?.full_name === repository
 }
 
-/** Return whether trusted review-job steps prove an intentional BLOCK rather than infrastructure failure. */
+/** Return whether one authoritative review job proves an intentional BLOCK from machine step conclusions. @param {object[]} jobs @returns {boolean} */
+export function intentionalReviewJobBlock(jobs) {
+  const reviewJobs = (jobs || []).filter(job => job?.name === 'agent-review / agent/review')
+  return reviewJobs.length === 1
+    && reviewJobs[0].conclusion === 'failure'
+    && Array.isArray(reviewJobs[0].steps)
+    && reviewJobs[0].steps.some(step => step.name === 'Publish an independent change work request' && step.conclusion === 'success')
+    && reviewJobs[0].steps.some(step => step.name === 'Preserve the blocking review conclusion' && step.conclusion === 'failure')
+}
+
+/** Return whether a failed review run contains machine evidence of an intentional BLOCK. */
 export function intentionalReviewBlock(run, jobs) {
   if (run?.conclusion !== 'failure') return false
-  return jobs?.some(job => job.name === 'agent-review / agent/review'
-    && job.conclusion === 'failure'
-    && job.steps?.some(step => step.name === 'Publish an independent change work request' && step.conclusion === 'success')
-    && job.steps?.some(step => step.name === 'Preserve the blocking review conclusion' && step.conclusion === 'failure'))
+  return intentionalReviewJobBlock(jobs)
 }
 
 /** Decide the single idempotent recovery transition after live subject validation. */

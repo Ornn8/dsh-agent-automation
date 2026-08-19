@@ -1,4 +1,4 @@
-import { intentionalReviewBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
+import { intentionalReviewJobBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { reviewWorkflowFailureJobs } from './failure-classification.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { REVIEW_CHECK_NAME } from './review-authority.mjs'
@@ -27,7 +27,7 @@ export function observeReviewInfrastructureFault({ run, jobs, repository, trust 
   const reviewJobs = reviewWorkflowFailureJobs(jobs)
   if (trustedFailedAgentRun({ run, repository, trust }) !== 'review'
     || !reviewJobs
-    || intentionalReviewBlock(run, reviewJobs)) return null
+    || intentionalReviewJobBlock(reviewJobs)) return null
   const candidates = (run.pull_requests || []).filter(pullRequest => Number.isSafeInteger(pullRequest.number)
     && pullRequest.number > 0
     && FULL_SHA.test(pullRequest.base?.sha || '')

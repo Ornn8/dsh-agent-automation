@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { validateRepositoryAutomationConfig } from './common.mjs'
 import { hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
-import { intentionalReviewBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
+import { intentionalReviewJobBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { trustedCiFailure } from './dispatch-policy.mjs'
 
 /** Controller-owned failure categories used by recovery and health projections. */
@@ -209,7 +209,7 @@ export function classifyAgentFailure(error) {
 export function verifyReviewInfrastructureFailureEvidence({ run, jobs, provenance }) {
   if (!verifiedForEvidence(provenance, VERIFIED_ROLES, run, jobs)
     || provenance.kind !== 'agent-review'
-    || intentionalReviewBlock(run, jobs)) return null
+    || intentionalReviewJobBlock(roleEvidenceJobs(provenance, jobs))) return null
   const reviewConclusion = roleEvidenceJobs(provenance, jobs)?.[0]?.conclusion
   const failureClass = ['cancelled', 'timed_out', 'startup_failure', 'stale'].includes(reviewConclusion) ? 'transport' : 'host'
   return verifiedFailureEvidence({ failureClass, source: 'review-workflow' }, run, jobs, provenance)
@@ -339,7 +339,7 @@ export function classifyControllerFailure({ run, jobs, provenance, failureEviden
     return { category: 'review-evidence-disagreement', reason: 'trusted review workflow and CheckRun evidence disagree', evidence }
   }
   if (!hasTerminalFailure(run, evidenceJobs)) return unknownFailure(run, evidenceJobs, 'workflow has no trusted terminal failure evidence')
-  if (provenance.kind === 'agent-review' && intentionalReviewBlock(run, evidenceJobs)) {
+  if (provenance.kind === 'agent-review' && intentionalReviewJobBlock(evidenceJobs)) {
     return { category: 'review', reason: 'trusted review worker published an intentional BLOCK', evidence }
   }
 
