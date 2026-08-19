@@ -89,7 +89,12 @@ function candidateRecord({ transition, subject, stateVersion, observationId }) {
   }
 }
 
-/** Return the first matching candidate whose exact transition and subject state have not been applied. */
+/**
+ * Return the first matching candidate whose exact transition and subject state have not been applied.
+ * @param {Array<{ status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } }>} records
+ * @param {(record: { status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } }) => boolean} [predicate]
+ * @returns {{ status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } } | undefined}
+ */
 export function unappliedGovernorCandidate(records, predicate = () => true) {
   if (!Array.isArray(records) || typeof predicate !== 'function') {
     throw new Error('Governor candidate selection requires records and a predicate')
