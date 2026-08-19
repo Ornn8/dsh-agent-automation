@@ -47,7 +47,6 @@ import {
   trustedGovernorRecords,
 } from './governor-state.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
-import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -283,22 +282,20 @@ if (transportedRequest) {
   repairProcedure = stage.procedure
 }
 
-async function requestTransportedReview(current) {
+async function requestTransportedAdvancement(current) {
   if (!transportedRequest || !transportedProfile) return false
-  const cycle = resolveGithubPrCycle(transportedProfile.definition, transportedRequest.workflowId)
   await run(config.ghExecutable, [
     'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
   ], {
     env: hostCredentialEnvironment(),
     input: JSON.stringify({
-      event_type: 'agent-review',
+      event_type: 'dsh-advance',
       client_payload: {
         pull_request_number: pullRequestNumber,
         base_sha: current.base.sha,
         head_sha: current.head.sha,
         profile_id: transportedRequest.profileId,
         workflow_id: transportedRequest.workflowId,
-        stage_id: cycle.review.id,
         request_id: `repair-complete-${current.head.sha}`,
       },
     }),
@@ -310,7 +307,7 @@ if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNu
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach the DSH repair agent')
 if (pullRequest.head.sha !== expectedHead) {
-  if (!await requestTransportedReview(pullRequest)) throw new Error('The pull request head changed before DSH repair started')
+  if (!await requestTransportedAdvancement(pullRequest)) throw new Error('The pull request head changed before DSH repair started')
   await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
   await upsertStatus('complete', branch, `The interrupted repair had already advanced the pull request to ${pullRequest.head.sha}; the trusted Profile workflow requested its exact-head review.`)
   process.stdout.write(`Recovered the completed repair for pull request #${pullRequestNumber} at ${pullRequest.head.sha}.\n`)
@@ -533,7 +530,7 @@ try {
         ? await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run after repair')
         : null
       if (current.head.sha !== expectedHead) {
-        await requestTransportedReview(current)
+        await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
         process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)

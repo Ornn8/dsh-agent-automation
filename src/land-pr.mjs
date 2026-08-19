@@ -222,18 +222,35 @@ if (current.baseRefOid !== pullRequest.baseRefOid
   throw new Error(`Pull request or landing evidence changed before merge: ${currentDecision.reason}`)
 }
 
-const mergeResult = await run(githubExecutable, [
-  'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequestNumber}/merge`, '--input', '-',
-], {
-  env: githubEnvironment,
-  input: JSON.stringify({
-    sha: expectedHead,
-    merge_method: cycle.merge.strategy,
-    commit_message: current.body || '',
-  }),
-})
+async function reconcileConcurrentMerge() {
+  const settled = await readPullRequest()
+  if (settled.state !== 'MERGED'
+    || settled.baseRefName !== defaultBranch
+    || settled.headRefOid !== expectedHead) return false
+  await closeLinkedIssues(settled)
+  process.stdout.write(`Pull request #${pullRequestNumber} was already landed at exact head ${expectedHead}.\n`)
+  return true
+}
+
+let mergeResult
+try {
+  mergeResult = await run(githubExecutable, [
+    'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequestNumber}/merge`, '--input', '-',
+  ], {
+    env: githubEnvironment,
+    input: JSON.stringify({
+      sha: expectedHead,
+      merge_method: cycle.merge.strategy,
+      commit_message: current.body || '',
+    }),
+  })
+} catch (error) {
+  if (await reconcileConcurrentMerge()) process.exit(0)
+  throw error
+}
 const merge = parseJson(mergeResult.stdout, 'pull request merge result')
 if (merge?.merged !== true || !/^[0-9a-f]{40}$/.test(merge.sha || '')) {
+  if (await reconcileConcurrentMerge()) process.exit(0)
   throw new Error(`GitHub did not merge pull request #${pullRequestNumber}`)
 }
 await closeLinkedIssues(current)

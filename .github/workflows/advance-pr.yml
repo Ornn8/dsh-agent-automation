@@ -1,20 +1,39 @@
-name: Reconcile Reviewed Pull Requests
+name: Advance Pull Request
 
 on:
   workflow_call:
     inputs:
+      pull_request_number:
+        required: false
+        type: number
+        default: 0
+      base_sha:
+        required: false
+        type: string
+        default: ''
+      head_sha:
+        required: false
+        type: string
+        default: ''
       profile_id:
         required: false
         type: string
         default: github-pr-cycle
+      workflow_id:
+        required: false
+        type: string
+        default: ''
+      required_checks_json:
+        required: true
+        type: string
 
 concurrency:
-  group: dsh-landing-reconcile-${{ github.repository }}
+  group: agent-advance-${{ github.repository }}-${{ inputs.pull_request_number }}-${{ inputs.head_sha }}
   cancel-in-progress: false
 
 jobs:
-  reconcile:
-    name: landing/reconcile
+  advance:
+    name: advancement/exact-state
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -32,15 +51,19 @@ jobs:
           path: controller
           persist-credentials: false
 
-      - name: Reconcile trusted reviewed pull requests
+      - name: Evaluate and consume one exact-state advancement
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PROFILE_ID: ${{ inputs.profile_id }}
-          REQUIRED_CHECKS_JSON: ${{ vars.DSH_AUTOMATION_REQUIRED_CHECKS }}
+          WORKFLOW_ID: ${{ inputs.workflow_id }}
+          REQUIRED_CHECKS_JSON: ${{ inputs.required_checks_json }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml
-          GOVERNOR_WORKFLOW_PATH: .github/workflows/reconcile-landing.yml
+          GOVERNOR_WORKFLOW_PATH: .github/workflows/advance-pr.yml
           GITHUB_TOKEN: ${{ github.token }}
-        run: node controller/src/reconcile-landing.mjs
+        run: node controller/src/advance-pr.mjs

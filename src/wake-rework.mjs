@@ -86,6 +86,20 @@ if (resume && decision.action === 'record-resume') {
     '--remove-label', 'automation/paused',
   ], { env: environment })
 }
+await run(githubExecutable, [
+  'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
+], {
+  env: environment,
+  input: JSON.stringify({
+    event_type: 'dsh-advance',
+    client_payload: {
+      pull_request_number: pullRequestNumber,
+      base_sha: pullRequest.base.sha,
+      head_sha: pullRequest.head.sha,
+      profile_id: 'github-pr-cycle',
+    },
+  }),
+})
 process.stdout.write(resume
-  ? `Recorded authorized resume for pull request #${pullRequestNumber}; a later observation will evaluate admission.\n`
-  : `Recorded rework candidate for pull request #${pullRequestNumber}; a later observation will evaluate admission.\n`)
+  ? `Recorded authorized resume for pull request #${pullRequestNumber}; exact-state advancement was requested.\n`
+  : `Recorded rework candidate for pull request #${pullRequestNumber}; exact-state advancement was requested.\n`)

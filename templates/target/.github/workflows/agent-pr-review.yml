@@ -6,8 +6,6 @@ run-name: >-
 on:
   repository_dispatch:
     types: [agent-review]
-  pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, labeled, edited]
 
 permissions:
   actions: read
@@ -18,19 +16,11 @@ permissions:
 
 jobs:
   agent-review:
-    if: >-
-      github.event_name == 'repository_dispatch'
-      || (github.event.pull_request.draft == false
-        && github.event.pull_request.head.repo.full_name == github.repository
-        && (github.event.action != 'synchronize'
-          || !contains(github.event.pull_request.labels.*.name, 'automation/repairing'))
-        && (github.event.action != 'labeled' || github.event.label.name == 'automation/review-ready')
-        && (github.event.action != 'edited' || github.event.changes.base.ref.from != null))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/agent-review.yml@{{CONTROLLER_SHA}}
     with:
-      pull_request_number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pull_request_number || github.event.pull_request.number }}
-      base_sha: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.base_sha || github.event.pull_request.base.sha }}
-      head_sha: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.head_sha || github.event.pull_request.head.sha }}
-      profile_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.profile_id || 'github-pr-cycle' }}
-      workflow_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.workflow_id || 'default' }}
-      stage_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.stage_id || 'review' }}
+      pull_request_number: ${{ github.event.client_payload.pull_request_number }}
+      base_sha: ${{ github.event.client_payload.base_sha }}
+      head_sha: ${{ github.event.client_payload.head_sha }}
+      profile_id: ${{ github.event.client_payload.profile_id || 'github-pr-cycle' }}
+      workflow_id: ${{ github.event.client_payload.workflow_id || 'default' }}
+      stage_id: ${{ github.event.client_payload.stage_id || 'review' }}

@@ -303,14 +303,8 @@ if (review.verdict === 'block') {
     ghExecutable: config.ghExecutable, repository, checkId: reviewCheckId, runUrl: requiredEnv('RUN_URL'),
     conclusion: 'success', summary: 'The review Worker found no blocking defects at this head.', env: githubEnvironment,
   })
-  await run(config.ghExecutable, [
-    'api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=dsh-land',
-    '-F', `client_payload[pr_number]=${pullRequestNumber}`,
-    '-f', `client_payload[head_sha]=${expectedHead}`,
-  ], { env: githubEnvironment })
   await writeOutput('verdict', 'pass')
-  process.stdout.write(`The review Worker passed pull request #${pullRequestNumber}; landing was requested for ${expectedHead}.\n`)
+  process.stdout.write(`The review Worker passed pull request #${pullRequestNumber}; exact-state advancement will evaluate ${expectedHead}.\n`)
 }
 } finally {
   await releaseReviewWorkspace(workspace)

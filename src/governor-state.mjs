@@ -6,8 +6,10 @@ const ATTESTATION_PATTERN = /^- Controller workflow: `([^`\r\n]+)`$/m
 const RUN_PATTERN = /^- Run: https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/actions\/runs\/(\d+)$/m
 export const GOVERNOR_WORKFLOW_PATHS = Object.freeze([
   REVIEW_WORKFLOW_PATH,
+  '.github/workflows/advance-pr.yml',
   '.github/workflows/dispatch-backlog.yml',
   '.github/workflows/dsh-repair.yml',
+  '.github/workflows/reconcile-landing.yml',
   '.github/workflows/reconcile-reviews.yml',
   '.github/workflows/recover-backlog.yml',
   '.github/workflows/repository-supervisor.yml',

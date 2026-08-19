@@ -84,6 +84,18 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/publish-work-request.mjs
 
+      - name: Wake exact-state advancement after review publication
+        if: steps.review.outcome == 'success'
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          WORKFLOW_ID: ${{ inputs.workflow_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node controller/src/dispatch-advancement.mjs
+
       - name: Fail the exact-head review CheckRun when automation fails
         if: steps.review.outcome == 'failure'
         env:

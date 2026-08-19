@@ -160,7 +160,7 @@ if (!/^[0-9a-f]{40}$/i.test(defaultBranchHead || '')) {
   throw new Error(`Default branch ${defaultBranch} did not resolve to a commit SHA`)
 }
 
-async function requestReview(pullRequest) {
+async function requestAdvancement(pullRequest) {
   for (const label of ['automation/ci-baseline', 'automation/repair-blocked']) {
     if (!pullRequest.labels?.some(candidate => candidate.name === label)) continue
     await run(githubExecutable, [
@@ -178,7 +178,7 @@ async function requestReview(pullRequest) {
   ], { env: githubEnvironment })
   await run(githubExecutable, [
     'api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=agent-review',
+    '-f', 'event_type=dsh-advance',
     '-F', `client_payload[pull_request_number]=${pullRequest.number}`,
     '-f', `client_payload[base_sha]=${pullRequest.base.sha}`,
     '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
@@ -295,7 +295,7 @@ for (const summary of summaries.flat()) {
           ], { env: actionsEnvironment, input: JSON.stringify(repositoryDispatchBody(request)) })
         }
       } else {
-        await requestReview(pullRequest)
+        await requestAdvancement(pullRequest)
       }
       await markGovernorApplied(pullRequest, pendingTransition, governed)
       reconciled += 1
@@ -322,7 +322,7 @@ for (const summary of summaries.flat()) {
   }
   if (!needsExactReview({ repository, defaultBranch, pullRequest, reviewProof })) continue
 
-  await requestReview(pullRequest)
+  await requestAdvancement(pullRequest)
   reconciled += 1
 }
 process.stdout.write(`Reconciled ${reconciled} pull request(s).\n`)
