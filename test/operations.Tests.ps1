@@ -303,7 +303,7 @@ Describe 'Effective configuration explanation' {
     $rows = @(Get-ConfigurationExplanation -Loaded $loaded -RepositoryVariableResolver $resolver)
     $missing = @($rows | Where-Object Status -CEQ 'missing')
 
-    $missing | Should -HaveCount 3
+    $missing | Should -HaveCount 4
     @($missing | Where-Object Override) | Should -HaveCount 0
   }
 }

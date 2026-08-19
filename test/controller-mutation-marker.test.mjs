@@ -117,14 +117,14 @@ test('Worker identity trusts the immutable configured controller author, not the
   }
   assert.deepEqual(await trustedWorkerIdentity(
     { user: { login: 'controller-login' }, body },
-    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run,
+    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run, 'controller-login',
   ), identity)
   assert.equal(await trustedWorkerIdentity(
     { user: { login: 'someone-else' }, body },
-    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run,
+    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run, 'controller-login',
   ), null)
   assert.equal(await trustedWorkerIdentity(
-    { user: { login: 'unknown-login' }, body },
-    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run,
+    { user: { login: 'unknown-login' }, body: body.replace('controller-login', 'unknown-login') },
+    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run, 'controller-login',
   ), null)
 })

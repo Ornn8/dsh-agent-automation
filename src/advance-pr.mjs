@@ -30,6 +30,7 @@ const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const requestedProfileId = process.env.PROFILE_ID?.trim() || ''
 let profileId = requestedProfileId
 let requestedWorkflowId = process.env.WORKFLOW_ID?.trim() || ''
+const trustedControllerLogin = requiredEnv('TRUSTED_CONTROLLER_LOGIN')
 const sourceRunId = Number.parseInt(process.env.SOURCE_RUN_ID || '0', 10)
 const sourceRunAttempt = Number.parseInt(process.env.SOURCE_RUN_ATTEMPT || '0', 10)
 const trustedReview = {
@@ -170,7 +171,7 @@ async function persistedWorkflowIdentity(pullRequest) {
   ], `pull request #${pullRequest.number} Worker comments`)).flat()
   for (const comment of pullRequestComments.slice().reverse()) {
     const identity = await trustedWorkerIdentity(comment,
-      { type: 'pull-request', number: pullRequest.number }, 'repair-worker', repository, readRun)
+      { type: 'pull-request', number: pullRequest.number }, 'repair-worker', repository, readRun, trustedControllerLogin)
     if (identity?.branch === pullRequest.head.ref) return identity
   }
   const references = await ghJson([
@@ -183,7 +184,7 @@ async function persistedWorkflowIdentity(pullRequest) {
     ], `Issue #${reference.number} Worker comments`)).flat()
     for (const comment of comments.slice().reverse()) {
       const identity = await trustedWorkerIdentity(comment,
-        { type: 'issue', number: reference.number }, 'change-worker', repository, readRun)
+        { type: 'issue', number: reference.number }, 'change-worker', repository, readRun, trustedControllerLogin)
       if (identity?.branch === pullRequest.head.ref) return identity
     }
   }

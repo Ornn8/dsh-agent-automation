@@ -4,11 +4,12 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const HASH = /^[0-9a-f]{64}$/
 
 /** Verify one Worker status comment against its controller-authenticated run. */
-export async function trustedWorkerIdentity(comment, subject, operation, repository, loadRun) {
+export async function trustedWorkerIdentity(comment, subject, operation, repository, loadRun, expectedControllerLogin) {
   if (!comment?.user?.login) return null
   try {
     const record = await trustedControllerMutation({
       comment,
+      expectedControllerLogin,
       expectedRepository: repository,
       expectedSubject: subject,
       loadRun,

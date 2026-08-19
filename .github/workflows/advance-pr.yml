@@ -34,6 +34,9 @@ on:
       required_checks_json:
         required: true
         type: string
+      controller_login:
+        required: true
+        type: string
 
 concurrency:
   # All advancement wakes for one repository share one serialized decision lane.
@@ -73,6 +76,7 @@ jobs:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
           REQUIRED_CHECKS_JSON: ${{ inputs.required_checks_json }}
+          TRUSTED_CONTROLLER_LOGIN: ${{ inputs.controller_login }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml

@@ -1144,6 +1144,7 @@ test('landing uses the exact-head REST merge endpoint without GraphQL pull reque
   assert.match(source, /client_payload: \{ issue_number: 0 \}/)
   assert.match(workflow, /issues: write/)
   assert.match(caller, /issues: write/)
+  assert.match(caller, /AGENT_AUTOMATION_CONTROLLER_LOGIN/)
 })
 
 test('WorkRequest repository dispatch uses one extensible payload envelope', async () => {

@@ -139,10 +139,24 @@ function Get-ConfigurationExplanation {
       $mapping = @($Loaded.Operations.repositoryMappings)[$index]
       foreach ($binding in @(
         [pscustomobject]@{ Field = 'ciWorkflows'; Variable = 'DSH_AUTOMATION_CI_WORKFLOWS' },
-        [pscustomobject]@{ Field = 'requiredChecks'; Variable = 'DSH_AUTOMATION_REQUIRED_CHECKS' }
+        [pscustomobject]@{ Field = 'requiredChecks'; Variable = 'DSH_AUTOMATION_REQUIRED_CHECKS' },
+        [pscustomobject]@{ Field = 'controllerLogin'; Variable = 'AGENT_AUTOMATION_CONTROLLER_LOGIN' }
       )) {
         $path = "operations.repositoryMappings[$index].$($binding.Field)"
         $row = @($rows | Where-Object Path -CEQ $path)
+        if ($binding.Field -eq 'controllerLogin' -and $row.Count -eq 0) {
+          $row = @([pscustomobject][ordered]@{
+            Path = $path
+            Value = $Loaded.Config.github.login
+            DeclaredValue = $Loaded.Config.github.login
+            SourceType = 'configuration'
+            Source = $Loaded.Sources.UserPath
+            Line = $Loaded.Sources.UserLines['github.login']
+            Override = $false
+            Status = 'configuration'
+          })
+          $rows.Add($row[0])
+        }
         if ($row.Count -ne 1) { throw "Configuration explanation could not find $path" }
         $remote = & $RepositoryVariableResolver $mapping.repository $binding.Variable
         $row[0].SourceType = 'repository-variable'
@@ -150,7 +164,9 @@ function Get-ConfigurationExplanation {
         $row[0].Line = $null
         $row[0].Override = [bool]$remote.Found
         $valid = $false
-        if ($remote.Found) {
+        if ($binding.Field -eq 'controllerLogin') {
+          $valid = $remote.Found -and [string]$remote.Value -ceq [string]$Loaded.Config.github.login -and [string]$remote.Value -match '^[A-Za-z0-9-]{1,39}$'
+        } elseif ($remote.Found) {
           try {
             $parsed = ConvertFrom-Json -InputObject ([string]$remote.Value) -Depth 16 -NoEnumerate
             $values = @($parsed)
@@ -159,7 +175,7 @@ function Get-ConfigurationExplanation {
               @($values | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) -or $_.Length -gt 128 -or $_ -match '[\r\n]' }).Count -eq 0
           } catch { $valid = $false }
         }
-        $row[0].Status = if (-not $remote.Found) { 'missing' } elseif ($valid) { 'override' } else { 'invalid' }
+        $row[0].Status = if (-not $remote.Found) { 'missing' } elseif ($valid) { 'override' } else { 'mismatch' }
         $row[0].Value = if ($remote.Found) { [string]$remote.Value } else { '<missing>' }
       }
     }
@@ -1026,6 +1042,11 @@ function New-InstallationPlan {
   } else {
     @($instances | ForEach-Object { $_.repository } | Where-Object { $_ } | Sort-Object -Unique)
   }
+  $controllerLogin = if ($Loaded.Config.PSObject.Properties['github'] -and $Loaded.Config.github.PSObject.Properties['login']) {
+    [string]$Loaded.Config.github.login
+  } else {
+    'REPLACE_WITH_GITHUB_LOGIN'
+  }
   $repositoryPlans = @($ops.repositoryMappings |
     Where-Object { $_.repository -in $selectedRepositories } |
     Sort-Object repository |
@@ -1035,6 +1056,7 @@ function New-InstallationPlan {
         variables = [pscustomobject][ordered]@{
           DSH_AUTOMATION_CI_WORKFLOWS = ConvertTo-Json -InputObject @($_.ciWorkflows) -Compress
           DSH_AUTOMATION_REQUIRED_CHECKS = ConvertTo-Json -InputObject @($_.requiredChecks) -Compress
+          AGENT_AUTOMATION_CONTROLLER_LOGIN = $controllerLogin
         }
         branchProtection = [pscustomobject][ordered]@{
           strict = $true

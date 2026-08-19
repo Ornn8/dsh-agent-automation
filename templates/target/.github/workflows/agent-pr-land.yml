@@ -38,3 +38,4 @@ jobs:
       source_run_id: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Agent PR Review' && github.event.workflow_run.id || 0 }}
       source_run_attempt: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Agent PR Review' && github.event.workflow_run.run_attempt || 0 }}
       required_checks_json: ${{ vars.DSH_AUTOMATION_REQUIRED_CHECKS }}
+      controller_login: ${{ vars.AGENT_AUTOMATION_CONTROLLER_LOGIN }}

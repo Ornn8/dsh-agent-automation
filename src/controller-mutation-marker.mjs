@@ -95,9 +95,11 @@ export function parseControllerMutationMarker(body) {
 }
 
 /** Verify that an audit marker names the expected target, Actions run, and reusable Controller revision. */
-/** @param {{ comment: MutationComment, markerAuthor?: string, expectedRepository: string, expectedSubject: MutationSubject, loadRun: (runId: number) => WorkflowRun | Promise<WorkflowRun> }} input @returns {Promise<ControllerMutationRecord>} */
-export async function trustedControllerMutation({ comment, markerAuthor, expectedRepository, expectedSubject, loadRun }) {
+/** @param {{ comment: MutationComment, markerAuthor?: string, expectedControllerLogin?: string, expectedRepository: string, expectedSubject: MutationSubject, loadRun: (runId: number) => WorkflowRun | Promise<WorkflowRun> }} input @returns {Promise<ControllerMutationRecord>} */
+export async function trustedControllerMutation({ comment, markerAuthor, expectedControllerLogin, expectedRepository, expectedSubject, loadRun }) {
   if ((markerAuthor !== undefined && (typeof markerAuthor !== 'string' || !markerAuthor.trim()))
+    || (expectedControllerLogin !== undefined
+      && (typeof expectedControllerLogin !== 'string' || !expectedControllerLogin.trim()))
     || !REPOSITORY.test(expectedRepository || '')
     || !['issue', 'pull-request'].includes(expectedSubject?.type)
     || !Number.isSafeInteger(expectedSubject?.number) || expectedSubject.number < 1
@@ -105,7 +107,10 @@ export async function trustedControllerMutation({ comment, markerAuthor, expecte
     throw new Error('Controller mutation trust is incomplete')
   }
   const record = parseControllerMutationMarker(comment.body)
-  const expectedAuthor = record.version === 2 ? record.author : markerAuthor
+  const expectedAuthor = expectedControllerLogin || markerAuthor
+  if (record.version === 2 && record.author !== expectedControllerLogin) {
+    throw new Error('Controller mutation marker author is not trusted')
+  }
   if (typeof expectedAuthor !== 'string' || !LOGIN.test(expectedAuthor)
     || comment?.user?.login !== expectedAuthor) {
     throw new Error('Controller mutation marker author is not trusted')

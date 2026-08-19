@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
   actionsCredentialEnvironment,
+  githubLogin,
   hostCredentialEnvironment,
   loadConfig,
   parseJson,
@@ -34,6 +35,7 @@ const repository = requiredEnv('TARGET_REPOSITORY')
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const config = await loadConfig()
 await verifyGithubIdentity({ config })
+const trustedControllerLogin = githubLogin(config)
 const githubExecutable = config.ghExecutable
 const githubEnvironment = hostCredentialEnvironment()
 const actionsEnvironment = actionsCredentialEnvironment()
@@ -155,7 +157,7 @@ async function persistedWorkflowIdentity(pullRequest) {
   for (const comment of comments.slice().reverse()) {
     const identity = await trustedWorkerIdentity(comment,
       { type: 'pull-request', number: pullRequest.number }, 'repair-worker', repository,
-      runId => actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], `Worker run ${runId}`))
+      runId => actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], `Worker run ${runId}`), trustedControllerLogin)
     if (identity?.branch === pullRequest.head.ref) return identity
   }
   const references = await actionsJson([
@@ -169,7 +171,7 @@ async function persistedWorkflowIdentity(pullRequest) {
     for (const comment of issueComments.slice().reverse()) {
       const identity = await trustedWorkerIdentity(comment,
         { type: 'issue', number: reference.number }, 'change-worker', repository,
-        runId => actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], `Worker run ${runId}`))
+        runId => actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], `Worker run ${runId}`), trustedControllerLogin)
       if (identity?.branch === pullRequest.head.ref) return identity
     }
   }
