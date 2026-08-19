@@ -3,7 +3,7 @@ import { REVIEW_CHECK_NAME } from './review-authority.mjs'
 
 export { REVIEW_CHECK_NAME }
 const GITHUB_ACTIONS_APP_ID = 15368
-const REVIEW_IDENTITY_PREFIX = 'agent-review-v2'
+const REVIEW_IDENTITY_PREFIX = 'agent-review-v3'
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const FULL_HASH = /^[0-9a-f]{64}$/
 const ACTIONS_RUN_URL = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)(?:\/|$)/
@@ -49,39 +49,44 @@ export function hasNewReviewCheck(before, after) {
   return [...after].some(checkId => !before.has(checkId))
 }
 
-/** Encode the trusted Profile workflow and Actions run reviewed by one CheckRun. */
-export function reviewCheckIdentity({ workflowId, stageId, definitionHash, runId }) {
+/** Encode the trusted Profile workflow and exact Actions run attempt reviewed by one CheckRun. */
+export function reviewCheckIdentity({ workflowId, stageId, definitionHash, runId, runAttempt }) {
   if (![workflowId, stageId].every(value => IDENTIFIER.test(value || ''))
     || !FULL_HASH.test(definitionHash || '')
     || !Number.isSafeInteger(runId)
-    || runId < 1) {
+    || runId < 1
+    || !Number.isSafeInteger(runAttempt)
+    || runAttempt < 1) {
     throw new Error('Agent review CheckRun identity is incomplete')
   }
-  return `${REVIEW_IDENTITY_PREFIX}:${workflowId}:${stageId}:${definitionHash}:${runId}`
+  return `${REVIEW_IDENTITY_PREFIX}:${workflowId}:${stageId}:${definitionHash}:${runId}:${runAttempt}`
 }
 
-/** Parse the Profile workflow and Actions run identity from a controller-created CheckRun. */
+/** Parse the Profile workflow and exact Actions run-attempt identity from a controller-created CheckRun. */
 export function parseReviewCheckIdentity(checkRun) {
   const parts = String(checkRun?.external_id || '').split(':')
-  if (parts.length !== 5 || parts[0] !== REVIEW_IDENTITY_PREFIX) return null
-  const [, workflowId, stageId, definitionHash, runIdText] = parts
+  if (parts.length !== 6 || parts[0] !== REVIEW_IDENTITY_PREFIX) return null
+  const [, workflowId, stageId, definitionHash, runIdText, runAttemptText] = parts
   const runId = Number.parseInt(runIdText, 10)
+  const runAttempt = Number.parseInt(runAttemptText, 10)
   if (![workflowId, stageId].every(value => IDENTIFIER.test(value))
     || !FULL_HASH.test(definitionHash)
     || !/^[1-9][0-9]*$/.test(runIdText)
-    || !Number.isSafeInteger(runId)) return null
-  return { workflowId, stageId, definitionHash, runId }
+    || !/^[1-9][0-9]*$/.test(runAttemptText)
+    || !Number.isSafeInteger(runId)
+    || !Number.isSafeInteger(runAttempt)) return null
+  return { workflowId, stageId, definitionHash, runId, runAttempt }
 }
 
 /** Create the GitHub Actions-owned review CheckRun on the exact pull request head. */
-export async function startReviewCheck({ ghExecutable, repository, head, runUrl, identity, env, execute = run }) {
+export async function startReviewCheck({ ghExecutable, repository, head, runUrl, runAttempt, identity, env, execute = run }) {
   const match = ACTIONS_RUN_URL.exec(runUrl)
   const runId = Number.parseInt(match?.[2] || '', 10)
   if (!match || match[1] !== repository || !Number.isSafeInteger(runId) || runId < 1) {
     throw new Error('Agent review run URL does not identify the target repository Actions run')
   }
   const result = await execute(ghExecutable, checkArguments('POST', repository, undefined, [
-    ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'in_progress'], ['details_url', runUrl], ['external_id', reviewCheckIdentity({ ...identity, runId })],
+    ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'in_progress'], ['details_url', runUrl], ['external_id', reviewCheckIdentity({ ...identity, runId, runAttempt })],
     ['output[title]', 'Agent review in progress'], ['output[summary]', 'Reviewing this exact pull request head.'],
   ]), { env })
   const check = parseJson(result.stdout, 'created Agent review CheckRun')

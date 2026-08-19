@@ -19,7 +19,7 @@ const identity = {
   stageId: 'review',
   definitionHash: 'b'.repeat(64),
 }
-const identityWithRun = { ...identity, runId: 17 }
+const identityWithRun = { ...identity, runId: 17, runAttempt: 2 }
 
 function recorder(stdout = '{}') {
   const calls = []
@@ -34,7 +34,7 @@ function recorder(stdout = '{}') {
 
 test('the controller creates and completes its exact-head review CheckRun', async () => {
   const created = recorder('{"id":91}')
-  const checkId = await startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl, identity, execute: created.execute })
+  const checkId = await startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl, runAttempt: 2, identity, execute: created.execute })
   assert.equal(checkId, 91)
   assert.deepEqual(created.calls[0][1], [
     'api', '--method', 'POST', `repos/${repository}/check-runs`,
@@ -57,17 +57,18 @@ test('review CheckRun identity binds the trusted Profile workflow and rejects ma
   assert.equal(parseReviewCheckIdentity({ external_id: `${external_id}:extra` }), null)
   assert.equal(parseReviewCheckIdentity({ external_id: 'https://github.com/owner/repository/actions/runs/17' }), null)
   assert.throws(() => reviewCheckIdentity({ ...identityWithRun, workflowId: 'bad workflow' }), /incomplete/)
-  assert.throws(() => reviewCheckIdentity(identity), /incomplete/)
+  assert.throws(() => reviewCheckIdentity({ ...identityWithRun, runAttempt: 0 }), /incomplete/)
+  assert.throws(() => reviewCheckIdentity({ ...identity, runId: 17 }), /incomplete/)
 })
 
 test('review CheckRun creation rejects an unrelated or malformed Actions run URL', async () => {
   const created = recorder('{"id":91}')
   await assert.rejects(
-    startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl: 'https://github.com/other/repository/actions/runs/17', identity, execute: created.execute }),
+    startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl: 'https://github.com/other/repository/actions/runs/17', runAttempt: 2, identity, execute: created.execute }),
     /does not identify/,
   )
   await assert.rejects(
-    startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl: `https://github.com/${repository}/runs/17`, identity, execute: created.execute }),
+    startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl: `https://github.com/${repository}/runs/17`, runAttempt: 2, identity, execute: created.execute }),
     /does not identify/,
   )
   assert.equal(created.calls.length, 0)

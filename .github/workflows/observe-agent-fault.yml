@@ -6,6 +6,9 @@ on:
       source_run_id:
         required: true
         type: string
+      source_run_attempt:
+        required: true
+        type: number
 
 concurrency:
   group: agent-fault-observation-${{ github.repository }}
@@ -34,6 +37,7 @@ jobs:
         env:
           TARGET_REPOSITORY: ${{ github.repository }}
           FAULT_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          FAULT_SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
           TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           GITHUB_TOKEN: ${{ github.token }}

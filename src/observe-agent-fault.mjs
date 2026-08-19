@@ -1,12 +1,19 @@
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
-import { observeReviewInfrastructureFault, recordedReviewFailure } from './fault-observation.mjs'
-import { workflowFailureSignature } from './failure-classification.mjs'
 import { faultIdentity } from './fault-record.mjs'
 import { faultProjectionBody, faultProjectionMarker, parseFaultProjection } from './fault-projection.mjs'
+import {
+  applyReviewFaultDecision,
+  loadReviewFaultAuditDecision,
+  reviewFaultAttemptEndpoints,
+  verifyReviewFaultAttempt,
+  verifyReviewFaultJobs,
+} from './review-fault-audit.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('FAULT_SOURCE_RUN_ID')
 const sourceRunNumber = Number.parseInt(sourceRunId, 10)
+const sourceRunAttemptText = requiredEnv('FAULT_SOURCE_RUN_ATTEMPT')
+const sourceRunAttempt = Number.parseInt(sourceRunAttemptText, 10)
 const controllerRepository = requiredEnv('TRUSTED_CONTROLLER_REPOSITORY')
 const controllerSha = requiredEnv('TRUSTED_CONTROLLER_SHA')
 const projectionRunId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
@@ -70,37 +77,44 @@ async function upsertFault(observation) {
 
 if (!Number.isSafeInteger(projectionRunId) || projectionRunId < 1
   || !Number.isSafeInteger(sourceRunNumber) || sourceRunNumber < 1
-  || String(sourceRunNumber) !== sourceRunId) throw new Error('Fault observer run identity is invalid')
-const sourceRun = await ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'fault source workflow run')
-const sourceJobs = await pages(`repos/${repository}/actions/runs/${sourceRunId}/jobs`, 'fault source workflow jobs', 'jobs')
-const observed = observeReviewInfrastructureFault({
+  || String(sourceRunNumber) !== sourceRunId
+  || !Number.isSafeInteger(sourceRunAttempt) || sourceRunAttempt < 1
+  || String(sourceRunAttempt) !== sourceRunAttemptText) throw new Error('Fault observer run identity is invalid')
+const attemptEndpoints = reviewFaultAttemptEndpoints(repository, sourceRunNumber, sourceRunAttempt)
+const sourceRun = await ghJson(['api', attemptEndpoints.run], 'fault source workflow run attempt')
+verifyReviewFaultAttempt(sourceRun, sourceRunNumber, sourceRunAttempt)
+const sourceJobs = await pages(attemptEndpoints.jobs, 'fault source workflow attempt jobs', 'jobs')
+verifyReviewFaultJobs(sourceJobs, sourceRunNumber, sourceRunAttempt)
+const audit = await loadReviewFaultAuditDecision({
   run: sourceRun,
   jobs: sourceJobs,
   repository,
   trust: { controllerRepository, controllerSha },
+  readPullRequest(number) {
+    return ghJson(['api', `repos/${repository}/pulls/${number}`], `pull request #${number}`)
+  },
+  readCheckRuns(head) {
+    return pages(`repos/${repository}/commits/${head}/check-runs`, 'exact-head review checks', 'check_runs')
+  },
 })
-if (!observed) {
-  process.stdout.write(`Fault observer ignored source workflow run ${sourceRunId}.\n`)
-  process.exit(0)
+if (audit.observation) {
+  audit.observation = {
+    ...audit.observation,
+    failureSignature: audit.failureSignature,
+    projectionRunId,
+    controllerRepository,
+    controllerSha,
+  }
+  delete audit.observation.subject
 }
-const current = await ghJson(['api', `repos/${repository}/pulls/${observed.subject.number}`], `pull request #${observed.subject.number}`)
-if (current.state !== 'open'
-  || current.base?.sha !== observed.subject.base
-  || current.head?.sha !== observed.subject.head
-  || current.head?.repo?.full_name !== repository) {
-  process.stdout.write(`Fault observer ignored stale review pair #${observed.subject.number}.\n`)
-  process.exit(0)
+const issueNumber = await applyReviewFaultDecision(audit, {
+  writeAudit(classification) {
+    process.stdout.write(`Failure classification: ${JSON.stringify(classification)}\n`)
+  },
+  upsertFault,
+})
+if (issueNumber === null) {
+  process.stdout.write(`Fault observer ignored source workflow run ${sourceRunId}: ${audit.reason}.\n`)
+} else {
+  process.stdout.write(`Fault observer projected review infrastructure fault as Issue #${issueNumber}.\n`)
 }
-const checkRuns = await pages(`repos/${repository}/commits/${observed.subject.head}/check-runs`, 'exact-head review checks', 'check_runs')
-const recordedFailure = recordedReviewFailure(checkRuns, sourceRunNumber, repository)
-const observation = {
-  ...observed,
-  ...(recordedFailure || {}),
-  failureSignature: workflowFailureSignature(sourceRun, sourceJobs),
-  projectionRunId,
-  controllerRepository,
-  controllerSha,
-}
-delete observation.subject
-const issueNumber = await upsertFault(observation)
-process.stdout.write(`Fault observer projected review infrastructure fault as Issue #${issueNumber}.\n`)
