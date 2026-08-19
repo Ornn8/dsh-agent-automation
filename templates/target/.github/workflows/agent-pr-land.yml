@@ -1,4 +1,6 @@
 name: Agent PR Advancement
+run-name: >-
+  Agent PR Advancement request:${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || 'legacy') || github.run_id }}
 
 on:
   repository_dispatch:
@@ -7,7 +9,7 @@ on:
     workflows: {{ADVANCEMENT_WORKFLOW_NAMES_JSON}}
     types: [completed]
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, edited]
+    types: [opened, reopened, synchronize, ready_for_review, edited, labeled]
 
 permissions:
   actions: read
@@ -24,7 +26,8 @@ jobs:
         && (github.event.workflow_run.name == 'Agent PR Review'
           || contains(fromJSON(vars.DSH_AUTOMATION_CI_WORKFLOWS), github.event.workflow_run.name)))
       || (github.event_name == 'pull_request_target'
-        && github.event.pull_request.head.repo.full_name == github.repository)
+        && github.event.pull_request.head.repo.full_name == github.repository
+        && (github.event.action != 'labeled' || github.event.label.name == 'automation/review-ready'))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/advance-pr.yml@{{CONTROLLER_SHA}}
     with:
       pull_request_number: ${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.pull_request_number || github.event.client_payload.pr_number) || github.event_name == 'pull_request_target' && github.event.pull_request.number || 0 }}

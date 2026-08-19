@@ -49,6 +49,11 @@ export function reviewRepairTransition(observationId) {
   return `review-repair:${reviewObservationId(observationId)}`
 }
 
+/** Return the distinct Governor transition for one authoritative merge-repair generation. */
+export function mergeRepairTransition(observationId) {
+  return `merge-repair:${reviewObservationId(observationId)}`
+}
+
 /** Return the safe durable request id for one blocked review generation. */
 export function reviewRepairRequestId(head, observationId) {
   if (!FULL_SHA.test(head)) throw new Error('review repair request id requires a full lowercase head SHA')

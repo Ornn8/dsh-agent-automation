@@ -7,8 +7,11 @@ import {
   run,
   verifyGithubIdentity,
 } from './common.mjs'
+import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { baseReconcileTransition, needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
-import { hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
+import { hasTrustedExactReviewInvocation, hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
+import { parseReviewCheckIdentity } from './review-check.mjs'
+import { trustedReviewRunProfile } from './advancement-source.mjs'
 import {
   governorBudgetDecision,
   governorDecision,
@@ -160,7 +163,7 @@ if (!/^[0-9a-f]{40}$/i.test(defaultBranchHead || '')) {
   throw new Error(`Default branch ${defaultBranch} did not resolve to a commit SHA`)
 }
 
-async function requestAdvancement(pullRequest) {
+async function requestAdvancement(pullRequest, reviewConfiguration = null) {
   for (const label of ['automation/ci-baseline', 'automation/repair-blocked']) {
     if (!pullRequest.labels?.some(candidate => candidate.name === label)) continue
     await run(githubExecutable, [
@@ -176,14 +179,23 @@ async function requestAdvancement(pullRequest) {
     'pr', 'edit', String(pullRequest.number), '--repo', repository,
     '--add-label', 'automation/review-ready',
   ], { env: githubEnvironment })
-  await run(githubExecutable, [
-    'api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=dsh-advance',
-    '-F', `client_payload[pull_request_number]=${pullRequest.number}`,
-    '-f', `client_payload[base_sha]=${pullRequest.base.sha}`,
-    '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
-    '-f', `client_payload[request_id]=reconcile-${pullRequest.base.sha}-${pullRequest.head.sha}`,
-  ], { env: githubEnvironment })
+  const requestId = `reconcile-${pullRequest.base.sha}-${pullRequest.head.sha}`
+  await dispatchWithReceipt({
+    executable: githubExecutable, environment: actionsEnvironment, repository,
+    workflowFile: 'agent-pr-land.yml',
+    payload: {
+      event_type: 'dsh-advance',
+      client_payload: {
+        pull_request_number: pullRequest.number,
+        base_sha: pullRequest.base.sha,
+        head_sha: pullRequest.head.sha,
+        profile_id: reviewConfiguration?.profileId || 'github-pr-cycle',
+        workflow_id: reviewConfiguration?.workflowId || '',
+        request_id: requestId,
+      },
+    },
+    requestId,
+  })
 }
 
 async function waitForUpdatedPair(pullRequest) {
@@ -248,21 +260,62 @@ for (const summary of summaries.flat()) {
     'api', `repos/${repository}/commits/${pullRequest.head.sha}/check-runs`, '--paginate', '--slurp',
   ], `pull request #${summary.number} check runs`)
   const checkRuns = checkRunPages.flatMap(page => page.check_runs || [])
+  let reviewProof = null
+  let reviewConfiguration = null
+  for (const checkRun of checkRuns) {
+    const runId = reviewRunIdFromCheckRun(checkRun, repository)
+    if (!runId || checkRun.name !== 'agent/review') continue
+    const workflowRun = await ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `review workflow run ${runId}`)
+    const proof = { checkRun, run: workflowRun }
+    if (!hasTrustedExactReviewInvocation({ pullRequest: landingPullRequest, reviewProof: proof, trustedReview })) {
+      continue
+    }
+    const identity = parseReviewCheckIdentity(checkRun)
+    let profile = null
+    try {
+      profile = trustedReviewRunProfile(workflowRun, {
+        repository,
+        controllerRepository: trustedReview.controllerRepository,
+        controllerSha: trustedReview.controllerSha,
+        workflowPath: trustedReview.workflowPath,
+        number: pullRequest.number,
+        base: pullRequest.base.sha,
+        head: pullRequest.head.sha,
+      })
+    } catch {
+      continue
+    }
+    reviewConfiguration = identity && profile
+      ? { profileId: profile.profileId, workflowId: identity.workflowId }
+      : null
+    const passed = ['SUCCESS', 'success'].includes(checkRun.conclusion)
+      && workflowRun.conclusion === 'success'
+    const blocked = ['FAILURE', 'failure'].includes(checkRun.conclusion)
+      && workflowRun.conclusion === 'failure'
+      && pullRequest.labels?.some(label => label.name === 'automation/review-blocked')
+    if (!passed && !blocked) continue
+    reviewProof = { base: pullRequest.base.sha, head: pullRequest.head.sha, state: passed ? 'pass' : 'block' }
+    if (!hasTrustedExactReviewRun({ pullRequest: landingPullRequest, reviewProof: proof, trustedReview })) continue
+    break
+  }
   const subject = pullRequestGovernorSubject(pullRequest)
   const stateVersion = subjectStateVersion(subject)
   const governorRecords = await pullRequestGovernorRecords(pullRequest.number)
   const pendingRecord = unappliedGovernorCandidate(governorRecords.slice().reverse(), record =>
     (record.transition === 'workflow-recovery'
       || record.transition === 'review-repair'
-      || record.transition.startsWith('review-repair:'))
+      || record.transition.startsWith('review-repair:')
+      || record.transition === 'merge-repair'
+      || record.transition.startsWith('merge-repair:'))
     && record.subject.type === 'pull-request'
     && record.subject.number === pullRequest.number
     && record.stateVersion === stateVersion)
   const pendingTransition = pendingRecord?.transition
   if (pendingTransition) {
     const reviewRepair = pendingTransition === 'review-repair' || pendingTransition.startsWith('review-repair:')
-    const repairProfile = reviewRepair
-      ? await targetProfile('github-pr-cycle', pullRequest.base.sha)
+    const mergeRepair = pendingTransition === 'merge-repair' || pendingTransition.startsWith('merge-repair:')
+    const repairProfile = reviewRepair || mergeRepair
+      ? await targetProfile(reviewConfiguration?.profileId || 'github-pr-cycle', pullRequest.base.sha)
       : null
     const repairLimit = repairProfile
       ? resolveGithubPrCycle(repairProfile.definition, 'repair').change.retry?.limit
@@ -271,18 +324,24 @@ for (const summary of summaries.flat()) {
     const governed = await governTransition(pullRequest, pendingTransition, {
       limit: repairLimit,
       workIdentity: `branch:${pullRequest.head.ref}`,
-      ...(reviewRepair ? { budgetTransition: 'review-repair' } : {}),
+      ...((reviewRepair || mergeRepair) ? { budgetTransition: mergeRepair ? 'merge-repair' : 'review-repair' } : {}),
     })
     if (governed.execute) {
       if (reviewRepair) {
         if (pendingRecord.transition === 'review-repair' && pendingRecord.observationId.startsWith('comment-')) {
-          await run(githubExecutable, [
-            'api', '--method', 'POST', `repos/${repository}/dispatches`,
-            '-f', 'event_type=dsh-repair',
-            '-F', `client_payload[pr_number]=${pullRequest.number}`,
-            '-f', `client_payload[head_sha]=${pullRequest.head.sha}`,
-            '-f', `client_payload[request_id]=${pendingRecord.observationId}`,
-          ], { env: actionsEnvironment })
+          await dispatchWithReceipt({
+            executable: githubExecutable, environment: actionsEnvironment, repository,
+            workflowFile: 'agent-pr-rework.yml',
+            payload: {
+              event_type: 'dsh-repair',
+              client_payload: {
+                pr_number: pullRequest.number,
+                head_sha: pullRequest.head.sha,
+                request_id: pendingRecord.observationId,
+              },
+            },
+            requestId: pendingRecord.observationId,
+          })
         } else {
           const request = createReviewRepairRequest({
             ...repairProfile,
@@ -292,10 +351,27 @@ for (const summary of summaries.flat()) {
             head: pullRequest.head.sha,
             reviewObservationId: pendingTransition.slice('review-repair:'.length),
           })
-          await run(githubExecutable, [
-            'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
-          ], { env: actionsEnvironment, input: JSON.stringify(repositoryDispatchBody(request)) })
+          await dispatchWithReceipt({
+            executable: githubExecutable, environment: actionsEnvironment,
+            workflowFile: 'agent-pr-rework.yml', payload: repositoryDispatchBody(request),
+            requestId: request.requestId,
+          })
         }
+      } else if (mergeRepair) {
+        const request = createReviewRepairRequest({
+          ...repairProfile,
+          repository,
+          pullRequestNumber: pullRequest.number,
+          base: pullRequest.base.sha,
+          head: pullRequest.head.sha,
+          reviewObservationId: pendingTransition.slice('merge-repair:'.length),
+        })
+        const dispatch = repositoryDispatchBody(request)
+        dispatch.client_payload.repair_cause = 'merge-conflict'
+        await dispatchWithReceipt({
+          executable: githubExecutable, environment: actionsEnvironment, repository,
+          workflowFile: 'agent-pr-rework.yml', payload: dispatch, requestId: request.requestId,
+        })
       } else {
         await requestAdvancement(pullRequest)
       }
@@ -305,26 +381,10 @@ for (const summary of summaries.flat()) {
     }
     if (governed.action !== 'noop') continue
   }
-  let reviewProof = null
-  for (const checkRun of checkRuns) {
-    const runId = reviewRunIdFromCheckRun(checkRun, repository)
-    if (!runId || checkRun.name !== 'agent/review') continue
-    const workflowRun = await ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `review workflow run ${runId}`)
-    const proof = { checkRun, run: workflowRun }
-    if (hasTrustedExactReviewRun({ pullRequest: landingPullRequest, reviewProof: proof, trustedReview })) {
-      const passed = ['SUCCESS', 'success'].includes(checkRun.conclusion)
-        && workflowRun.conclusion === 'success'
-      const blocked = ['FAILURE', 'failure'].includes(checkRun.conclusion)
-        && workflowRun.conclusion === 'failure'
-        && pullRequest.labels?.some(label => label.name === 'automation/review-blocked')
-      if (!passed && !blocked) continue
-      reviewProof = { base: pullRequest.base.sha, head: pullRequest.head.sha, state: passed ? 'pass' : 'block' }
-      break
-    }
-  }
+  if (reviewConfiguration && !reviewProof) continue
   if (!needsExactReview({ repository, defaultBranch, pullRequest, reviewProof })) continue
 
-  await requestAdvancement(pullRequest)
+  await requestAdvancement(pullRequest, reviewConfiguration)
   reconciled += 1
 }
 process.stdout.write(`Reconciled ${reconciled} pull request(s).\n`)

@@ -36,8 +36,9 @@ test('merge-conflict and failed-check repair decisions create one exact candidat
       subject,
       stateVersion: value.stateVersion,
       transitionIdentity: identity,
+      ...(reason === 'merge-conflict' ? { repairCause: reason } : {}),
     })
-    assert.equal(result.transition, `review-repair:advance-${identity}`, reason)
+    assert.equal(result.transition, `${reason === 'merge-conflict' ? 'merge-repair' : 'review-repair'}:advance-${identity}`, reason)
     assert.equal(result.record.status, 'candidate', reason)
   }
 })

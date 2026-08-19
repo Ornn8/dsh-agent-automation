@@ -9,6 +9,7 @@ import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
+import { trustedReviewRunProfile } from './advancement-source.mjs'
 import { sameRepositoryClosingIssues } from './closing-issues.mjs'
 import { writeLandingResult } from './landing-result.mjs'
 
@@ -18,7 +19,8 @@ const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const githubEnvironment = actionsCredentialEnvironment()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
-const profileId = requiredEnv('PROFILE_ID')
+const requestedProfileId = requiredEnv('PROFILE_ID')
+let profileId = requestedProfileId
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
@@ -164,7 +166,6 @@ async function protectedChecks(checksStage) {
 if (pullRequest.baseRefName !== defaultBranch) {
   deferred(`Landing deferred for pull request #${pullRequestNumber}: base branch is not ${defaultBranch}.`)
 }
-const profile = await targetProfile(pullRequest.baseRefOid)
 const checkRuns = await readCheckRuns()
 const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)
 if (!reviewProof) {
@@ -174,6 +175,20 @@ if (reviewProof.checkRun.status !== 'completed' || reviewProof.checkRun.conclusi
   deferred(`Landing deferred for pull request #${pullRequestNumber}: the trusted exact-pair review did not pass.`)
 }
 const reviewIdentity = parseReviewCheckIdentity(reviewProof?.checkRun)
+const reviewProfile = trustedReviewRunProfile(reviewProof.run, {
+  repository,
+  controllerRepository: trustedReview.controllerRepository,
+  controllerSha: trustedReview.controllerSha,
+  workflowPath: trustedReview.workflowPath,
+  number: pullRequest.number,
+  base: pullRequest.baseRefOid,
+  head: expectedHead,
+})
+if (requestedProfileId !== 'github-pr-cycle' && requestedProfileId !== reviewProfile.profileId) {
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: requested Profile does not match the trusted review.`)
+}
+profileId = reviewProfile.profileId
+const profile = await targetProfile(pullRequest.baseRefOid)
 if (!reviewIdentity
   || reviewIdentity.definitionHash !== profile.definitionHash) {
   deferred(`Landing deferred for pull request #${pullRequestNumber}: the trusted review does not identify this Profile revision.`)

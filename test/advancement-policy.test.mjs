@@ -181,16 +181,24 @@ test('failed required CI stays on the existing CI repair route', () => {
   assert.equal(Object.hasOwn(decision, 'repair'), false)
 })
 
-test('a merge conflict stays on the existing repair route', () => {
+test('a merge conflict creates a distinct change-repair route', () => {
   const result = decidePullRequestAdvancement(snapshot({
     mergeability: 'conflicting',
     review: passedReview,
   }))
-  assert.equal(result.action, 'wait-checks')
+  assert.equal(result.action, 'request-repair')
   assert.match(result.reason, /merge conflict/)
-  assert.equal(result.missingCondition, 'merge-conflict-repair-completed')
-  assert.deepEqual(result.wakeEvents, ['repair.completed', 'pull-request.updated'])
-  assert.equal(Object.hasOwn(result, 'repair'), false)
+  assert.equal(result.repair.cause, 'merge-conflict')
+})
+
+test('review-ready makes same-head rereview a distinct advancement generation', () => {
+  const result = decidePullRequestAdvancement(snapshot({
+    review: reviewEvidence('block'),
+    pullRequest: { number: 12, state: 'open', draft: false, baseRefName: 'main', reviewReady: true },
+    checks: passedCi,
+  }))
+  assert.equal(result.action, 'request-review')
+  assert.deepEqual(result.review, { rereview: true })
 })
 
 test('a verified manual rework candidate is consumed exactly instead of being replaced', () => {

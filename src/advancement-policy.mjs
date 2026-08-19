@@ -32,7 +32,7 @@ const WAKE_EVENTS = new Set([
   'ci.required-check.completed',
 ])
 
-/** @typedef {{ number: number, state: 'open' | 'closed', draft: boolean, baseRefName: string }} AdvancementPullRequest */
+/** @typedef {{ number: number, state: 'open' | 'closed', draft: boolean, baseRefName: string, reviewReady: boolean }} AdvancementPullRequest */
 /** @typedef {{ base: string, head: string }} AdvancementPair */
 /** @typedef {Record<string, unknown> & { id?: number, name?: string, head_sha?: string, status?: string, conclusion?: string, app?: { id?: number }, external_id?: string, details_url?: string }} ReviewCheckProof */
 /** @typedef {Record<string, unknown> & { id: number, run_attempt?: number, event: string, status: string, conclusion?: string, head_sha: string, head_branch?: string, repository?: { full_name?: string }, head_repository?: { full_name?: string }, pull_requests?: Array<{ number?: number, base?: { sha?: string }, head?: { sha?: string } }>, referenced_workflows?: Array<{ path?: string, sha?: string }> }} ReviewWorkflowProof */
@@ -179,7 +179,13 @@ function normalizeSnapshot(value) {
   if (!['mergeable', 'conflicting', 'unknown'].includes(mergeability)) throw new Error('mergeability is invalid')
   return {
     repository: requireText(object.repository, 'repository', 200),
-    pullRequest: { number, state: /** @type {'open'|'closed'} */ (state), draft: /** @type {boolean} */ (pullRequest.draft), baseRefName },
+    pullRequest: {
+      number,
+      state: /** @type {'open'|'closed'} */ (state),
+      draft: /** @type {boolean} */ (pullRequest.draft),
+      baseRefName,
+      reviewReady: pullRequest.reviewReady === true,
+    },
     defaultBranch,
     pair: requireExactPair(object.pair),
     expectedPair: requireExactPair(object.expectedPair, 'expectedPair'),
@@ -262,6 +268,7 @@ function candidateRepairCause(candidate) {
   if (!candidate) return 'decision-bound-repair'
   if (candidate.transition === 'review-repair' && candidate.observationId.startsWith('comment-')) return 'manual-rework'
   if (candidate.transition.startsWith('review-repair:run-')) return 'review-block'
+  if (candidate.transition === 'merge-repair' || candidate.transition.startsWith('merge-repair:')) return 'merge-conflict'
   return 'decision-bound-repair'
 }
 
@@ -309,18 +316,17 @@ export function decidePullRequestAdvancement(value) {
   if (review === 'infrastructure-failure') {
     return waitDecision(snapshot, 'wait-review', 'review infrastructure recovery is pending', 'review-infrastructure-recovery', ['review.recovery.completed'])
   }
-  if (review === 'block') return repairDecision(snapshot, 'trusted review BLOCK requires repair', 'review-block')
+  if (review === 'block') {
+    if (snapshot.pullRequest.reviewReady) {
+      return decision(snapshot, 'request-review', 'an authorized same-head rereview is requested', { review: { rereview: true } })
+    }
+    return repairDecision(snapshot, 'trusted review BLOCK requires repair', 'review-block')
+  }
   if (review === 'untrusted') {
     return waitDecision(snapshot, 'wait-review', 'review evidence is not authoritative for this exact pair', 'trusted-exact-pair-review', ['review.completed'])
   }
   if (snapshot.mergeability === 'conflicting') {
-    return waitDecision(
-      snapshot,
-      'wait-checks',
-      'pull request has a merge conflict; the existing repair route owns this transition',
-      'merge-conflict-repair-completed',
-      ['repair.completed', 'pull-request.updated'],
-    )
+    return repairDecision(snapshot, 'pull request has a merge conflict; the change repair route owns this transition', 'merge-conflict')
   }
   if (snapshot.mergeability === 'unknown') {
     return waitDecision(snapshot, 'wait-checks', 'GitHub has not resolved mergeability', 'resolved-mergeability', ['pull-request.updated'])

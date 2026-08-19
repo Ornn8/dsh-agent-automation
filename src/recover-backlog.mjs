@@ -1,6 +1,7 @@
 import { actionsCredentialEnvironment, authenticatedMarker, parseJson, requiredEnv, run, trustedAssociation } from './common.mjs'
 import { recordedCiWorkflow, recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
+import { parseReviewCheckIdentity } from './review-check.mjs'
 import { recordedFailureClass, workflowFailureSignature } from './failure-classification.mjs'
 import { REVIEW_CHECK_NAME, REVIEW_DISPATCH_TYPE } from './review-authority.mjs'
 import { faultIdentity } from './fault-record.mjs'
@@ -230,12 +231,13 @@ async function reviewJobs() {
 }
 
 function reviewProfileId(run) {
-  const match = /^Agent PR Review #\d+ [0-9a-f]{40}\.\.[0-9a-f]{40} profile:([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/.exec(String(run.display_title || ''))
+  const match = /^Agent PR Review #\d+ [0-9a-f]{40}\.\.[0-9a-f]{40} profile:([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?: request:[A-Za-z0-9._-]{1,100})?$/.exec(String(run.display_title || ''))
   return match?.[1] || 'github-pr-cycle'
 }
 
 async function reviewSubject(run) {
   const profileId = reviewProfileId(run)
+  const workflowId = async head => parseReviewCheckIdentity((await pages(`repos/${repository}/commits/${head}/check-runs`, 'review checks for recovery', 'check_runs')).find(candidate => candidate.name === REVIEW_CHECK_NAME && candidate.app?.id === 15368 && reviewRunIdFromCheckRun(candidate, repository) === Number.parseInt(sourceRunId, 10)))?.workflowId || ''
   const candidates = (run.pull_requests || []).filter(pullRequest => Number.isSafeInteger(pullRequest.number)
     && /^[0-9a-f]{40}$/.test(pullRequest.base?.sha || '')
     && /^[0-9a-f]{40}$/.test(pullRequest.head?.sha || '')
@@ -246,13 +248,13 @@ async function reviewSubject(run) {
       number: candidates[0].number,
       base: candidates[0].base.sha,
       head: candidates[0].head.sha,
-      profileId,
+      profileId, workflowId: await workflowId(candidates[0].head.sha),
     }
   }
-  const title = /^Agent PR Review #(\d+) ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: profile:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$/.exec(String(run.display_title || ''))
+  const title = /^Agent PR Review #(\d+) ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: profile:[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?: request:[A-Za-z0-9._-]{1,100})?)?$/.exec(String(run.display_title || ''))
   if (title && ((run.event === 'pull_request_target' && title[3] === run.head_sha)
     || (run.event === 'repository_dispatch' && title[2] === run.head_sha))) {
-    return { type: 'pull-request', number: Number.parseInt(title[1], 10), base: title[2], head: title[3], profileId }
+    return { type: 'pull-request', number: Number.parseInt(title[1], 10), base: title[2], head: title[3], profileId, workflowId: await workflowId(title[3]) }
   }
   const pullRequests = await pages(`repos/${repository}/pulls?state=open&per_page=100`, 'open pull requests for review recovery')
   const matches = []
@@ -269,7 +271,7 @@ async function reviewSubject(run) {
     if (checkRuns.some(checkRun => checkRun.name === REVIEW_CHECK_NAME
       && checkRun.app?.id === 15368
       && reviewRunIdFromCheckRun(checkRun, repository) === Number.parseInt(sourceRunId, 10))) {
-      matches.push({ type: 'pull-request', number: pullRequest.number, base: pullRequest.base.sha, head: pullRequest.head.sha })
+      matches.push({ type: 'pull-request', number: pullRequest.number, base: pullRequest.base.sha, head: pullRequest.head.sha, profileId, workflowId: parseReviewCheckIdentity(checkRuns.find(check => check.name === REVIEW_CHECK_NAME && check.app?.id === 15368 && reviewRunIdFromCheckRun(check, repository) === Number.parseInt(sourceRunId, 10)))?.workflowId || '' })
     }
   }
   return matches.length === 1 ? matches[0] : null
@@ -297,6 +299,7 @@ async function wakeExactReview(subject) {
     '-f', `client_payload[base_sha]=${subject.base}`,
     '-f', `client_payload[head_sha]=${subject.head}`,
     '-f', `client_payload[profile_id]=${subject.profileId || 'github-pr-cycle'}`,
+    '-f', `client_payload[workflow_id]=${subject.workflowId || ''}`,
     '-f', `client_payload[request_id]=recovery-${sourceRunId}`], { env: environment })
 }
 

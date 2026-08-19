@@ -4,9 +4,11 @@ import { decidePullRequestAdvancement } from './advancement-policy.mjs'
 import { buildPullRequestAdvancementSnapshot } from './advancement-state.mjs'
 import {
   advancementRepairCandidate,
+  advancementTransitionIdentity,
   consumePullRequestAdvancement,
 } from './advancement-runtime.mjs'
 import { landingResult } from './landing-result.mjs'
+import { hasTrustedExactReviewInvocation } from './landing-policy.mjs'
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import {
   attestedGovernorRecordBody,
@@ -16,14 +18,16 @@ import {
 } from './governor-state.mjs'
 import { reviewFaultAttemptEndpoints, verifyReviewFaultAttempt } from './review-fault-audit.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
-import { terminalReviewSource } from './advancement-source.mjs'
+import { terminalReviewSource, trustedReviewRunProfile } from './advancement-source.mjs'
+import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
 let expectedBase = process.env.BASE_SHA?.trim().toLowerCase() || ''
 let expectedHead = process.env.HEAD_SHA?.trim().toLowerCase() || ''
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
-let profileId = process.env.PROFILE_ID?.trim() || ''
+const requestedProfileId = process.env.PROFILE_ID?.trim() || ''
+let profileId = requestedProfileId
 let requestedWorkflowId = process.env.WORKFLOW_ID?.trim() || ''
 const sourceRunId = Number.parseInt(process.env.SOURCE_RUN_ID || '0', 10)
 const sourceRunAttempt = Number.parseInt(process.env.SOURCE_RUN_ATTEMPT || '0', 10)
@@ -49,8 +53,14 @@ if (!Number.isSafeInteger(runId) || runId < 1 || !GOVERNOR_WORKFLOW_PATHS.includ
   throw new Error('Advancement Governor writer provenance is invalid')
 }
 if (!Array.isArray(requiredChecks) || requiredChecks.length < 1 || requiredChecks.length > 32
-  || requiredChecks.some(name => typeof name !== 'string' || !name.trim() || name === 'agent/review')) {
-  throw new Error('REQUIRED_CHECKS_JSON must contain configured non-review check names')
+  || requiredChecks.some(required => {
+    if (typeof required === 'string') return !required.trim() || required === 'agent/review'
+    return !required || typeof required !== 'object' || typeof required.context !== 'string'
+      || !required.context.trim() || required.context === 'agent/review'
+      || (required.app_id !== undefined && required.app_id !== null
+        && (!Number.isSafeInteger(required.app_id) || required.app_id < 1))
+  })) {
+  throw new Error('REQUIRED_CHECKS_JSON must contain configured non-review check definitions')
 }
 
 async function ghJson(args, description) {
@@ -78,7 +88,6 @@ if (verifiedTerminalReviewSource) {
   }
   profileId = verifiedTerminalReviewSource.profileId
 }
-if (!profileId) profileId = 'github-pr-cycle'
 let pullRequestNumber = verifiedTerminalReviewSource?.number || requestedNumber
 if (verifiedTerminalReviewSource) {
   expectedBase = verifiedTerminalReviewSource.base
@@ -165,12 +174,77 @@ async function readJobs(runId, runAttempt) {
   return response.jobs
 }
 
+async function reviewConfiguration(pullRequest, checkResults) {
+  const candidates = checkResults
+    .filter(check => check?.name === 'agent/review' && check.head_sha === pullRequest.head.sha)
+    .sort((left, right) => Number(right.id || 0) - Number(left.id || 0))
+  for (const check of candidates) {
+    const identity = parseReviewCheckIdentity(check)
+    if (!identity) continue
+    try {
+      const run = await readRun(identity.runId)
+      if (!hasTrustedExactReviewInvocation({
+        pullRequest: {
+          number: pullRequest.number,
+          repository,
+          state: pullRequest.state.toUpperCase(),
+          isDraft: Boolean(pullRequest.draft),
+          baseRefName: pullRequest.base.ref,
+          baseRefOid: pullRequest.base.sha,
+          headRefOid: pullRequest.head.sha,
+          mergeStateStatus: 'UNKNOWN',
+          mergeable: null,
+        },
+        reviewProof: { checkRun: check, run },
+        trustedReview,
+      })) continue
+      const profile = trustedReviewRunProfile(run, {
+        repository,
+        controllerRepository: trustedReview.controllerRepository,
+        controllerSha: trustedReview.controllerSha,
+        workflowPath: trustedReview.workflowPath,
+        number: pullRequest.number,
+        base: pullRequest.base.sha,
+        head: pullRequest.head.sha,
+      })
+      return { profileId: profile.profileId, workflowId: identity.workflowId }
+    } catch {
+      // An untrusted or stale same-name review cannot choose the Profile.
+    }
+  }
+  return null
+}
+
+function configuredRequiredChecks(names) {
+  return names.map(required => {
+    const context = typeof required === 'string' ? required : required.context
+    const app_id = typeof required === 'string' ? 15368 : required.app_id
+    if (!Number.isSafeInteger(app_id) || app_id < 1) {
+      throw new Error(`Required check ${context} is not bound to a trusted provider`)
+    }
+    return { context, app_id }
+  })
+}
+
 const pullRequest = await readPullRequest()
-const [profile, checkResults, governorRecords] = await Promise.all([
+const checkResults = await readCheckResults(pullRequest.head.sha)
+const discoveredReview = await reviewConfiguration(pullRequest, checkResults)
+if (discoveredReview) {
+  if (requestedProfileId && requestedProfileId !== 'github-pr-cycle' && requestedProfileId !== discoveredReview.profileId) {
+    throw new Error('Review CheckRun Profile does not match the requested Profile')
+  }
+  if (requestedWorkflowId && requestedWorkflowId !== discoveredReview.workflowId) {
+    throw new Error('Review CheckRun workflow does not match the requested workflow')
+  }
+  profileId = discoveredReview.profileId
+  requestedWorkflowId = discoveredReview.workflowId
+}
+if (!profileId) profileId = 'github-pr-cycle'
+const [profile, governorRecords] = await Promise.all([
   targetProfile(pullRequest.base.sha),
-  readCheckResults(pullRequest.head.sha),
   readGovernorRecords(pullRequest.number),
 ])
+const requiredCheckDefinitions = configuredRequiredChecks(requiredChecks)
 if (verifiedTerminalReviewSource) {
   const sourceChecks = checkResults.filter(check => check.head_sha === expectedHead
     && parseReviewCheckIdentity(check)?.runId === sourceRunId
@@ -188,7 +262,7 @@ const snapshot = await buildPullRequestAdvancementSnapshot({
   profile,
   requestedWorkflowId,
   trustedReview,
-  requiredChecks,
+  requiredChecks: requiredCheckDefinitions,
   checkResults,
   governorRecords,
   readRun,
@@ -209,6 +283,7 @@ if (request.action === 'request-repair' && !request.repair?.candidate) {
     subject: pullRequestGovernorSubject(pullRequest),
     stateVersion: request.stateVersion,
     transitionIdentity: seedIdentity,
+    repairCause: request.repair?.cause,
   })
   if (!repair.record) throw new Error('Advancement repair candidate disappeared before dispatch')
   await writeGovernorRecord(repair.record)
@@ -234,11 +309,9 @@ async function writeGovernorRecord(record) {
 
 const result = await consumePullRequestAdvancement(request, {
   requestReview: async value => {
-    await run(githubExecutable, [
-      'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
-    ], {
-      env: environment,
-      input: JSON.stringify({
+    await dispatchWithReceipt({
+      executable: githubExecutable, environment, repository, workflowFile: 'agent-pr-review.yml',
+      payload: {
         event_type: 'agent-review',
         client_payload: {
           pull_request_number: pullRequest.number,
@@ -249,15 +322,14 @@ const result = await consumePullRequestAdvancement(request, {
           stage_id: snapshot.workflow.stageId,
           request_id: value.transitionIdentity,
         },
-      }),
+      },
+      requestId: value.transitionIdentity,
     })
   },
   requestRepair: async value => {
-    await run(githubExecutable, [
-      'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
-    ], {
-      env: environment,
-      input: JSON.stringify({
+    await dispatchWithReceipt({
+      executable: githubExecutable, environment, repository, workflowFile: 'agent-pr-rework.yml',
+      payload: {
         event_type: 'agent-review-reconcile',
         client_payload: {
           pull_request_number: pullRequest.number,
@@ -266,7 +338,8 @@ const result = await consumePullRequestAdvancement(request, {
           request_id: value.transitionIdentity,
           repair_cause: value.repair?.cause || '',
         },
-      }),
+      },
+      requestId: value.transitionIdentity,
     })
   },
   requestLanding: async () => {

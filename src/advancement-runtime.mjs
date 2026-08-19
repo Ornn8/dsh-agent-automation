@@ -2,14 +2,14 @@
 
 import { createHash } from 'node:crypto'
 import { governorDecision, unappliedGovernorCandidate } from './governor-policy.mjs'
-import { reviewRepairTransition } from './work-request.mjs'
+import { mergeRepairTransition, reviewRepairTransition } from './work-request.mjs'
 
 const MUTATIONS = new Set(['request-review', 'request-repair', 'request-landing'])
 const TERMINAL_ACTIONS = new Set([
   'wait-review', 'wait-checks', 'paused', 'stale', 'terminal', 'noop',
 ])
 
-/** @typedef {{ action: string, repository: string, pullRequestNumber: number, pair: { base: string, head: string }, stateVersion: string, workflow: { definitionHash: string, workflowId: string, stageId: string }, repair?: { cause?: string, candidate?: { transition: string, observationId: string } | null } }} AdvancementRequest */
+/** @typedef {{ action: string, repository: string, pullRequestNumber: number, pair: { base: string, head: string }, stateVersion: string, workflow: { definitionHash: string, workflowId: string, stageId: string }, repair?: { cause?: string, candidate?: { transition: string, observationId: string } | null }, review?: { rereview?: boolean } }} AdvancementRequest */
 /** @typedef {{ requestReview: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestRepair: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestLanding: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementEffects */
 /** @typedef {{ claim: (request: AdvancementRequest & { transitionIdentity: string }) => boolean | Promise<boolean>, markInflight?: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, markApplied: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementJournal */
 /** @typedef {{ status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
@@ -54,6 +54,9 @@ function requireRequest(value) {
       throw new Error('advancement repair generation is invalid')
     }
   }
+  if (request.review !== undefined && (!request.review || request.review.rereview !== true)) {
+    throw new Error('Advancement review generation is invalid')
+  }
   return /** @type {AdvancementRequest} */ (request)
 }
 
@@ -72,20 +75,23 @@ export function advancementTransitionIdentity(value) {
     stateVersion: request.stateVersion,
     transition: request.action,
     ...(request.action === 'request-repair' ? { repair: request.repair || null } : {}),
+    ...(request.action === 'request-review' ? { review: request.review || null } : {}),
   })).digest('hex')
 }
 
 /**
  * Reuse one exact requested repair or create its decision-bound Governor candidate.
- * @param {{ records: GovernorRecord[], subject: RepairSubject, stateVersion: string, transitionIdentity: string }} input
+ * @param {{ records: GovernorRecord[], subject: RepairSubject, stateVersion: string, transitionIdentity: string, repairCause?: string }} input
  * @returns {{ transition: string, record: object | null }}
  */
-export function advancementRepairCandidate({ records, subject, stateVersion, transitionIdentity }) {
+export function advancementRepairCandidate({ records, subject, stateVersion, transitionIdentity, repairCause }) {
   if (!Array.isArray(records) || !/^[0-9a-f]{64}$/.test(transitionIdentity || '')) {
     throw new Error('Advancement repair identity is incomplete')
   }
   const observationId = `advance-${transitionIdentity}`
-  const transition = reviewRepairTransition(observationId)
+  const transition = repairCause === 'merge-conflict'
+    ? mergeRepairTransition(observationId)
+    : reviewRepairTransition(observationId)
   const existing = unappliedGovernorCandidate(records, /** @param {GovernorRecord} record */ record =>
     record.transition === transition
     && record.stateVersion === stateVersion

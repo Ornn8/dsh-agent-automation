@@ -50,7 +50,10 @@ function requestedRepairCandidate(records, stateVersion) {
   return records.find(record => typeof record.transition === 'string'
     && record.status === 'candidate'
     && record.stateVersion === stateVersion
-    && (record.transition === 'review-repair' || record.transition.startsWith('review-repair:'))
+    && (record.transition === 'review-repair'
+      || record.transition.startsWith('review-repair:')
+      || record.transition === 'merge-repair'
+      || record.transition.startsWith('merge-repair:'))
     && !records.some(applied => applied.status === 'applied'
       && applied.transition === record.transition
       && applied.stateVersion === record.stateVersion
@@ -71,7 +74,10 @@ export function advancementGovernorState(records, pullRequestNumber, stateVersio
   if (recovery === 'requested') throw new Error('Recovery candidate projection is invalid')
   const repairCandidate = requestedRepairCandidate(epoch.records, stateVersion)
   return {
-    repair: transitionState(epoch.records, stateVersion, transition => transition === 'review-repair' || transition.startsWith('review-repair:'), true),
+    repair: transitionState(epoch.records, stateVersion, transition => transition === 'review-repair'
+      || transition.startsWith('review-repair:')
+      || transition === 'merge-repair'
+      || transition.startsWith('merge-repair:'), true),
     repairCandidate: repairCandidate
       ? { transition: String(repairCandidate.transition), observationId: String(repairCandidate.observationId) }
       : null,
@@ -174,6 +180,9 @@ export async function buildPullRequestAdvancementSnapshot({
       state: pullRequest.state,
       draft: Boolean(pullRequest.draft),
       baseRefName: pullRequest.base.ref,
+      reviewReady: Boolean(pullRequest.labels?.some(label => typeof label === 'string'
+        ? label === 'automation/review-ready'
+        : label?.name === 'automation/review-ready')),
     },
     defaultBranch,
     pair,
