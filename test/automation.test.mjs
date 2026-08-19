@@ -82,6 +82,7 @@ import {
 import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
 import { parseAgentWork } from '../src/agent-work.mjs'
 import { intentionalReviewBlock } from '../src/recovery-policy.mjs'
+import { parseWorkflowIdentity } from '../src/workflow-identity.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -1085,11 +1086,40 @@ test('a completed repair routes review and landing through the same trusted Prof
   assert.match(reviewCaller, /github\.event\.client_payload\.workflow_id \|\| 'default'/)
   assert.doesNotMatch(reviewCaller, /pull_request_target:/)
   assert.match(advanceCaller, /workflows\/advance-pr\.yml@/)
+  assert.match(advanceCaller, /profile_id: \$\{\{ github\.event_name == 'repository_dispatch'/)
+  assert.doesNotMatch(advanceCaller, /pull_request_target.*github-pr-cycle/)
   assert.match(advanceSource, /decidePullRequestAdvancement/)
   assert.match(landSource, /parseReviewCheckIdentity/)
   assert.match(landSource, /reviewIdentity\.workflowId/)
   assert.doesNotMatch(landWorkflow, /workflow_id:|WORKFLOW_ID:/)
   assert.doesNotMatch(reconcileWorkflow, /workflow_id:|WORKFLOW_ID:/)
+})
+
+test('an opened PR recovers its custom workflow from the linked Issue Worker record', async () => {
+  const source = await readFile(new URL('../src/advance-pr.mjs', import.meta.url), 'utf8')
+  const issueSource = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
+  assert.match(source, /closingIssuesReferences/)
+  assert.match(source, /change-worker/)
+  assert.match(source, /persistedWorkflowIdentity/)
+  assert.match(issueSource, /workRequest\.profileId/)
+  assert.match(issueSource, /workRequest\.workflowId/)
+})
+
+test('scheduled reconciliation recovers a custom repair workflow after a new head', async () => {
+  const source = await readFile(new URL('../src/reconcile-reviews.mjs', import.meta.url), 'utf8')
+  const repairSource = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')
+  assert.match(source, /repair-worker/)
+  assert.match(source, /Worker Profile hash does not match its base/)
+  assert.match(source, /requestAdvancement\(pullRequest, workflowIdentity\)/)
+  assert.match(repairSource, /transportedRequest\.profileId/)
+  assert.match(repairSource, /transportedRequest\.workflowId/)
+})
+
+test('Worker status identity is the same for Issue creation and new-head repair', () => {
+  const identity = { profileId: 'custom-profile', workflowId: 'custom-cycle', definitionHash: 'a'.repeat(64), branch: 'agent/custom' }
+  const render = () => `- Profile: \`${identity.profileId}\`\n- Workflow: \`${identity.workflowId}\`\n- Definition hash: \`${identity.definitionHash}\`\n- Branch: \`${identity.branch}\``
+  assert.deepEqual(parseWorkflowIdentity(render()), identity)
+  assert.deepEqual(parseWorkflowIdentity(`stale\n${render()}\nnew head`), identity)
 })
 
 test('landing uses the exact-head REST merge endpoint without GraphQL pull request expansion', async () => {

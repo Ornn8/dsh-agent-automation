@@ -179,6 +179,11 @@ async function upsertStatus(status, branch, detail, failureClass) {
     ciRequest ? '### DSH CI repair' : mergeRequest ? '### DSH merge repair' : '### DSH review repair',
     '',
     `- Status: **${status}**`,
+    ...(transportedRequest ? [
+      `- Profile: \`${transportedRequest.profileId}\``,
+      `- Workflow: \`${transportedRequest.workflowId}\``,
+      `- Definition hash: \`${transportedRequest.definitionHash}\``,
+    ] : []),
     `- Controller SHA: \`${controllerSha}\``,
     `- Repair class: \`${repairClass}\``,
     ...(ciRequest ? [`- CI workflow: \`${ciWorkflowName}\``] : []),
