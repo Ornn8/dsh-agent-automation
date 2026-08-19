@@ -11,7 +11,7 @@ const TERMINAL_ACTIONS = new Set([
 
 /** @typedef {{ action: string, repository: string, pullRequestNumber: number, pair: { base: string, head: string }, stateVersion: string, workflow: { definitionHash: string, workflowId: string, stageId: string } }} AdvancementRequest */
 /** @typedef {{ requestReview: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestRepair: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestLanding: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementEffects */
-/** @typedef {{ claim: (request: AdvancementRequest & { transitionIdentity: string }) => boolean | Promise<boolean>, markApplied: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementJournal */
+/** @typedef {{ claim: (request: AdvancementRequest & { transitionIdentity: string }) => boolean | Promise<boolean>, markInflight?: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, markApplied: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementJournal */
 /** @typedef {{ status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
 /** @typedef {{ type: 'pull-request', number: number, state: string, draft: boolean, base: string, head: string, labels?: unknown[] }} RepairSubject */
 
@@ -100,7 +100,7 @@ export function advancementRepairCandidate({ records, subject, stateVersion, tra
  * @param {AdvancementRequest} value
  * @param {AdvancementEffects} effects
  * @param {AdvancementJournal} [journal]
- * @returns {Promise<AdvancementRequest & { transitionIdentity: string, alreadyApplied?: boolean }>}
+ * @returns {Promise<AdvancementRequest & { transitionIdentity: string, alreadyApplied?: boolean, deferred?: boolean }>}
  */
 export async function consumePullRequestAdvancement(value, effects, journal) {
   const request = requireRequest(value)
@@ -109,9 +109,21 @@ export async function consumePullRequestAdvancement(value, effects, journal) {
   if (MUTATIONS.has(request.action) && journal && !await journal.claim(output)) {
     return { ...output, alreadyApplied: true }
   }
-  if (request.action === 'request-review') await effects.requestReview(output)
-  if (request.action === 'request-repair') await effects.requestRepair(output)
-  if (request.action === 'request-landing') await effects.requestLanding(output)
+  if ((request.action === 'request-review' || request.action === 'request-repair') && journal?.markInflight) {
+    await journal.markInflight(output)
+  }
+  /** @type {unknown} */
+  let effectResult
+  if (request.action === 'request-review') effectResult = await effects.requestReview(output)
+  if (request.action === 'request-repair') effectResult = await effects.requestRepair(output)
+  if (request.action === 'request-landing') effectResult = await effects.requestLanding(output)
+  if (request.action === 'request-landing' && effectResult && typeof effectResult === 'object'
+    && /** @type {{ outcome?: unknown }} */ (effectResult).outcome === 'deferred') {
+    return { ...output, deferred: true }
+  }
+  if (request.action === 'request-landing' && journal?.markInflight) {
+    await journal.markInflight(output)
+  }
   if (MUTATIONS.has(request.action) && journal) {
     let lastError
     for (let attempt = 1; attempt <= 3; attempt += 1) {

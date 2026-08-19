@@ -40,7 +40,7 @@ const WAKE_EVENTS = new Set([
 /** @typedef {string | { context: string, app_id?: number | null }} RequiredCheckDefinition */
 /** @typedef {'review.completed' | 'review.recovery.completed' | 'repair.completed' | 'recovery.completed' | 'pull-request.updated' | 'ci.required-check.completed'} WakeEvent */
 /** @typedef {{ required: RequiredCheckDefinition[], results: Record<string, unknown>[] }} AdvancementChecks */
-/** @typedef {{ repair: 'idle' | 'requested' | 'pending' | 'running' | 'completed' | 'failed', recovery: 'idle' | 'pending' | 'running' | 'completed' | 'failed', paused: boolean }} AdvancementGovernor */
+/** @typedef {{ repair: 'idle' | 'requested' | 'pending' | 'running' | 'completed' | 'failed', repairCandidate?: { transition: string, observationId: string } | null, recovery: 'idle' | 'pending' | 'running' | 'completed' | 'failed', paused: boolean }} AdvancementGovernor */
 /** @typedef {{ definitionHash: string, workflowId: string, stageId: string }} AdvancementWorkflow */
 /** @typedef {{ controllerRepository: string, controllerSha: string, workflowPath: string }} TrustedReview */
 /** @typedef {{ repository: string, pullRequest: AdvancementPullRequest, defaultBranch: string, pair: AdvancementPair, expectedPair: AdvancementPair, mergeability: 'mergeable' | 'conflicting' | 'unknown', review: AdvancementReview, trustedReview: TrustedReview, checks: AdvancementChecks, governor: AdvancementGovernor, workflow: AdvancementWorkflow, stateVersion: string }} AdvancementSnapshot */
@@ -146,6 +146,16 @@ function normalizeChecks(value) {
   return { required, results }
 }
 
+/** @param {unknown} value @returns {{ transition: string, observationId: string } | null} */
+function normalizeRepairCandidate(value) {
+  if (value === undefined || value === null) return null
+  const candidate = requireObject(value, 'governor.repairCandidate')
+  return {
+    transition: requireText(candidate.transition, 'governor.repairCandidate.transition', 300),
+    observationId: requireText(candidate.observationId, 'governor.repairCandidate.observationId', 200),
+  }
+}
+
 /** Validate and normalize one complete exact-state advancement snapshot. @param {unknown} value @returns {AdvancementSnapshot} */
 function normalizeSnapshot(value) {
   const object = requireObject(value, 'advancement snapshot')
@@ -165,6 +175,7 @@ function normalizeSnapshot(value) {
   if (!GOVERNOR_STATES.has(repair) || !GOVERNOR_STATES.has(recovery) || typeof governor.paused !== 'boolean') {
     throw new Error('governor state is invalid')
   }
+  const repairCandidate = normalizeRepairCandidate(governor.repairCandidate)
   if (!['mergeable', 'conflicting', 'unknown'].includes(mergeability)) throw new Error('mergeability is invalid')
   return {
     repository: requireText(object.repository, 'repository', 200),
@@ -178,6 +189,7 @@ function normalizeSnapshot(value) {
     checks: normalizeChecks(object.checks),
     governor: {
       repair: /** @type {AdvancementGovernor['repair']} */ (repair),
+      repairCandidate,
       recovery: /** @type {AdvancementGovernor['recovery']} */ (recovery),
       paused: /** @type {boolean} */ (governor.paused),
     },
@@ -245,6 +257,24 @@ function decision(snapshot, action, reason, extra = {}) {
   return { action, reason, ...extra, ...identity(snapshot) }
 }
 
+/** Return the verified routing cause for an already-recorded repair candidate. @param {{ transition: string, observationId: string } | null | undefined} candidate */
+function candidateRepairCause(candidate) {
+  if (!candidate) return 'decision-bound-repair'
+  if (candidate.transition === 'review-repair' && candidate.observationId.startsWith('comment-')) return 'manual-rework'
+  if (candidate.transition.startsWith('review-repair:run-')) return 'review-block'
+  return 'decision-bound-repair'
+}
+
+/** Attach a machine-derived repair route; no model-authored text is used as a cause. @param {AdvancementSnapshot} snapshot @param {string} reason @param {string} cause @param {{ transition: string, observationId: string } | null} [candidate] */
+function repairDecision(snapshot, reason, cause, candidate = null) {
+  return decision(snapshot, 'request-repair', reason, {
+    repair: {
+      cause,
+      candidate: candidate ? { transition: candidate.transition, observationId: candidate.observationId } : null,
+    },
+  })
+}
+
 /** @param {AdvancementSnapshot} snapshot @param {string} action @param {string} reason @param {string} missingCondition @param {WakeEvent[]} wakeEvents @param {boolean} [scheduledReconciliation] */
 function waitDecision(snapshot, action, reason, missingCondition, wakeEvents, scheduledReconciliation = true) {
   if (wakeEvents.some(event => !WAKE_EVENTS.has(event))) throw new Error('unsupported wake event')
@@ -264,7 +294,7 @@ export function decidePullRequestAdvancement(value) {
     return decision(snapshot, 'paused', 'Governor repair or recovery failed and requires bounded recovery')
   }
   if (snapshot.governor.repair === 'requested') {
-    return decision(snapshot, 'request-repair', 'Governor repair awaits independent admission')
+    return repairDecision(snapshot, 'Governor repair awaits independent admission', candidateRepairCause(snapshot.governor.repairCandidate), snapshot.governor.repairCandidate)
   }
   if (snapshot.governor.repair === 'pending' || snapshot.governor.repair === 'running') {
     return waitDecision(snapshot, 'wait-checks', 'Governor repair is active', 'repair-completed', ['repair.completed'])
@@ -279,15 +309,15 @@ export function decidePullRequestAdvancement(value) {
   if (review === 'infrastructure-failure') {
     return waitDecision(snapshot, 'wait-review', 'review infrastructure recovery is pending', 'review-infrastructure-recovery', ['review.recovery.completed'])
   }
-  if (review === 'block') return decision(snapshot, 'request-repair', 'trusted review BLOCK requires repair')
+  if (review === 'block') return repairDecision(snapshot, 'trusted review BLOCK requires repair', 'review-block')
   if (review === 'untrusted') {
     return waitDecision(snapshot, 'wait-review', 'review evidence is not authoritative for this exact pair', 'trusted-exact-pair-review', ['review.completed'])
   }
-  if (snapshot.mergeability === 'conflicting') return decision(snapshot, 'request-repair', 'pull request has a merge conflict')
+  if (snapshot.mergeability === 'conflicting') return repairDecision(snapshot, 'pull request has a merge conflict', 'merge-conflict')
   if (snapshot.mergeability === 'unknown') {
     return waitDecision(snapshot, 'wait-checks', 'GitHub has not resolved mergeability', 'resolved-mergeability', ['pull-request.updated'])
   }
-  if (statuses.some(status => status === 'failed')) return decision(snapshot, 'request-repair', 'a required exact-head check failed')
+  if (statuses.some(status => status === 'failed')) return repairDecision(snapshot, 'a required exact-head check failed', 'failed-check')
   if (review !== 'pass') {
     if (review === 'missing') return decision(snapshot, 'request-review', 'no review is active for the exact pair')
     return waitDecision(snapshot, 'wait-review', 'trusted exact-pair review is missing', 'trusted-exact-pair-review', ['review.completed'])

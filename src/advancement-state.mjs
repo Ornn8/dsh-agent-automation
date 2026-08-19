@@ -13,7 +13,7 @@ import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 
 const FULL_SHA = /^[0-9a-f]{40}$/
 
-/** @typedef {{ status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
+/** @typedef {{ status?: string, transition?: string, stateVersion?: string, observationId?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
 /** @typedef {{ number: number, state: 'open' | 'closed', draft: boolean, mergeable?: boolean | string | null, base: { ref: string, sha: string }, head: { ref: string, sha: string, repo?: { full_name?: string } }, labels?: Array<string | { name?: string }> }} PullRequest */
 /** @typedef {Record<string, unknown> & { id?: number, name?: string, head_sha?: string, status?: string, run_attempt?: number }} EvidenceRecord */
 /** @typedef {{ definition: object, definitionHash: string }} WorkflowProfile */
@@ -45,19 +45,36 @@ function transitionState(records, stateVersion, predicate, requested) {
   return 'idle'
 }
 
+/** Return the current requested repair record without re-evaluating its authority. @param {GovernorRecord[]} records @param {string} stateVersion */
+function requestedRepairCandidate(records, stateVersion) {
+  return records.find(record => typeof record.transition === 'string'
+    && record.status === 'candidate'
+    && record.stateVersion === stateVersion
+    && (record.transition === 'review-repair' || record.transition.startsWith('review-repair:'))
+    && !records.some(applied => applied.status === 'applied'
+      && applied.transition === record.transition
+      && applied.stateVersion === record.stateVersion
+      && applied.subject?.type === record.subject?.type
+      && applied.subject?.number === record.subject?.number))
+}
+
 /**
  * Project durable Governor records into the closed PR advancement states.
  * @param {object[]} records
  * @param {number} pullRequestNumber
  * @param {string} stateVersion
- * @returns {{ repair: 'idle' | 'requested' | 'pending' | 'running', recovery: 'idle' | 'pending' | 'running', paused: boolean }}
+ * @returns {{ repair: 'idle' | 'requested' | 'pending' | 'running', repairCandidate: { transition: string, observationId: string } | null, recovery: 'idle' | 'pending' | 'running', paused: boolean }}
  */
 export function advancementGovernorState(records, pullRequestNumber, stateVersion) {
   const epoch = activeEpoch(records, pullRequestNumber)
   const recovery = transitionState(epoch.records, stateVersion, transition => transition === 'workflow-recovery', false)
   if (recovery === 'requested') throw new Error('Recovery candidate projection is invalid')
+  const repairCandidate = requestedRepairCandidate(epoch.records, stateVersion)
   return {
     repair: transitionState(epoch.records, stateVersion, transition => transition === 'review-repair' || transition.startsWith('review-repair:'), true),
+    repairCandidate: repairCandidate
+      ? { transition: String(repairCandidate.transition), observationId: String(repairCandidate.observationId) }
+      : null,
     recovery,
     paused: epoch.paused,
   }
@@ -140,7 +157,11 @@ export async function buildPullRequestAdvancementSnapshot({
       review = { state: 'completed', proof: { checkRun, run, jobs } }
       break
     } catch {
-      // A malformed same-name candidate cannot mask an older authoritative proof.
+      // This candidate has already bound the exact pair and pinned controller.
+      // Its unreadable terminal job evidence must fail closed rather than revive
+      // an older proof from a superseded trusted invocation.
+      review = { state: 'pending', proof: null }
+      break
     }
   }
   const subject = pullRequestGovernorSubject(pullRequest)

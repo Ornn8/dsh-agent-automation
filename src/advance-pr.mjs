@@ -6,6 +6,7 @@ import {
   advancementRepairCandidate,
   consumePullRequestAdvancement,
 } from './advancement-runtime.mjs'
+import { landingResult } from './landing-result.mjs'
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import {
   attestedGovernorRecordBody,
@@ -14,14 +15,18 @@ import {
   trustedGovernorRecords,
 } from './governor-state.mjs'
 import { reviewFaultAttemptEndpoints, verifyReviewFaultAttempt } from './review-fault-audit.mjs'
+import { parseReviewCheckIdentity } from './review-check.mjs'
+import { terminalReviewSource } from './advancement-source.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
-const expectedBase = process.env.BASE_SHA?.trim().toLowerCase() || ''
-const expectedHead = process.env.HEAD_SHA?.trim().toLowerCase() || ''
+let expectedBase = process.env.BASE_SHA?.trim().toLowerCase() || ''
+let expectedHead = process.env.HEAD_SHA?.trim().toLowerCase() || ''
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const profileId = process.env.PROFILE_ID?.trim() || 'github-pr-cycle'
-const requestedWorkflowId = process.env.WORKFLOW_ID?.trim() || ''
+let requestedWorkflowId = process.env.WORKFLOW_ID?.trim() || ''
+const sourceRunId = Number.parseInt(process.env.SOURCE_RUN_ID || '0', 10)
+const sourceRunAttempt = Number.parseInt(process.env.SOURCE_RUN_ATTEMPT || '0', 10)
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA').toLowerCase(),
@@ -35,6 +40,11 @@ const governorWorkflowPath = requiredEnv('GOVERNOR_WORKFLOW_PATH')
 const runId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
 
 if (!Number.isSafeInteger(requestedNumber) || requestedNumber < 0) throw new Error('Invalid PR_NUMBER')
+if (!Number.isSafeInteger(sourceRunId) || sourceRunId < 0
+  || !Number.isSafeInteger(sourceRunAttempt) || sourceRunAttempt < 0
+  || Boolean(sourceRunId) !== Boolean(sourceRunAttempt)) {
+  throw new Error('Advancement source workflow identity is invalid')
+}
 if (!Number.isSafeInteger(runId) || runId < 1 || !GOVERNOR_WORKFLOW_PATHS.includes(governorWorkflowPath)) {
   throw new Error('Advancement Governor writer provenance is invalid')
 }
@@ -48,7 +58,25 @@ async function ghJson(args, description) {
   return parseJson(result.stdout, description)
 }
 
-let pullRequestNumber = requestedNumber
+async function resolveTerminalReviewSource() {
+  if (!sourceRunId) return null
+  const source = await ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'advancement source workflow run')
+  return terminalReviewSource(source, {
+    runId: sourceRunId,
+    runAttempt: sourceRunAttempt,
+    repository,
+    controllerRepository: trustedReview.controllerRepository,
+    controllerSha: trustedReview.controllerSha,
+    workflowPath: trustedReview.workflowPath,
+  })
+}
+
+const verifiedTerminalReviewSource = await resolveTerminalReviewSource()
+let pullRequestNumber = verifiedTerminalReviewSource?.number || requestedNumber
+if (verifiedTerminalReviewSource) {
+  expectedBase = verifiedTerminalReviewSource.base
+  expectedHead = verifiedTerminalReviewSource.head
+}
 if (pullRequestNumber === 0) {
   if (!/^[0-9a-f]{40}$/.test(expectedHead)) throw new Error('PR_NUMBER=0 requires an exact HEAD_SHA')
   const candidates = await ghJson([
@@ -136,6 +164,15 @@ const [profile, checkResults, governorRecords] = await Promise.all([
   readCheckResults(pullRequest.head.sha),
   readGovernorRecords(pullRequest.number),
 ])
+if (verifiedTerminalReviewSource) {
+  const sourceChecks = checkResults.filter(check => check.head_sha === expectedHead
+    && parseReviewCheckIdentity(check)?.runId === sourceRunId
+    && parseReviewCheckIdentity(check)?.runAttempt === sourceRunAttempt)
+  if (sourceChecks.length !== 1) {
+    throw new Error('Completed source review workflow does not expose one exact-head controller CheckRun')
+  }
+  requestedWorkflowId = parseReviewCheckIdentity(sourceChecks[0]).workflowId
+}
 const snapshot = await buildPullRequestAdvancementSnapshot({
   repository,
   pullRequest,
@@ -193,14 +230,16 @@ const result = await consumePullRequestAdvancement(request, {
     })
   },
   requestRepair: async value => {
-    const subject = pullRequestGovernorSubject(pullRequest)
-    const repair = advancementRepairCandidate({
-      records: governorRecords,
-      subject,
-      stateVersion: value.stateVersion,
-      transitionIdentity: value.transitionIdentity,
-    })
-    if (repair.record) await writeGovernorRecord(repair.record)
+    if (!value.repair?.candidate) {
+      const subject = pullRequestGovernorSubject(pullRequest)
+      const repair = advancementRepairCandidate({
+        records: governorRecords,
+        subject,
+        stateVersion: value.stateVersion,
+        transitionIdentity: value.transitionIdentity,
+      })
+      if (repair.record) await writeGovernorRecord(repair.record)
+    }
     await run(githubExecutable, [
       'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
     ], {
@@ -217,7 +256,7 @@ const result = await consumePullRequestAdvancement(request, {
     })
   },
   requestLanding: async () => {
-    await run(process.execPath, [landScript], {
+    const landing = await run(process.execPath, [landScript], {
       env: {
         ...process.env,
         PR_NUMBER: String(pullRequest.number),
@@ -225,6 +264,7 @@ const result = await consumePullRequestAdvancement(request, {
       },
       tee: true,
     })
+    return landingResult(landing.stdout)
   },
 }, {
   claim: async value => {
@@ -233,8 +273,16 @@ const result = await consumePullRequestAdvancement(request, {
       && record.stateVersion === value.stateVersion
       && record.subject?.type === 'pull-request'
       && record.subject.number === pullRequest.number
-    if (governorRecords.some(record => record.status === 'applied' && matching(record))) return false
-    if (governorRecords.some(record => record.status === 'candidate' && matching(record))) return true
+    const inflight = `${transition}:inflight`
+    if (governorRecords.some(record => record.status === 'applied' && matching(record))
+      || governorRecords.some(record => record.status === 'candidate'
+        && record.transition === inflight
+        && record.stateVersion === value.stateVersion
+        && record.subject?.type === 'pull-request'
+        && record.subject.number === pullRequest.number)) return false
+    if (governorRecords.some(record => record.status === 'candidate' && matching(record))) {
+      return value.action === 'request-landing'
+    }
     await writeGovernorRecord({
       version: 1,
       status: 'candidate',
@@ -244,6 +292,16 @@ const result = await consumePullRequestAdvancement(request, {
       observationId: `run-${runId}`,
     })
     return true
+  },
+  markInflight: async value => {
+    await writeGovernorRecord({
+      version: 1,
+      status: 'candidate',
+      transition: `pull-request-advancement:${value.transitionIdentity}:inflight`,
+      subject: { type: 'pull-request', number: pullRequest.number },
+      stateVersion: value.stateVersion,
+      observationId: `run-${runId}`,
+    })
   },
   markApplied: async value => {
     await writeGovernorRecord({

@@ -137,6 +137,34 @@ test('an unreadable newer same-name check cannot mask an older authoritative exa
   assert.equal(snapshot.review.proof.checkRun.id, 20)
 })
 
+test('an unreadable newest trusted review job snapshot masks older proof', async () => {
+  const profile = await loadWorkflowProfile()
+  const snapshot = await buildPullRequestAdvancementSnapshot({
+    repository: 'owner/repository',
+    pullRequest: pullRequest(),
+    defaultBranch: 'main',
+    profile,
+    requestedWorkflowId: 'default',
+    trustedReview: {
+      controllerRepository: 'owner/controller', controllerSha: sha('c'),
+      workflowPath: '.github/workflows/agent-review.yml',
+    },
+    requiredChecks: ['ci'],
+    checkResults: [
+      reviewCheck({ id: 21, runId: 31, definitionHash: profile.definitionHash }),
+      reviewCheck({ id: 20, runId: 30, definitionHash: profile.definitionHash }),
+    ],
+    governorRecords: [],
+    readRun: async runId => reviewRun({ id: runId }),
+    readJobs: async runId => {
+      if (runId === 31) throw new Error('review jobs are unreadable')
+      return [{ id: 500 + runId, run_id: runId, run_attempt: 1 }]
+    },
+  })
+  assert.equal(snapshot.review.state, 'pending')
+  assert.equal(snapshot.review.proof, null)
+})
+
 test('a newer trusted in-progress review masks an older trusted PASS', async () => {
   const profile = await loadWorkflowProfile()
   const snapshot = await buildPullRequestAdvancementSnapshot({
@@ -177,7 +205,9 @@ test('Governor projection keeps pending repair distinct and closes an authorized
   const resumed = [...paused,
     { status: 'resumed', transition: 'review-repair', subject: { type: 'pull-request', number: 12 } },
   ]
-  assert.deepEqual(advancementGovernorState(resumed, 12, version), { repair: 'idle', recovery: 'idle', paused: false })
+  assert.deepEqual(advancementGovernorState(resumed, 12, version), {
+    repair: 'idle', repairCandidate: null, recovery: 'idle', paused: false,
+  })
 })
 
 test('Governor applied and attempt records keep repair and recovery running', () => {
@@ -190,6 +220,7 @@ test('Governor applied and attempt records keep repair and recovery running', ()
   ]
   assert.deepEqual(advancementGovernorState(records, 12, version), {
     repair: 'running',
+    repairCandidate: null,
     recovery: 'running',
     paused: false,
   })
@@ -242,6 +273,9 @@ test('all direct and scheduled wake sources enter the exact-state advancement pa
   const targetRework = await readFile(new URL('../templates/target/.github/workflows/agent-pr-rework.yml', import.meta.url), 'utf8')
   const wakeRework = await readFile(new URL('../.github/workflows/wake-rework.yml', import.meta.url), 'utf8')
   const review = await readFile(new URL('../.github/workflows/agent-review.yml', import.meta.url), 'utf8')
+  const advanceWorkflow = await readFile(new URL('../.github/workflows/advance-pr.yml', import.meta.url), 'utf8')
+  const advanceRuntime = await readFile(new URL('../src/advance-pr.mjs', import.meta.url), 'utf8')
+  const advanceSource = await readFile(new URL('../src/advancement-source.mjs', import.meta.url), 'utf8')
   const repair = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')
   const resume = await readFile(new URL('../src/wake-rework.mjs', import.meta.url), 'utf8')
   const reconcile = await readFile(new URL('../src/reconcile-landing.mjs', import.meta.url), 'utf8')
@@ -254,8 +288,16 @@ test('all direct and scheduled wake sources enter the exact-state advancement pa
   assert.match(targetAdvance, /DSH_AUTOMATION_REQUIRED_CHECKS/)
   assert.doesNotMatch(targetReview, /pull_request_target:/)
   assert.doesNotMatch(review, /Wake exact-state advancement after review publication/)
-  assert.match(targetAdvance, /Agent PR Review/)
   assert.match(targetAdvance, /workflow_run\.name == 'Agent PR Review'/)
+  assert.doesNotMatch(targetAdvance, /workflow_run\.pull_requests\[0\]/)
+  assert.match(targetAdvance, /source_run_id: \$\{\{ github\.event_name == 'workflow_run' && github\.event\.workflow_run\.name == 'Agent PR Review'/)
+  assert.match(targetAdvance, /source_run_attempt: \$\{\{ github\.event_name == 'workflow_run' && github\.event\.workflow_run\.name == 'Agent PR Review'/)
+  assert.match(advanceWorkflow, /source_run_id:/)
+  assert.match(advanceWorkflow, /source_run_attempt:/)
+  assert.match(advanceRuntime, /terminalReviewSource\(source/)
+  assert.match(advanceSource, /source\?\.status !== 'completed'/)
+  assert.match(advanceSource, /referenced_workflows/)
+  assert.doesNotMatch(review, /advance-after-terminal/)
   assert.match(repair, /event_type: 'dsh-advance'/)
   assert.match(resume, /event_type: 'dsh-advance'/)
   assert.match(targetRework, /agent-review-reconcile/)

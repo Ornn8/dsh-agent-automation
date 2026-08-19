@@ -6,6 +6,7 @@ import {
   advancementTransitionIdentity,
   consumePullRequestAdvancement,
 } from '../src/advancement-runtime.mjs'
+import { landingResult } from '../src/landing-result.mjs'
 
 const sha = letter => letter.repeat(40)
 const digest = letter => letter.repeat(64)
@@ -160,6 +161,41 @@ test('a transient applied-record failure retries the journal without replaying t
   })
   assert.equal(effects, 1)
   assert.equal(marks, 2)
+})
+
+test('a deferred landing result remains retryable and is not marked applied', async () => {
+  let marks = 0
+  const result = await consumePullRequestAdvancement(decision('request-landing'), {
+    requestReview: () => undefined,
+    requestRepair: () => undefined,
+    requestLanding: () => landingResult('Landing deferred.\nagent-landing-result:deferred\n'),
+  }, {
+    claim: () => true,
+    markApplied: () => { marks += 1 },
+  })
+  assert.equal(result.deferred, true)
+  assert.equal(marks, 0)
+})
+
+test('persistent applied-record failure does not replay a dispatched review or repair', async () => {
+  for (const action of ['request-review', 'request-repair']) {
+    let effects = 0
+    const inflight = new Set()
+    const journal = {
+      claim: value => !inflight.has(value.transitionIdentity),
+      markInflight: value => inflight.add(value.transitionIdentity),
+      markApplied: () => { throw new Error('persistent comment failure') },
+    }
+    const route = {
+      requestReview: () => { effects += 1 },
+      requestRepair: () => { effects += 1 },
+      requestLanding: () => { effects += 1 },
+    }
+    await assert.rejects(consumePullRequestAdvancement(decision(action), route, journal), /persistent comment failure/)
+    const duplicate = await consumePullRequestAdvancement(decision(action), route, journal)
+    assert.equal(duplicate.alreadyApplied, true, action)
+    assert.equal(effects, 1, action)
+  }
 })
 
 test('closed action routing never infers authority from prose', async () => {

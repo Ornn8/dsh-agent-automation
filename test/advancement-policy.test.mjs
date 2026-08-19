@@ -98,7 +98,10 @@ test('trusted exact-pair review and required checks request landing', () => {
 })
 
 test('controller-verified intentional review BLOCK requests repair', () => {
-  assert.equal(decidePullRequestAdvancement(snapshot({ review: reviewEvidence('block'), checks: passedCi })).action, 'request-repair')
+  const decision = decidePullRequestAdvancement(snapshot({ review: reviewEvidence('block'), checks: passedCi }))
+  assert.equal(decision.action, 'request-repair')
+  assert.equal(decision.repair.cause, 'review-block')
+  assert.equal(decision.repair.candidate, null)
 })
 
 test('controller-verified review infrastructure failure waits for recovery', () => {
@@ -171,7 +174,9 @@ test('a prior-attempt BLOCK or cancellation cannot influence the current attempt
 
 test('failed required CI requests repair after an authoritative review', () => {
   const checks = { required: ['ci'], results: [check({ conclusion: 'FAILURE' })] }
-  assert.equal(decidePullRequestAdvancement(snapshot({ review: passedReview, checks })).action, 'request-repair')
+  const decision = decidePullRequestAdvancement(snapshot({ review: passedReview, checks }))
+  assert.equal(decision.action, 'request-repair')
+  assert.equal(decision.repair.cause, 'failed-check')
 })
 
 test('a merge conflict requests repair after an authoritative review', () => {
@@ -181,6 +186,27 @@ test('a merge conflict requests repair after an authoritative review', () => {
   }))
   assert.equal(result.action, 'request-repair')
   assert.match(result.reason, /merge conflict/)
+  assert.equal(result.repair.cause, 'merge-conflict')
+})
+
+test('a verified manual rework candidate is consumed exactly instead of being replaced', () => {
+  const candidate = { transition: 'review-repair', observationId: 'comment-91' }
+  const decision = decidePullRequestAdvancement(snapshot({
+    governor: { repair: 'requested', repairCandidate: candidate, recovery: 'idle', paused: false },
+  }))
+  assert.equal(decision.action, 'request-repair')
+  assert.equal(decision.repair.cause, 'manual-rework')
+  assert.deepEqual(decision.repair.candidate, candidate)
+})
+
+test('a verified BLOCK candidate is consumed exactly instead of being replaced', () => {
+  const candidate = { transition: 'review-repair:run-30', observationId: 'run-30' }
+  const decision = decidePullRequestAdvancement(snapshot({
+    governor: { repair: 'requested', repairCandidate: candidate, recovery: 'idle', paused: false },
+  }))
+  assert.equal(decision.action, 'request-repair')
+  assert.equal(decision.repair.cause, 'review-block')
+  assert.deepEqual(decision.repair.candidate, candidate)
 })
 
 test('head or base mismatch is stale before evidence evaluation', () => {

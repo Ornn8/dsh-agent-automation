@@ -1354,8 +1354,8 @@ test('landing reconciliation is hosted, bounded, and independent of workflow_run
   assert.match(reusable, /issues: write/)
   assert.doesNotMatch(landingCaller, /pull_requests\[0\]\.number != null/)
   assert.doesNotMatch(repairCaller, /pull_requests\[0\]\.number != null/)
-  assert.match(landingCaller, /pull_requests\[0\]\.number \|\| 0/)
-  assert.match(repairCaller, /pull_requests\[0\]\.number \|\| 0/)
+  assert.match(landingCaller, /pull_request_number: \$\{\{[^\n]*\|\| 0 \}\}/)
+  assert.match(repairCaller, /pull_request_number: 0/)
 })
 
 test('Codex starts a fresh review in its repository project before starting the first turn', async () => {
