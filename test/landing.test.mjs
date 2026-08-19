@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { evaluateLanding } from '../src/landing-policy.mjs'
+import { evaluateLanding, normalizeMergeableStatus } from '../src/landing-policy.mjs'
+
+test('landing normalizes GitHub CLI mergeability enums', () => {
+  assert.equal(normalizeMergeableStatus('MERGEABLE'), true)
+  assert.equal(normalizeMergeableStatus('CONFLICTING'), false)
+  assert.equal(normalizeMergeableStatus('UNKNOWN'), null)
+})
 
 const pullRequest = (baseRefOid, headRefOid) => ({
   number: 12, repository: 'owner/repository', state: 'OPEN',
