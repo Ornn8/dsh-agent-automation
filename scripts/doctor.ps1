@@ -197,6 +197,9 @@ if ($Online) {
       $actualChecks = & $loaded.Config.ghExecutable variable get DSH_AUTOMATION_REQUIRED_CHECKS --repo $mapping.repository --json value --jq '.value' 2>$null
       $checkMatches = $LASTEXITCODE -eq 0 -and $actualChecks.Trim().Equals((ConvertTo-Json -InputObject @($mapping.requiredChecks) -Compress), [StringComparison]::Ordinal)
       Add-Finding "$($mapping.repository) required checks variable" $checkMatches $(if ($checkMatches) { 'matches requiredChecks' } else { 'missing or mismatched' })
+      $actualControllerLogin = & $loaded.Config.ghExecutable variable get AGENT_AUTOMATION_CONTROLLER_LOGIN --repo $mapping.repository --json value --jq '.value' 2>$null
+      $controllerLoginMatches = $LASTEXITCODE -eq 0 -and $actualControllerLogin.Trim().Equals([string]$loaded.Config.github.login, [StringComparison]::Ordinal)
+      Add-Finding "$($mapping.repository) controller login variable" $controllerLoginMatches $(if ($controllerLoginMatches) { 'matches github.login' } else { 'missing or mismatched' })
       $expectedReplicaHealth = ConvertTo-Json -InputObject ([ordered]@{ include = @($instances | Where-Object {
         $_.Role -in @('change', 'review') -and ($null -eq $_.Repository -or $_.Repository -eq $mapping.repository)
       } | ForEach-Object { [ordered]@{ role = $_.Role; label = $_.Id; primary = ($_.Replica -eq 1) } }) }) -Compress -Depth 4

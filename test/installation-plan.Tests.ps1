@@ -121,6 +121,7 @@ Describe 'Portable installation plan' {
     }
     $plan.repositories[0].variables.DSH_AUTOMATION_CI_WORKFLOWS | Should -BeExactly '["CI","Security"]'
     $plan.repositories[0].variables.DSH_AUTOMATION_REQUIRED_CHECKS | Should -BeExactly '["all checks passed","security/gate"]'
+    $plan.repositories[0].variables.AGENT_AUTOMATION_CONTROLLER_LOGIN | Should -BeExactly 'REPLACE_WITH_GITHUB_LOGIN'
     @($plan.repositories[0].branchProtection.requiredChecks.name) | Should -Be @('agent/review', 'all checks passed', 'security/gate')
     $plan.repositories[0].branchProtection.removeLegacyCheck | Should -BeExactly 'codex/review'
 

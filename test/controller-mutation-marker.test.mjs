@@ -5,6 +5,7 @@ import {
   parseControllerMutationMarker,
   trustedControllerMutation,
 } from '../src/controller-mutation-marker.mjs'
+import { trustedWorkerIdentity } from '../src/workflow-identity.mjs'
 
 const sha = 'a'.repeat(40)
 const record = {
@@ -83,4 +84,47 @@ test('Controller mutation markers require the configured author and exact reusab
     expectedSubject: { type: 'issue', number: 8 },
     loadRun: async () => run,
   }), /expected target/)
+})
+
+test('Worker identity trusts the immutable configured controller author, not the Actions actor', async () => {
+  const v2Record = {
+    ...record,
+    version: 2,
+    author: 'controller-login',
+  }
+  const identity = {
+    profileId: 'custom-profile',
+    workflowId: 'custom-cycle',
+    definitionHash: 'b'.repeat(64),
+    branch: 'agent/issue-7',
+  }
+  const body = [
+    `- Profile: \`${identity.profileId}\``,
+    `- Workflow: \`${identity.workflowId}\``,
+    `- Definition hash: \`${identity.definitionHash}\``,
+    `- Branch: \`${identity.branch}\``,
+    controllerMutationMarker(v2Record),
+  ].join('\n')
+  const run = {
+    id: 123,
+    actor: { login: 'github-actions[bot]' },
+    triggering_actor: { login: 'github-actions[bot]' },
+    repository: { full_name: 'owner/target' },
+    referenced_workflows: [{
+      path: `owner/controller/${record.controller.workflowPath}@${sha}`,
+      sha,
+    }],
+  }
+  assert.deepEqual(await trustedWorkerIdentity(
+    { user: { login: 'controller-login' }, body },
+    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run, 'controller-login',
+  ), identity)
+  assert.equal(await trustedWorkerIdentity(
+    { user: { login: 'someone-else' }, body },
+    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run, 'controller-login',
+  ), null)
+  assert.equal(await trustedWorkerIdentity(
+    { user: { login: 'unknown-login' }, body: body.replace('controller-login', 'unknown-login') },
+    { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run, 'controller-login',
+  ), null)
 })

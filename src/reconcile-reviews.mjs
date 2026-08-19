@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import {
   actionsCredentialEnvironment,
+  githubLogin,
   hostCredentialEnvironment,
   loadConfig,
   parseJson,
@@ -27,11 +29,13 @@ import {
 } from './governor-state.mjs'
 import { createReviewRepairRequest, repositoryDispatchBody, resolveRepairEntryStage } from './work-request.mjs'
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
+import { trustedWorkerIdentity } from './workflow-identity.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const config = await loadConfig()
 await verifyGithubIdentity({ config })
+const trustedControllerLogin = githubLogin(config)
 const githubExecutable = config.ghExecutable
 const githubEnvironment = hostCredentialEnvironment()
 const actionsEnvironment = actionsCredentialEnvironment()
@@ -146,6 +150,34 @@ async function governTransition(pullRequest, transition, { limit, workIdentity, 
   return { execute: true, ...(admitted ? { replay: true } : {}), subject, stateVersion }
 }
 
+async function persistedWorkflowIdentity(pullRequest) {
+  const comments = (await actionsJson([
+    'api', `repos/${repository}/issues/${pullRequest.number}/comments?per_page=100`, '--paginate', '--slurp',
+  ], `pull request #${pullRequest.number} Worker comments`)).flat()
+  for (const comment of comments.slice().reverse()) {
+    const identity = await trustedWorkerIdentity(comment,
+      { type: 'pull-request', number: pullRequest.number }, 'repair-worker', repository,
+      runId => actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], `Worker run ${runId}`), trustedControllerLogin)
+    if (identity?.branch === pullRequest.head.ref) return identity
+  }
+  const references = await actionsJson([
+    'pr', 'view', String(pullRequest.number), '--repo', repository, '--json', 'closingIssuesReferences',
+  ], `pull request #${pullRequest.number} closing Issues`)
+  for (const reference of references.closingIssuesReferences || []) {
+    if (!Number.isSafeInteger(reference?.number)) continue
+    const issueComments = (await actionsJson([
+      'api', `repos/${repository}/issues/${reference.number}/comments?per_page=100`, '--paginate', '--slurp',
+    ], `Issue #${reference.number} Worker comments`)).flat()
+    for (const comment of issueComments.slice().reverse()) {
+      const identity = await trustedWorkerIdentity(comment,
+        { type: 'issue', number: reference.number }, 'change-worker', repository,
+        runId => actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], `Worker run ${runId}`), trustedControllerLogin)
+      if (identity?.branch === pullRequest.head.ref) return identity
+    }
+  }
+  return null
+}
+
 async function markGovernorApplied(pullRequest, transition, governed) {
   await writeGovernorRecord(pullRequest.number, {
     version: 1,
@@ -184,7 +216,12 @@ async function requestAdvancement(pullRequest, reviewConfiguration = null) {
     'pr', 'edit', String(pullRequest.number), '--repo', repository,
     '--add-label', 'automation/review-ready',
   ], { env: githubEnvironment })
-  const requestId = `reconcile-${pullRequest.base.sha}-${pullRequest.head.sha}`
+  const requestId = `reconcile-${createHash('sha256').update([
+    pullRequest.base.sha,
+    pullRequest.head.sha,
+    reviewConfiguration?.profileId || 'github-pr-cycle',
+    reviewConfiguration?.workflowId || '',
+  ].join(':')).digest('hex').slice(0, 32)}`
   await dispatchWithReceipt({
     executable: githubExecutable, environment: actionsEnvironment, repository,
     workflowFile: 'agent-pr-land.yml',
@@ -303,6 +340,13 @@ for (const summary of summaries.flat()) {
     if (!hasTrustedExactReviewRun({ pullRequest: landingPullRequest, reviewProof: proof, trustedReview })) continue
     break
   }
+  const persistedIdentity = await persistedWorkflowIdentity(pullRequest)
+  if (reviewConfiguration && persistedIdentity
+    && (reviewConfiguration.profileId !== persistedIdentity.profileId
+      || reviewConfiguration.workflowId !== persistedIdentity.workflowId)) {
+    throw new Error(`Pull request #${pullRequest.number} has conflicting trusted Worker workflow identities`)
+  }
+  const workflowIdentity = reviewConfiguration || persistedIdentity
   const subject = pullRequestGovernorSubject(pullRequest)
   const stateVersion = subjectStateVersion(subject)
   const governorRecords = await pullRequestGovernorRecords(pullRequest.number)
@@ -320,8 +364,11 @@ for (const summary of summaries.flat()) {
     const reviewRepair = pendingTransition === 'review-repair' || pendingTransition.startsWith('review-repair:')
     const mergeRepair = pendingTransition === 'merge-repair' || pendingTransition.startsWith('merge-repair:')
     const repairProfile = reviewRepair || mergeRepair
-      ? await targetProfile(reviewConfiguration?.profileId || 'github-pr-cycle', pullRequest.base.sha)
+      ? await targetProfile(workflowIdentity?.profileId || 'github-pr-cycle', pullRequest.base.sha)
       : null
+    if (persistedIdentity && repairProfile?.definitionHash !== persistedIdentity.definitionHash) {
+      throw new Error(`Pull request #${pullRequest.number} Worker Profile hash does not match its base`)
+    }
     const repairStage = repairProfile ? resolveRepairEntryStage(repairProfile.definition) : null
     const repairLimit = repairStage?.stage.retry?.limit ?? (pendingTransition === 'workflow-recovery' ? 3 : undefined)
     if (!Number.isSafeInteger(repairLimit)) throw new Error('Repair Profile must declare a bounded retry limit')
@@ -362,7 +409,7 @@ for (const summary of summaries.flat()) {
           workflowFile: 'agent-pr-rework.yml', payload: dispatch, requestId: request.requestId,
         })
       } else {
-        await requestAdvancement(pullRequest)
+        await requestAdvancement(pullRequest, workflowIdentity)
       }
       await markGovernorApplied(pullRequest, pendingTransition, governed)
       reconciled += 1
@@ -373,7 +420,7 @@ for (const summary of summaries.flat()) {
   if (reviewConfiguration && !reviewProof) continue
   if (!needsExactReview({ repository, defaultBranch, pullRequest, reviewProof })) continue
 
-  await requestAdvancement(pullRequest, reviewConfiguration)
+  await requestAdvancement(pullRequest, workflowIdentity)
   reconciled += 1
 }
 process.stdout.write(`Reconciled ${reconciled} pull request(s).\n`)

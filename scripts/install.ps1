@@ -206,6 +206,8 @@ foreach ($repositoryPlan in @($plan.repositories)) {
     if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_CI_WORKFLOWS for $($repositoryPlan.repository)" }
     & $loaded.Config.ghExecutable variable set DSH_AUTOMATION_REQUIRED_CHECKS --repo $repositoryPlan.repository --body $requiredChecksJson 1>$null 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Could not set DSH_AUTOMATION_REQUIRED_CHECKS for $($repositoryPlan.repository)" }
+    & $loaded.Config.ghExecutable variable set AGENT_AUTOMATION_CONTROLLER_LOGIN --repo $repositoryPlan.repository --body $repositoryPlan.variables.AGENT_AUTOMATION_CONTROLLER_LOGIN 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set AGENT_AUTOMATION_CONTROLLER_LOGIN for $($repositoryPlan.repository)" }
     & $loaded.Config.ghExecutable variable set AGENT_AUTOMATION_REPLICA_HEALTH --repo $repositoryPlan.repository --body $replicaHealthJson 1>$null 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Could not set AGENT_AUTOMATION_REPLICA_HEALTH for $($repositoryPlan.repository)" }
   }

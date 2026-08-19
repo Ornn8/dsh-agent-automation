@@ -179,6 +179,11 @@ async function upsertStatus(status, branch, detail, failureClass) {
     ciRequest ? '### DSH CI repair' : mergeRequest ? '### DSH merge repair' : '### DSH review repair',
     '',
     `- Status: **${status}**`,
+    ...(transportedRequest ? [
+      `- Profile: \`${transportedRequest.profileId}\``,
+      `- Workflow: \`${transportedRequest.workflowId}\``,
+      `- Definition hash: \`${transportedRequest.definitionHash}\``,
+    ] : []),
     `- Controller SHA: \`${controllerSha}\``,
     `- Repair class: \`${repairClass}\``,
     ...(ciRequest ? [`- CI workflow: \`${ciWorkflowName}\``] : []),
@@ -191,7 +196,8 @@ async function upsertStatus(status, branch, detail, failureClass) {
     '_DSH owns the technical response and any implementation changes._',
     '',
     controllerMutationMarker({
-      version: 1,
+      version: 2,
+      author: markerAuthor,
       operation: 'repair-worker',
       repository,
       subject: { type: 'pull-request', number: pullRequestNumber },

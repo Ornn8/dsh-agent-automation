@@ -20,6 +20,7 @@ import { reviewFaultAttemptEndpoints, verifyReviewFaultAttempt } from './review-
 import { parseReviewCheckIdentity } from './review-check.mjs'
 import { terminalReviewSource, trustedReviewRunProfile } from './advancement-source.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
+import { trustedWorkerIdentity } from './workflow-identity.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
@@ -29,6 +30,7 @@ const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const requestedProfileId = process.env.PROFILE_ID?.trim() || ''
 let profileId = requestedProfileId
 let requestedWorkflowId = process.env.WORKFLOW_ID?.trim() || ''
+const trustedControllerLogin = requiredEnv('TRUSTED_CONTROLLER_LOGIN')
 const sourceRunId = Number.parseInt(process.env.SOURCE_RUN_ID || '0', 10)
 const sourceRunAttempt = Number.parseInt(process.env.SOURCE_RUN_ATTEMPT || '0', 10)
 const trustedReview = {
@@ -163,6 +165,32 @@ async function readRun(runId) {
   return ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `review workflow run ${runId}`)
 }
 
+async function persistedWorkflowIdentity(pullRequest) {
+  const pullRequestComments = (await ghJson([
+    'api', `repos/${repository}/issues/${pullRequest.number}/comments?per_page=100`, '--paginate', '--slurp',
+  ], `pull request #${pullRequest.number} Worker comments`)).flat()
+  for (const comment of pullRequestComments.slice().reverse()) {
+    const identity = await trustedWorkerIdentity(comment,
+      { type: 'pull-request', number: pullRequest.number }, 'repair-worker', repository, readRun, trustedControllerLogin)
+    if (identity?.branch === pullRequest.head.ref) return identity
+  }
+  const references = await ghJson([
+    'pr', 'view', String(pullRequest.number), '--repo', repository, '--json', 'closingIssuesReferences',
+  ], `pull request #${pullRequest.number} closing Issues`)
+  for (const reference of references.closingIssuesReferences || []) {
+    if (!Number.isSafeInteger(reference?.number)) continue
+    const comments = (await ghJson([
+      'api', `repos/${repository}/issues/${reference.number}/comments?per_page=100`, '--paginate', '--slurp',
+    ], `Issue #${reference.number} Worker comments`)).flat()
+    for (const comment of comments.slice().reverse()) {
+      const identity = await trustedWorkerIdentity(comment,
+        { type: 'issue', number: reference.number }, 'change-worker', repository, readRun, trustedControllerLogin)
+      if (identity?.branch === pullRequest.head.ref) return identity
+    }
+  }
+  return null
+}
+
 async function readJobs(runId, runAttempt) {
   const endpoints = reviewFaultAttemptEndpoints(repository, runId, runAttempt)
   const attempt = await ghJson(['api', endpoints.run], `review workflow run ${runId} attempt ${runAttempt}`)
@@ -228,6 +256,15 @@ function configuredRequiredChecks(names) {
 
 const pullRequest = await readPullRequest()
 const checkResults = await readCheckResults(pullRequest.head.sha)
+const persistedIdentity = await persistedWorkflowIdentity(pullRequest)
+if (persistedIdentity) {
+  if (requestedProfileId && requestedProfileId !== 'github-pr-cycle'
+    && requestedProfileId !== persistedIdentity.profileId) {
+    throw new Error('Worker status Profile does not match the requested Profile')
+  }
+  profileId = persistedIdentity.profileId
+  requestedWorkflowId = persistedIdentity.workflowId
+}
 const discoveredReview = await reviewConfiguration(pullRequest, checkResults)
 if (discoveredReview) {
   if (requestedProfileId && requestedProfileId !== 'github-pr-cycle' && requestedProfileId !== discoveredReview.profileId) {
@@ -244,6 +281,9 @@ const [profile, governorRecords] = await Promise.all([
   targetProfile(pullRequest.base.sha),
   readGovernorRecords(pullRequest.number),
 ])
+if (persistedIdentity && profile.definitionHash !== persistedIdentity.definitionHash) {
+  throw new Error('Worker status Profile hash does not match the trusted target base')
+}
 const requiredCheckDefinitions = configuredRequiredChecks(requiredChecks)
 if (verifiedTerminalReviewSource) {
   const sourceChecks = checkResults.filter(check => check.head_sha === expectedHead
@@ -335,6 +375,8 @@ const result = await consumePullRequestAdvancement(request, {
           pull_request_number: pullRequest.number,
           base_sha: snapshot.pair.base,
           head_sha: snapshot.pair.head,
+          profile_id: profileId,
+          workflow_id: snapshot.workflow.workflowId,
           request_id: value.transitionIdentity,
           repair_cause: value.repair?.cause || '',
         },
