@@ -20,7 +20,7 @@ jobs:
       && github.event.workflow_run.conclusion == 'failure'
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-repair.yml@{{CONTROLLER_SHA}}
     with:
-      pull_request_number: ${{ github.event.workflow_run.pull_requests[0].number || 0 }}
+      pull_request_number: 0
       head_sha: ${{ github.event.workflow_run.head_sha }}
       request_id: ${{ format('ci-run-{0}-{1}', github.event.workflow_run.id, github.event.workflow_run.run_attempt) }}
       ci_workflow_name: ${{ github.event.workflow_run.name }}

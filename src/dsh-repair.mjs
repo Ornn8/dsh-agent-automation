@@ -35,7 +35,7 @@ import {
   nonBaselineBlockFromReceipt,
   trustedBaselineIssue,
 } from './baseline-issue.mjs'
-import { isReviewRepairRequestId, parseAgentWorkRequest, reviewRepairTransition } from './work-request.mjs'
+import { isReviewRepairRequestId, mergeRepairTransition, parseAgentWorkRequest, reviewRepairTransition } from './work-request.mjs'
 import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
 import { hasNewReviewCheck, trustedReviewCheckIds } from './review-check.mjs'
@@ -47,7 +47,7 @@ import {
   trustedGovernorRecords,
 } from './governor-state.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
-import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
+import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -60,6 +60,7 @@ const transportedRequest = process.env.WORK_REQUEST_JSON?.trim()
   ? parseAgentWorkRequest(parseJson(process.env.WORK_REQUEST_JSON, 'WorkRequest'))
   : null
 const ciWorkflowName = process.env.CI_WORKFLOW_NAME?.trim() || ''
+const repairCause = process.env.REPAIR_CAUSE?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
 const workerId = resolveRepositoryWorker(config, repository, transportedRequest?.role || requiredEnv('AGENT_ROLE'))
@@ -88,19 +89,23 @@ const marker = requestId
   ? `<!-- dsh-review-repair:${controllerSha}:${expectedHead}:${requestId} -->`
   : `<!-- dsh-review-repair:${controllerSha}:${expectedHead} -->`
 const ciRequest = ciRepairRequest(requestId)
+const mergeRequest = repairCause === 'merge-conflict'
+if (repairCause && !mergeRequest) throw new Error(`Unsupported repair cause ${repairCause}`)
+const reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
+  ? transportedRequest.requestId.slice(`review-repair-${expectedHead}-`.length)
+  : null
 const explicitRequest = Boolean(ciRequest)
+  || reviewObservationId?.startsWith('comment-') === true
   || (!isReviewRepairRequestId(requestId, expectedHead)
     && requestId.startsWith('comment-'))
 const recoveryRequest = /(?:^recovery-|\.recovery-\d+$)/.test(requestId)
 const repairClass = ciRequest
   ? 'automatic-ci'
+  : mergeRequest
+    ? 'automatic-merge'
   : explicitRequest
     ? 'explicit-human'
     : 'automatic-review'
-const reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
-  ? transportedRequest.requestId.slice(`review-repair-${expectedHead}-`.length)
-  : null
-
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (transportedRequest && (transportedRequest.repository !== repository
   || transportedRequest.subject.type !== 'pull-request'
@@ -171,7 +176,7 @@ async function upsertStatus(status, branch, detail, failureClass) {
   const runUrl = requiredEnv('RUN_URL')
   const body = [
     marker,
-    ciRequest ? '### DSH CI repair' : '### DSH review repair',
+    ciRequest ? '### DSH CI repair' : mergeRequest ? '### DSH merge repair' : '### DSH review repair',
     '',
     `- Status: **${status}**`,
     `- Controller SHA: \`${controllerSha}\``,
@@ -220,6 +225,7 @@ async function setRepairLabels({ add = [], remove = [] }) {
     ['automation/ci-baseline', 'The failed CI condition is tracked by a separate default-branch Issue', '1D76DB'],
     ['automation/repair-blocked', 'DSH ended this repair with a valid blocked outcome', 'B60205'],
     ['automation/repairing', 'DSH is addressing the current blocking review', 'FBCA04'],
+    ['automation/review-ready', 'Request one exact-pair Agent review', '0E8A16'],
     ['automation/paused', 'Automatic controller work is paused until an authorized resume', 'D93F0B'],
     ['agent/dsh-failed', 'DSH execution failed; an explicit recovery request is required', 'D93F0B'],
   ]) {
@@ -280,28 +286,26 @@ if (transportedRequest) {
   if (stage.role !== transportedRequest.role) {
     throw new Error('Transported WorkRequest role does not match the trusted repair Stage')
   }
+  if (stage.procedure !== 'github-pr-repair') throw new Error('Transported WorkRequest is not a pull-request repair Stage')
   repairProcedure = stage.procedure
 }
 
-async function requestTransportedReview(current) {
-  if (!transportedRequest || !transportedProfile) return false
-  const cycle = resolveGithubPrCycle(transportedProfile.definition, transportedRequest.workflowId)
-  await run(config.ghExecutable, [
-    'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
-  ], {
-    env: hostCredentialEnvironment(),
-    input: JSON.stringify({
-      event_type: 'agent-review',
+async function requestTransportedAdvancement(current) {
+  if (transportedRequest && !transportedProfile) return false
+  await setRepairLabels({ add: ['automation/review-ready'] })
+  await dispatchWithReceipt({
+    executable: config.ghExecutable, environment: hostCredentialEnvironment(), repository,
+    workflowFile: 'agent-pr-land.yml', payload: {
+      event_type: 'dsh-advance',
       client_payload: {
         pull_request_number: pullRequestNumber,
         base_sha: current.base.sha,
         head_sha: current.head.sha,
-        profile_id: transportedRequest.profileId,
-        workflow_id: transportedRequest.workflowId,
-        stage_id: cycle.review.id,
+        profile_id: transportedRequest?.profileId || 'github-pr-cycle',
+        workflow_id: transportedRequest?.workflowId || '',
         request_id: `repair-complete-${current.head.sha}`,
       },
-    }),
+    }, requestId: `repair-complete-${current.head.sha}`,
   })
   return true
 }
@@ -310,7 +314,7 @@ if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNu
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach the DSH repair agent')
 if (pullRequest.head.sha !== expectedHead) {
-  if (!await requestTransportedReview(pullRequest)) throw new Error('The pull request head changed before DSH repair started')
+  if (!await requestTransportedAdvancement(pullRequest)) throw new Error('The pull request head changed before DSH repair started')
   await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
   await upsertStatus('complete', branch, `The interrupted repair had already advanced the pull request to ${pullRequest.head.sha}; the trusted Profile workflow requested its exact-head review.`)
   process.stdout.write(`Recovered the completed repair for pull request #${pullRequestNumber} at ${pullRequest.head.sha}.\n`)
@@ -327,7 +331,8 @@ if (ciRequest) {
     throw new Error('Workflow run is not trusted failed CI evidence for this pull request head')
   }
 } else if (explicitRequest) {
-  const feedbackId = Number.parseInt(requestId.slice('comment-'.length), 10)
+  const commentRequestId = reviewObservationId?.startsWith('comment-') ? reviewObservationId : requestId
+  const feedbackId = Number.parseInt(commentRequestId.slice('comment-'.length), 10)
   if (!Number.isSafeInteger(feedbackId) || feedbackId < 1) throw new Error('Invalid explicit repair request id')
   const comment = await ghJson(['api', `repos/${repository}/issues/comments/${feedbackId}`], 'rework comment')
   if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
@@ -338,7 +343,7 @@ if (ciRequest) {
   }
   if (!explicitReworkCommand(comment.body)) throw new Error('Comment is not an explicit DSH rework command')
 }
-if (!explicitRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
+if (!explicitRequest && !mergeRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
   throw new Error('The pull request no longer has the automation/review-blocked label')
 }
 
@@ -357,10 +362,12 @@ if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
 }
 const governedTransition = ciRequest
   ? ciRepairTransition(ciRequest.runId)
+  : mergeRequest
+    ? mergeRepairTransition(reviewObservationId || (requestId.match(/^[0-9a-f]{64}$/) ? `advance-${requestId}` : requestId))
   : reviewObservationId
     ? reviewRepairTransition(reviewObservationId)
     : 'review-repair'
-const budgetTransition = ciRequest ? 'ci-repair' : 'review-repair'
+const budgetTransition = ciRequest ? 'ci-repair' : mergeRequest ? 'merge-repair' : 'review-repair'
 if (ciRequest && !recoveryRequest) {
   const admission = governorDecision({
     transition: governedTransition,
@@ -410,7 +417,7 @@ if (ciRequest && !recoveryRequest) {
     stateVersion: governorStateVersion,
     observationId: governorObservationId,
   })
-} else if (!governorRecords.some(record => record.status === 'applied'
+} else if (!governorRecords.some(record => ['admitted', 'applied'].includes(record.status)
   && (record.transition === governedTransition || (recoveryRequest && record.transition === 'workflow-recovery'))
   && record.subject.type === 'pull-request'
   && record.subject.number === pullRequestNumber
@@ -438,14 +445,18 @@ await upsertStatus('running', branch, explicitRequest
   ? ciRequest
     ? `Failed CI request ${requestId} started a fresh DSH repair session.`
     : `Trusted rework request ${requestId} started a fresh DSH repair session.`
+  : mergeRequest
+    ? `The exact-pair merge-conflict repair request ${requestId} started a fresh DSH repair session.`
   : 'The blocking Agent review verdict started a fresh repair session.')
 await setRepairLabels({
-  add: ciRequest ? ['automation/repairing'] : ['automation/review-blocked', 'automation/repairing'],
+  add: ciRequest || mergeRequest ? ['automation/repairing'] : ['automation/review-blocked', 'automation/repairing'],
   remove: ciRequest
     ? ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed']
-    : ['automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed'],
+    : mergeRequest
+      ? ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed']
+      : ['automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed'],
 })
-const priorReviewCheckIds = ciRequest ? null : await reviewCheckIds()
+const priorReviewCheckIds = ciRequest || mergeRequest ? null : await reviewCheckIds()
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-repair-${pullRequestNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
@@ -472,7 +483,7 @@ try {
     defaultBranch,
     branch,
     expectedHead,
-    requestKind: ciRequest ? 'ci' : explicitRequest ? 'explicit' : 'review',
+    requestKind: ciRequest ? 'ci' : mergeRequest ? 'merge-conflict' : explicitRequest ? 'explicit' : 'review',
     requestId: requestId || `review-${expectedHead}`,
     ...(ciRequest ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
   })
@@ -533,7 +544,7 @@ try {
         ? await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run after repair')
         : null
       if (current.head.sha !== expectedHead) {
-        await requestTransportedReview(current)
+        await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
         process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
@@ -547,7 +558,8 @@ try {
         await setRepairLabels({ remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
         process.stdout.write(`${workerId} repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
-      } else if (!ciRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
+      } else if (!ciRequest && !mergeRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
+        await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
         process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)

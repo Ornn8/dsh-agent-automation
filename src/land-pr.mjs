@@ -9,7 +9,9 @@ import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
+import { trustedReviewRunProfile } from './advancement-source.mjs'
 import { sameRepositoryClosingIssues } from './closing-issues.mjs'
+import { writeLandingResult } from './landing-result.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const expectedHead = requiredEnv('HEAD_SHA')
@@ -17,7 +19,8 @@ const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const githubEnvironment = actionsCredentialEnvironment()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
-const profileId = requiredEnv('PROFILE_ID')
+const requestedProfileId = requiredEnv('PROFILE_ID')
+let profileId = requestedProfileId
 const trustedReview = {
   controllerRepository: requiredEnv('TRUSTED_CONTROLLER_REPOSITORY'),
   controllerSha: requiredEnv('TRUSTED_CONTROLLER_SHA'),
@@ -32,6 +35,18 @@ async function ghJson(args, description) {
   return parseJson(result.stdout, description)
 }
 
+function deferred(message) {
+  process.stdout.write(`${message}\n`)
+  writeLandingResult('deferred')
+  process.exit(0)
+}
+
+function landed(message) {
+  process.stdout.write(`${message}\n`)
+  writeLandingResult('landed')
+  process.exit(0)
+}
+
 let pullRequestNumber = requestedNumber
 if (pullRequestNumber === 0) {
   const candidates = await ghJson([
@@ -40,8 +55,7 @@ if (pullRequestNumber === 0) {
   ], 'open pull requests for landing')
   const matches = candidates.filter(candidate => candidate.headRefOid === expectedHead)
   if (matches.length !== 1) {
-    process.stdout.write(`Landing skipped: expected one open pull request at ${expectedHead}, found ${matches.length}.\n`)
-    process.exit(0)
+    deferred(`Landing skipped: expected one open pull request at ${expectedHead}, found ${matches.length}.`)
   }
   pullRequestNumber = matches[0].number
 }
@@ -111,12 +125,10 @@ if (pullRequest.state === 'MERGED') {
     throw new Error(`Merged pull request #${pullRequestNumber} does not match the requested landing pair`)
   }
   await closeLinkedIssues(pullRequest)
-  process.stdout.write(`Reconciled closing Issues for merged pull request #${pullRequestNumber}.\n`)
-  process.exit(0)
+  landed(`Reconciled closing Issues for merged pull request #${pullRequestNumber}.`)
 }
 if (pullRequest.labels?.some(label => label.name === 'automation/paused')) {
-  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: automation is paused.\n`)
-  process.exit(0)
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: automation is paused.`)
 }
 
 async function targetProfile(revision) {
@@ -152,25 +164,34 @@ async function protectedChecks(checksStage) {
   })
 }
 if (pullRequest.baseRefName !== defaultBranch) {
-  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: base branch is not ${defaultBranch}.\n`)
-  process.exit(0)
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: base branch is not ${defaultBranch}.`)
 }
-const profile = await targetProfile(pullRequest.baseRefOid)
 const checkRuns = await readCheckRuns()
 const reviewProof = await readLatestReviewProof(pullRequest, checkRuns)
 if (!reviewProof) {
-  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: no trusted exact-pair review run is available.\n`)
-  process.exit(0)
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: no trusted exact-pair review run is available.`)
 }
 if (reviewProof.checkRun.status !== 'completed' || reviewProof.checkRun.conclusion !== 'success') {
-  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: the trusted exact-pair review did not pass.\n`)
-  process.exit(0)
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: the trusted exact-pair review did not pass.`)
 }
 const reviewIdentity = parseReviewCheckIdentity(reviewProof?.checkRun)
+const reviewProfile = trustedReviewRunProfile(reviewProof.run, {
+  repository,
+  controllerRepository: trustedReview.controllerRepository,
+  controllerSha: trustedReview.controllerSha,
+  workflowPath: trustedReview.workflowPath,
+  number: pullRequest.number,
+  base: pullRequest.baseRefOid,
+  head: expectedHead,
+})
+if (requestedProfileId !== 'github-pr-cycle' && requestedProfileId !== reviewProfile.profileId) {
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: requested Profile does not match the trusted review.`)
+}
+profileId = reviewProfile.profileId
+const profile = await targetProfile(pullRequest.baseRefOid)
 if (!reviewIdentity
   || reviewIdentity.definitionHash !== profile.definitionHash) {
-  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: the trusted review does not identify this Profile revision.\n`)
-  process.exit(0)
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: the trusted review does not identify this Profile revision.`)
 }
 const workflowId = reviewIdentity.workflowId
 const cycle = resolveGithubPrCycle(profile.definition, workflowId)
@@ -178,15 +199,13 @@ if (cycle.review.id !== reviewIdentity.stageId) {
   throw new Error(`Trusted review Stage ${reviewIdentity.stageId} does not match Workflow ${workflowId}`)
 }
 if (cycle.merge.mode !== 'auto') {
-  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: Profile requires manual merge.\n`)
-  process.exit(0)
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: Profile requires manual merge.`)
 }
 const requiredChecks = await protectedChecks(cycle.checks)
 
 const decision = evaluateLanding({ pullRequest, expectedHead, requiredChecks, checkRuns, reviewProof, trustedReview })
 if (!decision.ready) {
-  process.stdout.write(`Landing deferred for pull request #${pullRequestNumber}: ${decision.reason}.\n`)
-  process.exit(0)
+  deferred(`Landing deferred for pull request #${pullRequestNumber}: ${decision.reason}.`)
 }
 
 const current = await readPullRequest()
@@ -222,18 +241,35 @@ if (current.baseRefOid !== pullRequest.baseRefOid
   throw new Error(`Pull request or landing evidence changed before merge: ${currentDecision.reason}`)
 }
 
-const mergeResult = await run(githubExecutable, [
-  'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequestNumber}/merge`, '--input', '-',
-], {
-  env: githubEnvironment,
-  input: JSON.stringify({
-    sha: expectedHead,
-    merge_method: cycle.merge.strategy,
-    commit_message: current.body || '',
-  }),
-})
+async function reconcileConcurrentMerge() {
+  const settled = await readPullRequest()
+  if (settled.state !== 'MERGED'
+    || settled.baseRefName !== defaultBranch
+    || settled.headRefOid !== expectedHead) return false
+  await closeLinkedIssues(settled)
+  process.stdout.write(`Pull request #${pullRequestNumber} was already landed at exact head ${expectedHead}.\n`)
+  return true
+}
+
+let mergeResult
+try {
+  mergeResult = await run(githubExecutable, [
+    'api', '--method', 'PUT', `repos/${repository}/pulls/${pullRequestNumber}/merge`, '--input', '-',
+  ], {
+    env: githubEnvironment,
+    input: JSON.stringify({
+      sha: expectedHead,
+      merge_method: cycle.merge.strategy,
+      commit_message: current.body || '',
+    }),
+  })
+} catch (error) {
+  if (await reconcileConcurrentMerge()) landed(`Pull request #${pullRequestNumber} was already landed at exact head ${expectedHead}.`)
+  throw error
+}
 const merge = parseJson(mergeResult.stdout, 'pull request merge result')
 if (merge?.merged !== true || !/^[0-9a-f]{40}$/.test(merge.sha || '')) {
+  if (await reconcileConcurrentMerge()) landed(`Pull request #${pullRequestNumber} was already landed at exact head ${expectedHead}.`)
   throw new Error(`GitHub did not merge pull request #${pullRequestNumber}`)
 }
 await closeLinkedIssues(current)
@@ -247,3 +283,4 @@ if (cycle.merge.deleteBranch && !current.isCrossRepository && current.headRefNam
   }
 }
 process.stdout.write(`Landed pull request #${pullRequestNumber} at exact head ${expectedHead}.\n`)
+writeLandingResult('landed')

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { workflowDefinitionHash } from './workflow-definition.mjs'
 import { resolveIssueEntryStage, resolveWorkflowStage } from './workflow-profile.mjs'
 
@@ -37,16 +38,27 @@ function generatedRequestId(value) {
 }
 
 function reviewObservationId(value) {
-  const text = requiredText(value, 'review repair observation id', 32)
-  if (!/^run-[1-9][0-9]{0,19}$/.test(text)) {
-    throw new Error('review repair observation id must identify one GitHub Actions run')
+  const text = requiredText(value, 'review repair observation id', 72)
+  if (!/^(?:run-[1-9][0-9]{0,19}|comment-[1-9][0-9]{0,19}|advance-[0-9a-f]{64}|a-[A-Za-z0-9_-]{43})$/.test(text)) {
+    throw new Error('review repair observation id must identify one trusted review run or advancement transition')
   }
   return text
+}
+
+/** Return a compact, lossless encoding of one SHA-256 advancement identity. */
+export function advancementRepairObservationId(identity) {
+  if (!SHA256.test(identity || '')) throw new Error('advancement repair identity must be a SHA-256 digest')
+  return `a-${Buffer.from(identity, 'hex').toString('base64url')}`
 }
 
 /** Return the distinct Governor transition for one authoritative review generation. */
 export function reviewRepairTransition(observationId) {
   return `review-repair:${reviewObservationId(observationId)}`
+}
+
+/** Return the distinct Governor transition for one authoritative merge-repair generation. */
+export function mergeRepairTransition(observationId) {
+  return `merge-repair:${reviewObservationId(observationId)}`
 }
 
 /** Return the safe durable request id for one blocked review generation. */
@@ -57,7 +69,7 @@ export function reviewRepairRequestId(head, observationId) {
 
 /** Return whether a request id binds the supplied exact review head and one review generation. */
 export function isReviewRepairRequestId(value, expectedHead) {
-  const match = /^review-repair-([0-9a-f]{40})-(run-[1-9][0-9]{0,19})$/.exec(String(value || ''))
+  const match = /^review-repair-([0-9a-f]{40})-((?:run-[1-9][0-9]{0,19}|comment-[1-9][0-9]{0,19}|advance-[0-9a-f]{64}|a-[A-Za-z0-9_-]{43}))$/.exec(String(value || ''))
   return Boolean(match && FULL_SHA.test(expectedHead) && match[1] === expectedHead)
 }
 
@@ -73,7 +85,7 @@ export function parseAgentWorkRequest(value) {
     if (!Object.hasOwn(value, key)) throw new Error(`WorkRequest is missing required field ${key}`)
   }
 
-  const requestId = requiredText(value.requestId, 'WorkRequest requestId', 120)
+  const requestId = requiredText(value.requestId, 'WorkRequest requestId', 160)
   const profileId = identifier(value.profileId, 'WorkRequest profileId')
   const workflowId = identifier(value.workflowId, 'WorkRequest workflowId')
   const stageId = identifier(value.stageId, 'WorkRequest stageId')
@@ -164,7 +176,18 @@ export function createIssueImplementationRequest({
   })
 }
 
-/** Create the default Profile's root pull-request repair request. */
+/** Resolve the single trusted pull-request repair Worker Stage from a Profile. */
+export function resolveRepairEntryStage(definition) {
+  const candidates = Object.entries(definition?.workflows || {}).filter(([, workflow]) =>
+    workflow.stages.some(stage => stage.uses === 'worker' && stage.procedure === 'github-pr-repair'))
+  if (candidates.length !== 1) throw new Error('Profile must define exactly one github-pr-repair workflow')
+  const [workflowId] = candidates[0]
+  const { change: stage } = resolveGithubPrCycle(definition, workflowId)
+  if (stage.role !== 'change') throw new Error('github-pr-repair Stage must use the change role')
+  return { workflowId, stage }
+}
+
+/** Create a trusted Profile's root pull-request repair request. */
 export function createReviewRepairRequest({
   definition,
   definitionHash,
@@ -174,8 +197,7 @@ export function createReviewRepairRequest({
   head,
   reviewObservationId,
 }) {
-  const workflowId = 'repair'
-  const stage = resolveIssueEntryStage(definition, workflowId)
+  const { workflowId, stage } = resolveRepairEntryStage(definition)
   return createStageWorkRequest({
     definition,
     definitionHash,

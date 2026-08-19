@@ -81,6 +81,7 @@ test('an applied transition removes its durable candidate from pending reconcili
     subject: { type: 'pull-request', number: 21 }, stateVersion, observationId: 'recovery-run-2',
   }
   assert.equal(unappliedGovernorCandidate([candidate], () => true), candidate)
+  assert.equal(unappliedGovernorCandidate([{ ...candidate, status: 'admitted' }], () => true).status, 'admitted')
   assert.equal(unappliedGovernorCandidate([candidate, applied], () => true), undefined)
 })
 
@@ -269,7 +270,7 @@ test('replaying one recovery observation consumes its independent budget once', 
     workIdentity: 'branch:agent/fix',
     observationId: 'recovery-run-400',
     limit: 3,
-    records: [],
+    records: [{ status: 'admitted', observationId: 'candidate-400' }],
   })
   assert.equal(first.action, 'attempt')
   assert.equal(first.record.attempt, 1)

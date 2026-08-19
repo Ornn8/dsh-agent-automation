@@ -84,6 +84,7 @@ try {
     $expected = $expected.Replace('{{CONTROLLER_REPOSITORY}}', $repository)
     $expected = $expected.Replace('{{CONTROLLER_SHA}}', $sha)
     $expected = $expected.Replace('{{CI_WORKFLOW_NAMES_JSON}}', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress))
+    $expected = $expected.Replace('{{ADVANCEMENT_WORKFLOW_NAMES_JSON}}', (ConvertTo-Json -InputObject @($ciWorkflows + @('Agent PR Review') | Select-Object -Unique) -Compress))
     $expected = $expected.Replace('{{UPSTREAM_REPOSITORY}}', $upstreamRepository)
     Assert-True ($actual -ceq $expected) "First render of $name did not exactly match its template."
   }
@@ -107,7 +108,12 @@ try {
   Assert-True ($rendered -match 'ci_workflow_name: \$\{\{ github\.event\.workflow_run\.name \}\}') 'CI repair did not pass the exact failed workflow name.'
   foreach ($name in @('agent-pr-ci-repair.yml', 'agent-pr-land.yml')) {
     $workflow = Get-Content -LiteralPath (Join-Path $temp ".github\workflows\$name") -Raw
-    $workflowList = ConvertTo-Json -InputObject @($ciWorkflows) -Compress
+    $subscribedWorkflows = if ($name -eq 'agent-pr-land.yml') {
+      @($ciWorkflows + @('Agent PR Review') | Select-Object -Unique)
+    } else {
+      @($ciWorkflows)
+    }
+    $workflowList = ConvertTo-Json -InputObject $subscribedWorkflows -Compress
     Assert-True ($workflow -match "(?m)^    workflows: $([Regex]::Escape($workflowList))\r?$") "$name does not subscribe workflow_run to the rendered CI workflow names."
     Assert-True ($workflow -match 'contains\(fromJSON\(vars\.DSH_AUTOMATION_CI_WORKFLOWS\), github\.event\.workflow_run\.name\)') "$name does not retain its configured CI workflow membership check."
   }
@@ -135,8 +141,13 @@ try {
   Assert-True ($reviewWorkflow -match '(?m)^  repository_dispatch:\r?$') 'Agent PR Review lacks the GitHub-token recursion-safe review trigger.'
   Assert-True ($reviewWorkflow -match '(?m)^    types: \[agent-review\]\r?$') 'Agent PR Review lacks the exact agent-review dispatch type.'
   Assert-True ($reviewWorkflow -match "github\.event\.client_payload\.workflow_id \|\| 'default'") 'Agent PR Review does not preserve the dispatched Profile workflow.'
-  Assert-True ($reviewWorkflow -match "!contains\(github\.event\.pull_request\.labels\.\*\.name, 'automation/repairing'\)") 'Agent PR Review does not suppress the duplicate default review during repair.'
+  Assert-True ($reviewWorkflow -notmatch '(?m)^  pull_request_target:\r?$') 'Agent PR Review still bypasses deterministic advancement for pull request events.'
+  Assert-True ($landingWorkflow -match '(?m)^  pull_request_target:\r?$') 'Agent PR Advancement does not receive pull request state changes.'
+  Assert-True ($landingWorkflow -match 'workflows/advance-pr\.yml@') 'Agent PR Advancement does not call the deterministic advancement controller.'
   Assert-True ($reviewWorkflow -notmatch 'statuses: write|dsh-review') 'Agent PR Review retained an obsolete review trigger or permission.'
+  $reworkWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-pr-rework.yml') -Raw
+  Assert-True ($reworkWorkflow -match '(?m)^  contents: write\r?$') 'Agent PR Rework cannot dispatch exact-state advancement after an authorized resume.'
+  Assert-True ($reworkWorkflow -match '(?m)^  checks: read\r?$') 'Agent PR Rework does not grant the permission union required by review reconciliation.'
   Assert-True ($issuesWorkflow -match '(?m)^    types: \[agent_work_requested, agent_backlog_reconcile, automation_fault_recovered\]\r?$') 'Agent Issues lacks the generic WorkRequest, reconciliation, and fault-resume triggers.'
   Assert-True ($issuesWorkflow -match [Regex]::Escape('contains(fromJSON(''["agent/dsh","agent/dsh-failed"]''), github.event.label.name)')) 'Agent Issues does not preserve the agent/dsh label wake.'
   Assert-True ($issuesWorkflow -match 'requested_issue_number:.*github\.event\.issue\.number.*github\.event\.client_payload\.issue_number') 'Agent Issues does not preserve the exact Issue across independent wake observations.'

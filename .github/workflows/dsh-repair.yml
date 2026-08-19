@@ -17,6 +17,10 @@ on:
         required: false
         type: string
         default: ''
+      repair_cause:
+        required: false
+        type: string
+        default: ''
       work_request:
         required: false
         type: string
@@ -52,6 +56,7 @@ jobs:
           REPAIR_REQUEST_ID: ${{ inputs.request_id }}
           WORK_REQUEST_JSON: ${{ inputs.work_request }}
           CI_WORKFLOW_NAME: ${{ inputs.ci_workflow_name }}
+          REPAIR_CAUSE: ${{ inputs.repair_cause }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}

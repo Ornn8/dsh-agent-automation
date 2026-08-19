@@ -1,0 +1,81 @@
+name: Advance Pull Request
+
+on:
+  workflow_call:
+    inputs:
+      pull_request_number:
+        required: false
+        type: number
+        default: 0
+      base_sha:
+        required: false
+        type: string
+        default: ''
+      head_sha:
+        required: false
+        type: string
+        default: ''
+      profile_id:
+        required: false
+        type: string
+        default: github-pr-cycle
+      workflow_id:
+        required: false
+        type: string
+        default: ''
+      source_run_id:
+        required: false
+        type: number
+        default: 0
+      source_run_attempt:
+        required: false
+        type: number
+        default: 0
+      required_checks_json:
+        required: true
+        type: string
+
+concurrency:
+  # All advancement wakes for one repository share one serialized decision lane.
+  # Raw event inputs are not a safe subject key: workflow_run wakes may omit the PR number.
+  group: agent-advance-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    name: advancement/exact-state
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out automation controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Evaluate and consume one exact-state advancement
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          WORKFLOW_ID: ${{ inputs.workflow_id }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          REQUIRED_CHECKS_JSON: ${{ inputs.required_checks_json }}
+          TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
+          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml
+          GOVERNOR_WORKFLOW_PATH: .github/workflows/advance-pr.yml
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node controller/src/advance-pr.mjs

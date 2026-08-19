@@ -1,4 +1,6 @@
 name: Agent PR Rework
+run-name: >-
+  Agent PR Rework request:${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || 'legacy') || github.run_id }}
 
 # Configure DSH_AUTOMATION_CI_WORKFLOWS before enabling CI repair requests.
 
@@ -6,15 +8,24 @@ on:
   issue_comment:
     types: [created]
   repository_dispatch:
-    types: [dsh-repair, agent_work_requested]
+    types: [dsh-repair, agent_work_requested, agent-review-reconcile]
 
 permissions:
   actions: write
-  contents: read
+  checks: read
+  contents: write
   issues: write
   pull-requests: write
 
+concurrency:
+  group: agent-pr-rework-${{ github.repository }}-${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || github.run_id) || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
+  advancement-repair-reconcile:
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'agent-review-reconcile'
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/reconcile-reviews.yml@{{CONTROLLER_SHA}}
+
   dsh-comment-rework:
     if: >-
       github.event_name == 'issue_comment'
@@ -37,8 +48,6 @@ jobs:
         || (github.event.action == 'agent_work_requested'
           && github.event.client_payload.work_request.version == 2
           && github.event.client_payload.work_request.role == 'change'
-          && github.event.client_payload.work_request.workflowId == 'repair'
-          && github.event.client_payload.work_request.stageId == 'change'
           && github.event.client_payload.work_request.repository == github.repository
           && github.event.client_payload.work_request.subject.type == 'pull-request'))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-repair.yml@{{CONTROLLER_SHA}}
@@ -47,4 +56,5 @@ jobs:
       head_sha: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.work_request.revision.head || github.event.client_payload.head_sha }}
       request_id: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.work_request.requestId || github.event.client_payload.request_id }}
       ci_workflow_name: ${{ github.event.client_payload.ci_workflow_name || '' }}
+      repair_cause: ${{ github.event.client_payload.repair_cause || '' }}
       work_request: ${{ github.event.action == 'agent_work_requested' && toJSON(github.event.client_payload.work_request) || '' }}
