@@ -46,6 +46,21 @@ test('review repair is an immutable Stage request rather than an agent command',
   assert.equal(reviewRepairTransition(reviewObservationId), `review-repair:${reviewObservationId}`)
 })
 
+test('advancement repair ids bind the complete deterministic transition identity', () => {
+  const observationId = `advance-${'d'.repeat(64)}`
+  const request = createReviewRepairRequest({
+    ...profile,
+    repository: 'owner/repository',
+    pullRequestNumber: 12,
+    base,
+    head,
+    reviewObservationId: observationId,
+  })
+  assert.equal(reviewRepairTransition(observationId), `review-repair:${observationId}`)
+  assert.equal(isReviewRepairRequestId(request.requestId, head), true)
+  assert.equal(isReviewRepairRequestId(request.requestId, base), false)
+})
+
 test('Issue requests resolve their root Stage and bind the Profile hash', () => {
   const request = createIssueImplementationRequest({
     ...profile,

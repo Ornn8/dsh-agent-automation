@@ -85,7 +85,6 @@ export function reviewRunIdFromCheckRun(checkRun, repository) {
 function hasExactPullRequest(run, pullRequest, repository) {
   if (run?.repository?.full_name !== repository
     || run.head_repository?.full_name !== repository
-    || run.status !== 'completed'
     || !run.head_sha) return false
   if (run.event === 'repository_dispatch') {
     return run.head_sha === pullRequest.baseRefOid
@@ -107,18 +106,27 @@ function referencesTrustedController(run, trustedReview) {
     && reference.sha === trustedReview.controllerSha)
 }
 
+/** Verify one review invocation against its immutable reusable-workflow provenance. */
+/** @param {{ pullRequest: LandingPullRequest, reviewProof?: ReviewProof | null, trustedReview?: TrustedReview | null }} input */
+export function hasTrustedExactReviewInvocation({ pullRequest, reviewProof, trustedReview }) {
+  const checkRun = reviewProof?.checkRun
+  const run = reviewProof?.run
+  if (!checkRun || !run || !trustedReview) return false
+  return checkRun.name === REVIEW_CHECK_NAME
+    && checkRun.app?.id === GITHUB_ACTIONS_APP_ID
+    && reviewRunIdFromCheckRun(checkRun, pullRequest.repository) === run.id
+    && hasExactPullRequest(run, pullRequest, pullRequest.repository)
+    && referencesTrustedController(run, trustedReview)
+}
+
 /** Verify a completed review CheckRun against its immutable reusable-workflow provenance. */
 /** @param {{ pullRequest: LandingPullRequest, reviewProof?: ReviewProof | null, trustedReview?: TrustedReview | null }} input */
 export function hasTrustedExactReviewRun({ pullRequest, reviewProof, trustedReview }) {
   const checkRun = reviewProof?.checkRun
   const run = reviewProof?.run
-  if (!checkRun || !run || !trustedReview) return false
-  return checkRun.name === REVIEW_CHECK_NAME
-    && String(checkRun.status).toUpperCase() === 'COMPLETED'
-    && checkRun.app?.id === GITHUB_ACTIONS_APP_ID
-    && reviewRunIdFromCheckRun(checkRun, pullRequest.repository) === run.id
-    && hasExactPullRequest(run, pullRequest, pullRequest.repository)
-    && referencesTrustedController(run, trustedReview)
+  return hasTrustedExactReviewInvocation({ pullRequest, reviewProof, trustedReview })
+    && String(checkRun?.status).toUpperCase() === 'COMPLETED'
+    && run?.status === 'completed'
 }
 
 /** Verify a successful exact-pair review against immutable Actions provenance. */

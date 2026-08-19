@@ -251,14 +251,16 @@ for (const summary of summaries.flat()) {
   const subject = pullRequestGovernorSubject(pullRequest)
   const stateVersion = subjectStateVersion(subject)
   const governorRecords = await pullRequestGovernorRecords(pullRequest.number)
-  const pendingRecord = unappliedGovernorCandidate(governorRecords, record =>
-    (record.transition === 'workflow-recovery' || record.transition.startsWith('review-repair:run-'))
+  const pendingRecord = unappliedGovernorCandidate(governorRecords.slice().reverse(), record =>
+    (record.transition === 'workflow-recovery'
+      || record.transition === 'review-repair'
+      || record.transition.startsWith('review-repair:'))
     && record.subject.type === 'pull-request'
     && record.subject.number === pullRequest.number
     && record.stateVersion === stateVersion)
   const pendingTransition = pendingRecord?.transition
   if (pendingTransition) {
-    const reviewRepair = pendingTransition.startsWith('review-repair:run-')
+    const reviewRepair = pendingTransition === 'review-repair' || pendingTransition.startsWith('review-repair:')
     const repairProfile = reviewRepair
       ? await targetProfile('github-pr-cycle', pullRequest.base.sha)
       : null
@@ -273,7 +275,7 @@ for (const summary of summaries.flat()) {
     })
     if (governed.execute) {
       if (reviewRepair) {
-        if (pendingRecord.observationId.startsWith('comment-')) {
+        if (pendingRecord.transition === 'review-repair' && pendingRecord.observationId.startsWith('comment-')) {
           await run(githubExecutable, [
             'api', '--method', 'POST', `repos/${repository}/dispatches`,
             '-f', 'event_type=dsh-repair',

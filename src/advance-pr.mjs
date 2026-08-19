@@ -2,11 +2,15 @@ import { fileURLToPath } from 'node:url'
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
 import { decidePullRequestAdvancement } from './advancement-policy.mjs'
 import { buildPullRequestAdvancementSnapshot } from './advancement-state.mjs'
-import { consumePullRequestAdvancement } from './advancement-runtime.mjs'
+import {
+  advancementRepairCandidate,
+  consumePullRequestAdvancement,
+} from './advancement-runtime.mjs'
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import {
   attestedGovernorRecordBody,
   GOVERNOR_WORKFLOW_PATHS,
+  pullRequestGovernorSubject,
   trustedGovernorRecords,
 } from './governor-state.mjs'
 import { reviewFaultAttemptEndpoints, verifyReviewFaultAttempt } from './review-fault-audit.mjs'
@@ -154,6 +158,20 @@ const request = {
   profileId,
 }
 
+async function writeGovernorRecord(record) {
+  const body = attestedGovernorRecordBody(record, {
+    repository,
+    controllerRepository: trustedReview.controllerRepository,
+    controllerSha: trustedReview.controllerSha,
+    workflowPath: governorWorkflowPath,
+    runId,
+  })
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/issues/${pullRequest.number}/comments`, '--input', '-',
+  ], { env: environment, input: JSON.stringify({ body }) })
+  governorRecords.push(record)
+}
+
 const result = await consumePullRequestAdvancement(request, {
   requestReview: async value => {
     await run(githubExecutable, [
@@ -175,6 +193,14 @@ const result = await consumePullRequestAdvancement(request, {
     })
   },
   requestRepair: async value => {
+    const subject = pullRequestGovernorSubject(pullRequest)
+    const repair = advancementRepairCandidate({
+      records: governorRecords,
+      subject,
+      stateVersion: value.stateVersion,
+      transitionIdentity: value.transitionIdentity,
+    })
+    if (repair.record) await writeGovernorRecord(repair.record)
     await run(githubExecutable, [
       'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
     ], {
@@ -201,29 +227,33 @@ const result = await consumePullRequestAdvancement(request, {
     })
   },
 }, {
-  isApplied: value => governorRecords.some(record => record.status === 'applied'
-    && record.transition === `pull-request-advancement:${value.transitionIdentity}`
-    && record.stateVersion === value.stateVersion
-    && record.subject?.type === 'pull-request'
-    && record.subject.number === pullRequest.number),
+  claim: async value => {
+    const transition = `pull-request-advancement:${value.transitionIdentity}`
+    const matching = record => record.transition === transition
+      && record.stateVersion === value.stateVersion
+      && record.subject?.type === 'pull-request'
+      && record.subject.number === pullRequest.number
+    if (governorRecords.some(record => record.status === 'applied' && matching(record))) return false
+    if (governorRecords.some(record => record.status === 'candidate' && matching(record))) return true
+    await writeGovernorRecord({
+      version: 1,
+      status: 'candidate',
+      transition,
+      subject: { type: 'pull-request', number: pullRequest.number },
+      stateVersion: value.stateVersion,
+      observationId: `run-${runId}`,
+    })
+    return true
+  },
   markApplied: async value => {
-    const body = attestedGovernorRecordBody({
+    await writeGovernorRecord({
       version: 1,
       status: 'applied',
       transition: `pull-request-advancement:${value.transitionIdentity}`,
       subject: { type: 'pull-request', number: pullRequest.number },
       stateVersion: value.stateVersion,
       observationId: `run-${runId}`,
-    }, {
-      repository,
-      controllerRepository: trustedReview.controllerRepository,
-      controllerSha: trustedReview.controllerSha,
-      workflowPath: governorWorkflowPath,
-      runId,
     })
-    await run(githubExecutable, [
-      'api', '--method', 'POST', `repos/${repository}/issues/${pullRequest.number}/comments`, '--input', '-',
-    ], { env: environment, input: JSON.stringify({ body }) })
   },
 })
 process.stdout.write(`Advancement ${result.action} for pull request #${pullRequest.number} at ${snapshot.pair.base}..${snapshot.pair.head} (${result.transitionIdentity}).\n`)

@@ -37,9 +37,9 @@ function generatedRequestId(value) {
 }
 
 function reviewObservationId(value) {
-  const text = requiredText(value, 'review repair observation id', 32)
-  if (!/^run-[1-9][0-9]{0,19}$/.test(text)) {
-    throw new Error('review repair observation id must identify one GitHub Actions run')
+  const text = requiredText(value, 'review repair observation id', 72)
+  if (!/^(?:run-[1-9][0-9]{0,19}|advance-[0-9a-f]{64})$/.test(text)) {
+    throw new Error('review repair observation id must identify one trusted review run or advancement transition')
   }
   return text
 }
@@ -57,7 +57,7 @@ export function reviewRepairRequestId(head, observationId) {
 
 /** Return whether a request id binds the supplied exact review head and one review generation. */
 export function isReviewRepairRequestId(value, expectedHead) {
-  const match = /^review-repair-([0-9a-f]{40})-(run-[1-9][0-9]{0,19})$/.exec(String(value || ''))
+  const match = /^review-repair-([0-9a-f]{40})-((?:run-[1-9][0-9]{0,19}|advance-[0-9a-f]{64}))$/.exec(String(value || ''))
   return Boolean(match && FULL_SHA.test(expectedHead) && match[1] === expectedHead)
 }
 
@@ -73,7 +73,7 @@ export function parseAgentWorkRequest(value) {
     if (!Object.hasOwn(value, key)) throw new Error(`WorkRequest is missing required field ${key}`)
   }
 
-  const requestId = requiredText(value.requestId, 'WorkRequest requestId', 120)
+  const requestId = requiredText(value.requestId, 'WorkRequest requestId', 160)
   const profileId = identifier(value.profileId, 'WorkRequest profileId')
   const workflowId = identifier(value.workflowId, 'WorkRequest workflowId')
   const stageId = identifier(value.stageId, 'WorkRequest stageId')

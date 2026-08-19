@@ -140,6 +140,7 @@ $replacements = @{
   '{{CONTROLLER_REPOSITORY}}' = $ControllerRepository
   '{{CONTROLLER_SHA}}' = $ControllerSha
   '{{CI_WORKFLOW_NAMES_JSON}}' = (ConvertTo-Json -InputObject @($CiWorkflowNames) -Compress)
+  '{{ADVANCEMENT_WORKFLOW_NAMES_JSON}}' = (ConvertTo-Json -InputObject @($CiWorkflowNames + @('Agent PR Review') | Select-Object -Unique) -Compress)
   '{{UPSTREAM_REPOSITORY}}' = $UpstreamRepository
 }
 $utf8 = [Text.UTF8Encoding]::new($false)

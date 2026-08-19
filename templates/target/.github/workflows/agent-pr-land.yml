@@ -4,7 +4,7 @@ on:
   repository_dispatch:
     types: [dsh-land, dsh-advance]
   workflow_run:
-    workflows: {{CI_WORKFLOW_NAMES_JSON}}
+    workflows: {{ADVANCEMENT_WORKFLOW_NAMES_JSON}}
     types: [completed]
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, edited]
@@ -21,7 +21,8 @@ jobs:
     if: >-
       github.event_name == 'repository_dispatch'
       || (github.event_name == 'workflow_run'
-        && contains(fromJSON(vars.DSH_AUTOMATION_CI_WORKFLOWS), github.event.workflow_run.name))
+        && (github.event.workflow_run.name == 'Agent PR Review'
+          || contains(fromJSON(vars.DSH_AUTOMATION_CI_WORKFLOWS), github.event.workflow_run.name)))
       || (github.event_name == 'pull_request_target'
         && github.event.pull_request.head.repo.full_name == github.repository)
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/advance-pr.yml@{{CONTROLLER_SHA}}

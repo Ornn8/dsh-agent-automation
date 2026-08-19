@@ -37,10 +37,5 @@ jobs:
           TARGET_REPOSITORY: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PROFILE_ID: ${{ inputs.profile_id }}
-          REQUIRED_CHECKS_JSON: ${{ vars.DSH_AUTOMATION_REQUIRED_CHECKS }}
-          TRUSTED_CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
-          TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
-          TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml
-          GOVERNOR_WORKFLOW_PATH: .github/workflows/reconcile-landing.yml
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/reconcile-landing.mjs

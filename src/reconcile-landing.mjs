@@ -1,11 +1,10 @@
-import { fileURLToPath } from 'node:url'
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const githubEnvironment = actionsCredentialEnvironment()
-const advancementScript = fileURLToPath(new URL('./advance-pr.mjs', import.meta.url))
+const profileId = process.env.PROFILE_ID?.trim() || 'github-pr-cycle'
 
 const result = await run(githubExecutable, [
   'pr', 'list', '--repo', repository, '--state', 'open',
@@ -16,12 +15,17 @@ if (pullRequests.length > 100) throw new Error('Landing reconciliation exceeded 
 
 for (const pullRequest of pullRequests) {
   if (pullRequest.isDraft || pullRequest.baseRefName !== defaultBranch) continue
-  await run(process.execPath, [advancementScript], {
-    env: {
-      ...process.env,
-      PR_NUMBER: String(pullRequest.number),
-      HEAD_SHA: pullRequest.headRefOid,
-    },
-    tee: true,
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
+  ], {
+    env: githubEnvironment,
+    input: JSON.stringify({
+      event_type: 'dsh-advance',
+      client_payload: {
+        pull_request_number: pullRequest.number,
+        head_sha: pullRequest.headRefOid,
+        profile_id: profileId,
+      },
+    }),
   })
 }

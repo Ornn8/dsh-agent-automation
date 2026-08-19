@@ -1,6 +1,8 @@
 // @ts-check
 
 import { createHash } from 'node:crypto'
+import { governorDecision, unappliedGovernorCandidate } from './governor-policy.mjs'
+import { reviewRepairTransition } from './work-request.mjs'
 
 const MUTATIONS = new Set(['request-review', 'request-repair', 'request-landing'])
 const TERMINAL_ACTIONS = new Set([
@@ -9,7 +11,9 @@ const TERMINAL_ACTIONS = new Set([
 
 /** @typedef {{ action: string, repository: string, pullRequestNumber: number, pair: { base: string, head: string }, stateVersion: string, workflow: { definitionHash: string, workflowId: string, stageId: string } }} AdvancementRequest */
 /** @typedef {{ requestReview: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestRepair: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestLanding: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementEffects */
-/** @typedef {{ isApplied: (request: AdvancementRequest & { transitionIdentity: string }) => boolean | Promise<boolean>, markApplied: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementJournal */
+/** @typedef {{ claim: (request: AdvancementRequest & { transitionIdentity: string }) => boolean | Promise<boolean>, markApplied: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementJournal */
+/** @typedef {{ status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
+/** @typedef {{ type: 'pull-request', number: number, state: string, draft: boolean, base: string, head: string, labels?: unknown[] }} RepairSubject */
 
 /** @param {unknown} value @returns {string} */
 function canonicalJson(value) {
@@ -61,6 +65,37 @@ export function advancementTransitionIdentity(value) {
 }
 
 /**
+ * Reuse one exact requested repair or create its decision-bound Governor candidate.
+ * @param {{ records: GovernorRecord[], subject: RepairSubject, stateVersion: string, transitionIdentity: string }} input
+ * @returns {{ transition: string, record: object | null }}
+ */
+export function advancementRepairCandidate({ records, subject, stateVersion, transitionIdentity }) {
+  if (!Array.isArray(records) || !/^[0-9a-f]{64}$/.test(transitionIdentity || '')) {
+    throw new Error('Advancement repair identity is incomplete')
+  }
+  const observationId = `advance-${transitionIdentity}`
+  const transition = reviewRepairTransition(observationId)
+  const existing = unappliedGovernorCandidate(records, /** @param {GovernorRecord} record */ record =>
+    record.transition === transition
+    && record.stateVersion === stateVersion
+    && record.subject?.type === subject?.type
+    && record.subject?.number === subject?.number)
+  if (existing) return { transition, record: null }
+  const repair = governorDecision({
+    transition,
+    subject,
+    stateVersion,
+    observationId,
+    records,
+    resumeCondition: undefined,
+  })
+  if (!repair.record || repair.action !== 'record-candidate') {
+    throw new Error(`Advancement could not claim exact-pair repair: ${repair.action}`)
+  }
+  return { transition, record: repair.record }
+}
+
+/**
  * Route a verified deterministic decision to its one mutation effect.
  * @param {AdvancementRequest} value
  * @param {AdvancementEffects} effects
@@ -71,12 +106,24 @@ export async function consumePullRequestAdvancement(value, effects, journal) {
   const request = requireRequest(value)
   const transitionIdentity = advancementTransitionIdentity(request)
   const output = { ...request, transitionIdentity }
-  if (MUTATIONS.has(request.action) && journal && await journal.isApplied(output)) {
+  if (MUTATIONS.has(request.action) && journal && !await journal.claim(output)) {
     return { ...output, alreadyApplied: true }
   }
   if (request.action === 'request-review') await effects.requestReview(output)
   if (request.action === 'request-repair') await effects.requestRepair(output)
   if (request.action === 'request-landing') await effects.requestLanding(output)
-  if (MUTATIONS.has(request.action) && journal) await journal.markApplied(output)
+  if (MUTATIONS.has(request.action) && journal) {
+    let lastError
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await journal.markApplied(output)
+        lastError = null
+        break
+      } catch (error) {
+        lastError = error
+      }
+    }
+    if (lastError) throw lastError
+  }
   return output
 }

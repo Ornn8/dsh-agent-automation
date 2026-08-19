@@ -22,7 +22,7 @@ const ACTIONS = new Set([
   'request-landing', 'paused', 'stale', 'terminal', 'noop',
 ])
 const SUBJECT_STATES = new Set(['open', 'closed'])
-const GOVERNOR_STATES = new Set(['idle', 'pending', 'running', 'completed', 'failed'])
+const GOVERNOR_STATES = new Set(['idle', 'requested', 'pending', 'running', 'completed', 'failed'])
 const WAKE_EVENTS = new Set([
   'review.completed',
   'review.recovery.completed',
@@ -40,7 +40,7 @@ const WAKE_EVENTS = new Set([
 /** @typedef {string | { context: string, app_id?: number | null }} RequiredCheckDefinition */
 /** @typedef {'review.completed' | 'review.recovery.completed' | 'repair.completed' | 'recovery.completed' | 'pull-request.updated' | 'ci.required-check.completed'} WakeEvent */
 /** @typedef {{ required: RequiredCheckDefinition[], results: Record<string, unknown>[] }} AdvancementChecks */
-/** @typedef {{ repair: 'idle' | 'pending' | 'running' | 'completed' | 'failed', recovery: 'idle' | 'pending' | 'running' | 'completed' | 'failed', paused: boolean }} AdvancementGovernor */
+/** @typedef {{ repair: 'idle' | 'requested' | 'pending' | 'running' | 'completed' | 'failed', recovery: 'idle' | 'pending' | 'running' | 'completed' | 'failed', paused: boolean }} AdvancementGovernor */
 /** @typedef {{ definitionHash: string, workflowId: string, stageId: string }} AdvancementWorkflow */
 /** @typedef {{ controllerRepository: string, controllerSha: string, workflowPath: string }} TrustedReview */
 /** @typedef {{ repository: string, pullRequest: AdvancementPullRequest, defaultBranch: string, pair: AdvancementPair, expectedPair: AdvancementPair, mergeability: 'mergeable' | 'conflicting' | 'unknown', review: AdvancementReview, trustedReview: TrustedReview, checks: AdvancementChecks, governor: AdvancementGovernor, workflow: AdvancementWorkflow, stateVersion: string }} AdvancementSnapshot */
@@ -263,6 +263,9 @@ export function decidePullRequestAdvancement(value) {
   if (snapshot.governor.repair === 'failed' || snapshot.governor.recovery === 'failed') {
     return decision(snapshot, 'paused', 'Governor repair or recovery failed and requires bounded recovery')
   }
+  if (snapshot.governor.repair === 'requested') {
+    return decision(snapshot, 'request-repair', 'Governor repair awaits independent admission')
+  }
   if (snapshot.governor.repair === 'pending' || snapshot.governor.repair === 'running') {
     return waitDecision(snapshot, 'wait-checks', 'Governor repair is active', 'repair-completed', ['repair.completed'])
   }
@@ -286,9 +289,7 @@ export function decidePullRequestAdvancement(value) {
   }
   if (statuses.some(status => status === 'failed')) return decision(snapshot, 'request-repair', 'a required exact-head check failed')
   if (review !== 'pass') {
-    if (review === 'missing' && !statuses.every(status => status === 'passed')) {
-      return decision(snapshot, 'request-review', 'no review is active for the exact pair')
-    }
+    if (review === 'missing') return decision(snapshot, 'request-review', 'no review is active for the exact pair')
     return waitDecision(snapshot, 'wait-review', 'trusted exact-pair review is missing', 'trusted-exact-pair-review', ['review.completed'])
   }
   if (statuses.some(status => status !== 'passed')) {

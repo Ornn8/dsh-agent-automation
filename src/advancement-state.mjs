@@ -2,7 +2,11 @@
 
 import { subjectStateVersion } from './governor-policy.mjs'
 import { pullRequestGovernorSubject } from './governor-state.mjs'
-import { normalizeMergeableStatus, reviewRunIdFromCheckRun } from './landing-policy.mjs'
+import {
+  hasTrustedExactReviewInvocation,
+  normalizeMergeableStatus,
+  reviewRunIdFromCheckRun,
+} from './landing-policy.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
 import { REVIEW_CHECK_NAME } from './review-authority.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
@@ -32,11 +36,12 @@ function activeEpoch(records, pullRequestNumber) {
   return { records: relevant.slice(start), paused }
 }
 
-/** @param {GovernorRecord[]} records @param {string} stateVersion @param {(transition: string) => boolean} predicate @returns {'idle' | 'pending' | 'running'} */
-function transitionState(records, stateVersion, predicate) {
+/** @param {GovernorRecord[]} records @param {string} stateVersion @param {(transition: string) => boolean} predicate @param {boolean} requested @returns {'idle' | 'requested' | 'pending' | 'running'} */
+function transitionState(records, stateVersion, predicate, requested) {
   const matching = records.filter(record => record.stateVersion === stateVersion && predicate(record.transition || ''))
-  if (matching.some(record => record.status === 'candidate' || record.status === 'admitted')) return 'pending'
   if (matching.some(record => record.status === 'applied' || record.status === 'attempt')) return 'running'
+  if (matching.some(record => record.status === 'admitted')) return 'pending'
+  if (matching.some(record => record.status === 'candidate')) return requested ? 'requested' : 'pending'
   return 'idle'
 }
 
@@ -45,13 +50,15 @@ function transitionState(records, stateVersion, predicate) {
  * @param {object[]} records
  * @param {number} pullRequestNumber
  * @param {string} stateVersion
- * @returns {{ repair: 'idle' | 'pending' | 'running', recovery: 'idle' | 'pending' | 'running', paused: boolean }}
+ * @returns {{ repair: 'idle' | 'requested' | 'pending' | 'running', recovery: 'idle' | 'pending' | 'running', paused: boolean }}
  */
 export function advancementGovernorState(records, pullRequestNumber, stateVersion) {
   const epoch = activeEpoch(records, pullRequestNumber)
+  const recovery = transitionState(epoch.records, stateVersion, transition => transition === 'workflow-recovery', false)
+  if (recovery === 'requested') throw new Error('Recovery candidate projection is invalid')
   return {
-    repair: transitionState(epoch.records, stateVersion, transition => transition.startsWith('review-repair:')),
-    recovery: transitionState(epoch.records, stateVersion, transition => transition === 'workflow-recovery'),
+    repair: transitionState(epoch.records, stateVersion, transition => transition === 'review-repair' || transition.startsWith('review-repair:'), true),
+    recovery,
     paused: epoch.paused,
   }
 }
@@ -89,23 +96,51 @@ export async function buildPullRequestAdvancementSnapshot({
   const candidates = checkResults
     .filter(check => check?.name === REVIEW_CHECK_NAME && check.head_sha === pair.head)
     .sort((left, right) => Number(right.id || 0) - Number(left.id || 0))
-  const latestReviewCheck = candidates[0] || null
-  const identity = parseReviewCheckIdentity(latestReviewCheck)
-  const workflowId = requestedWorkflowId || identity?.workflowId || 'default'
+  const workflowId = requestedWorkflowId || 'default'
   const cycle = resolveGithubPrCycle(profile.definition, workflowId)
   /** @type {{ state: 'missing' | 'pending', proof: null } | { state: 'completed', proof: { checkRun: EvidenceRecord, run: EvidenceRecord, jobs: Record<string, unknown>[] } }} */
   let review = { state: 'missing', proof: null }
-  if (latestReviewCheck && String(latestReviewCheck.status).toUpperCase() !== 'COMPLETED') {
-    review = { state: 'pending', proof: null }
-  } else if (latestReviewCheck) {
-    const runId = reviewRunIdFromCheckRun(latestReviewCheck, repository)
-    if (runId) {
-      const run = await readRun(runId)
-      const runAttempt = run?.run_attempt
-      const jobs = typeof runAttempt === 'number' && Number.isSafeInteger(runAttempt) && runAttempt > 0
-        ? await readJobs(runId, runAttempt)
-        : []
-      review = { state: 'completed', proof: { checkRun: latestReviewCheck, run, jobs } }
+  const landingPullRequest = {
+    number: pullRequest.number,
+    repository,
+    state: pullRequest.state.toUpperCase(),
+    isDraft: Boolean(pullRequest.draft),
+    baseRefName: pullRequest.base.ref,
+    baseRefOid: pair.base,
+    headRefOid: pair.head,
+    mergeStateStatus: 'UNKNOWN',
+    mergeable: null,
+  }
+  for (const checkRun of candidates) {
+    const identity = parseReviewCheckIdentity(checkRun)
+    if (!identity || identity.workflowId !== workflowId
+      || identity.stageId !== cycle.review.id
+      || identity.definitionHash !== profile.definitionHash) continue
+    const runId = reviewRunIdFromCheckRun(checkRun, repository)
+    if (!runId || runId !== identity.runId) continue
+    let run
+    try {
+      run = await readRun(runId)
+    } catch {
+      // An unreadable same-name candidate is not authoritative review evidence.
+      continue
+    }
+    if (run?.run_attempt !== identity.runAttempt
+      || !hasTrustedExactReviewInvocation({
+        pullRequest: landingPullRequest,
+        reviewProof: { checkRun, run: /** @type {import('./landing-policy.mjs').WorkflowRun} */ (run) },
+        trustedReview,
+      })) continue
+    if (String(checkRun.status).toUpperCase() !== 'COMPLETED' || run.status !== 'completed') {
+      review = { state: 'pending', proof: null }
+      break
+    }
+    try {
+      const jobs = await readJobs(runId, identity.runAttempt)
+      review = { state: 'completed', proof: { checkRun, run, jobs } }
+      break
+    } catch {
+      // A malformed same-name candidate cannot mask an older authoritative proof.
     }
   }
   const subject = pullRequestGovernorSubject(pullRequest)
