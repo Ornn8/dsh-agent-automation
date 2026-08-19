@@ -242,7 +242,7 @@ async function reviewSubject(run) {
       head: candidates[0].head.sha,
     }
   }
-  const title = /^Agent PR Review #(\d+) ([0-9a-f]{40})\.\.([0-9a-f]{40})$/.exec(String(run.display_title || ''))
+  const title = /^Agent PR Review #(\d+) ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: profile:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$/.exec(String(run.display_title || ''))
   if (title && ((run.event === 'pull_request_target' && title[3] === run.head_sha)
     || (run.event === 'repository_dispatch' && title[2] === run.head_sha))) {
     return { type: 'pull-request', number: Number.parseInt(title[1], 10), base: title[2], head: title[3] }

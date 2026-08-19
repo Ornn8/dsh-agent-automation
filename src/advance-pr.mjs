@@ -23,7 +23,7 @@ const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
 let expectedBase = process.env.BASE_SHA?.trim().toLowerCase() || ''
 let expectedHead = process.env.HEAD_SHA?.trim().toLowerCase() || ''
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
-const profileId = process.env.PROFILE_ID?.trim() || 'github-pr-cycle'
+let profileId = process.env.PROFILE_ID?.trim() || ''
 let requestedWorkflowId = process.env.WORKFLOW_ID?.trim() || ''
 const sourceRunId = Number.parseInt(process.env.SOURCE_RUN_ID || '0', 10)
 const sourceRunAttempt = Number.parseInt(process.env.SOURCE_RUN_ATTEMPT || '0', 10)
@@ -72,6 +72,13 @@ async function resolveTerminalReviewSource() {
 }
 
 const verifiedTerminalReviewSource = await resolveTerminalReviewSource()
+if (verifiedTerminalReviewSource) {
+  if (profileId && profileId !== verifiedTerminalReviewSource.profileId) {
+    throw new Error('Advancement source review Profile does not match the requested Profile')
+  }
+  profileId = verifiedTerminalReviewSource.profileId
+}
+if (!profileId) profileId = 'github-pr-cycle'
 let pullRequestNumber = verifiedTerminalReviewSource?.number || requestedNumber
 if (verifiedTerminalReviewSource) {
   expectedBase = verifiedTerminalReviewSource.base
@@ -195,6 +202,22 @@ const request = {
   profileId,
 }
 
+if (request.action === 'request-repair' && !request.repair?.candidate) {
+  const seedIdentity = advancementTransitionIdentity(request)
+  const repair = advancementRepairCandidate({
+    records: governorRecords,
+    subject: pullRequestGovernorSubject(pullRequest),
+    stateVersion: request.stateVersion,
+    transitionIdentity: seedIdentity,
+  })
+  if (!repair.record) throw new Error('Advancement repair candidate disappeared before dispatch')
+  await writeGovernorRecord(repair.record)
+  request.repair = {
+    ...request.repair,
+    candidate: { transition: repair.transition, observationId: repair.record.observationId },
+  }
+}
+
 async function writeGovernorRecord(record) {
   const body = attestedGovernorRecordBody(record, {
     repository,
@@ -230,16 +253,6 @@ const result = await consumePullRequestAdvancement(request, {
     })
   },
   requestRepair: async value => {
-    if (!value.repair?.candidate) {
-      const subject = pullRequestGovernorSubject(pullRequest)
-      const repair = advancementRepairCandidate({
-        records: governorRecords,
-        subject,
-        stateVersion: value.stateVersion,
-        transitionIdentity: value.transitionIdentity,
-      })
-      if (repair.record) await writeGovernorRecord(repair.record)
-    }
     await run(githubExecutable, [
       'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
     ], {
@@ -251,6 +264,7 @@ const result = await consumePullRequestAdvancement(request, {
           base_sha: snapshot.pair.base,
           head_sha: snapshot.pair.head,
           request_id: value.transitionIdentity,
+          repair_cause: value.repair?.cause || '',
         },
       }),
     })
@@ -273,16 +287,8 @@ const result = await consumePullRequestAdvancement(request, {
       && record.stateVersion === value.stateVersion
       && record.subject?.type === 'pull-request'
       && record.subject.number === pullRequest.number
-    const inflight = `${transition}:inflight`
-    if (governorRecords.some(record => record.status === 'applied' && matching(record))
-      || governorRecords.some(record => record.status === 'candidate'
-        && record.transition === inflight
-        && record.stateVersion === value.stateVersion
-        && record.subject?.type === 'pull-request'
-        && record.subject.number === pullRequest.number)) return false
-    if (governorRecords.some(record => record.status === 'candidate' && matching(record))) {
-      return value.action === 'request-landing'
-    }
+    if (governorRecords.some(record => record.status === 'applied' && matching(record))) return false
+    if (governorRecords.some(record => record.status === 'candidate' && matching(record))) return true
     await writeGovernorRecord({
       version: 1,
       status: 'candidate',

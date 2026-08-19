@@ -292,6 +292,8 @@ test('all direct and scheduled wake sources enter the exact-state advancement pa
   assert.doesNotMatch(targetAdvance, /workflow_run\.pull_requests\[0\]/)
   assert.match(targetAdvance, /source_run_id: \$\{\{ github\.event_name == 'workflow_run' && github\.event\.workflow_run\.name == 'Agent PR Review'/)
   assert.match(targetAdvance, /source_run_attempt: \$\{\{ github\.event_name == 'workflow_run' && github\.event\.workflow_run\.name == 'Agent PR Review'/)
+  assert.match(targetReview, /profile:\$\{\{ github\.event_name == 'repository_dispatch'/)
+  assert.match(targetAdvance, /profile_id: \$\{\{ github\.event_name == 'repository_dispatch'.*github\.event_name == 'pull_request_target'.*\|\| '' \}\}/s)
   assert.match(advanceWorkflow, /source_run_id:/)
   assert.match(advanceWorkflow, /source_run_attempt:/)
   assert.match(advanceRuntime, /terminalReviewSource\(source/)

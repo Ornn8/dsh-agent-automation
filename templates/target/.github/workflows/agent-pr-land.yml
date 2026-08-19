@@ -30,7 +30,7 @@ jobs:
       pull_request_number: ${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.pull_request_number || github.event.client_payload.pr_number) || github.event_name == 'pull_request_target' && github.event.pull_request.number || 0 }}
       base_sha: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.base_sha || github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || '' }}
       head_sha: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.head_sha || github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
-      profile_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.profile_id || 'github-pr-cycle' }}
+      profile_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.profile_id || github.event_name == 'pull_request_target' && 'github-pr-cycle' || '' }}
       workflow_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.workflow_id || '' }}
       source_run_id: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Agent PR Review' && github.event.workflow_run.id || 0 }}
       source_run_attempt: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Agent PR Review' && github.event.workflow_run.run_attempt || 0 }}

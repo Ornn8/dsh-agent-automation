@@ -99,6 +99,27 @@ test('duplicate wakes keep one stable transition identity and stale wakes perfor
   assert.deepEqual(effects, [])
 })
 
+test('repair transition identity includes the verified candidate generation', () => {
+  const base = decision('request-repair', {
+    repair: { cause: 'review-block', candidate: null },
+  })
+  const candidate = {
+    ...base,
+    repair: {
+      cause: 'review-block',
+      candidate: { transition: 'review-repair:run-91', observationId: 'run-91' },
+    },
+  }
+  assert.notEqual(advancementTransitionIdentity(base), advancementTransitionIdentity(candidate))
+  assert.notEqual(
+    advancementTransitionIdentity(candidate),
+    advancementTransitionIdentity({
+      ...candidate,
+      repair: { ...candidate.repair, candidate: { transition: 'review-repair:run-92', observationId: 'run-92' } },
+    }),
+  )
+})
+
 test('a durable applied transition makes duplicate landing wakes one effective request', async () => {
   const claimed = new Set()
   const applied = new Set()
@@ -177,13 +198,13 @@ test('a deferred landing result remains retryable and is not marked applied', as
   assert.equal(marks, 0)
 })
 
-test('persistent applied-record failure does not replay a dispatched review or repair', async () => {
+test('persistent applied-record failure leaves a dispatched review or repair recoverable', async () => {
   for (const action of ['request-review', 'request-repair']) {
     let effects = 0
-    const inflight = new Set()
+    const applied = new Set()
     const journal = {
-      claim: value => !inflight.has(value.transitionIdentity),
-      markInflight: value => inflight.add(value.transitionIdentity),
+      claim: value => !applied.has(value.transitionIdentity),
+      markInflight: () => undefined,
       markApplied: () => { throw new Error('persistent comment failure') },
     }
     const route = {
@@ -192,10 +213,37 @@ test('persistent applied-record failure does not replay a dispatched review or r
       requestLanding: () => { effects += 1 },
     }
     await assert.rejects(consumePullRequestAdvancement(decision(action), route, journal), /persistent comment failure/)
-    const duplicate = await consumePullRequestAdvancement(decision(action), route, journal)
-    assert.equal(duplicate.alreadyApplied, true, action)
-    assert.equal(effects, 1, action)
+    const retry = await assert.rejects(
+      consumePullRequestAdvancement(decision(action), route, journal),
+      /persistent comment failure/,
+    )
+    assert.equal(retry, undefined, action)
+    assert.equal(effects, 2, action)
   }
+})
+
+test('a dispatch failure after inflight journaling is retried on the next wake', async () => {
+  const inflight = new Set()
+  const applied = new Set()
+  let effects = 0
+  const journal = {
+    claim: value => !applied.has(value.transitionIdentity),
+    markInflight: value => inflight.add(value.transitionIdentity),
+    markApplied: value => applied.add(value.transitionIdentity),
+  }
+  const route = {
+    requestReview: async value => {
+      effects += 1
+      if (effects === 1) throw new Error('repository dispatch failed')
+      assert.equal(inflight.has(value.transitionIdentity), true)
+    },
+    requestRepair: () => undefined,
+    requestLanding: () => undefined,
+  }
+  await assert.rejects(consumePullRequestAdvancement(decision('request-review'), route, journal), /repository dispatch failed/)
+  await consumePullRequestAdvancement(decision('request-review'), route, journal)
+  assert.equal(effects, 2)
+  assert.equal(applied.size, 1)
 })
 
 test('closed action routing never infers authority from prose', async () => {

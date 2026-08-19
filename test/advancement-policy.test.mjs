@@ -172,21 +172,25 @@ test('a prior-attempt BLOCK or cancellation cannot influence the current attempt
   }
 })
 
-test('failed required CI requests repair after an authoritative review', () => {
+test('failed required CI stays on the existing CI repair route', () => {
   const checks = { required: ['ci'], results: [check({ conclusion: 'FAILURE' })] }
   const decision = decidePullRequestAdvancement(snapshot({ review: passedReview, checks }))
-  assert.equal(decision.action, 'request-repair')
-  assert.equal(decision.repair.cause, 'failed-check')
+  assert.equal(decision.action, 'wait-checks')
+  assert.equal(decision.missingCondition, 'ci-repair-completed')
+  assert.deepEqual(decision.wakeEvents, ['repair.completed', 'ci.required-check.completed'])
+  assert.equal(Object.hasOwn(decision, 'repair'), false)
 })
 
-test('a merge conflict requests repair after an authoritative review', () => {
+test('a merge conflict stays on the existing repair route', () => {
   const result = decidePullRequestAdvancement(snapshot({
     mergeability: 'conflicting',
     review: passedReview,
   }))
-  assert.equal(result.action, 'request-repair')
+  assert.equal(result.action, 'wait-checks')
   assert.match(result.reason, /merge conflict/)
-  assert.equal(result.repair.cause, 'merge-conflict')
+  assert.equal(result.missingCondition, 'merge-conflict-repair-completed')
+  assert.deepEqual(result.wakeEvents, ['repair.completed', 'pull-request.updated'])
+  assert.equal(Object.hasOwn(result, 'repair'), false)
 })
 
 test('a verified manual rework candidate is consumed exactly instead of being replaced', () => {
@@ -257,8 +261,8 @@ test('old exact-head check results do not satisfy the current pair', () => {
 test('required check ordering uses the highest CheckRun id rather than array order', () => {
   const results = [check({ id: 2, conclusion: 'FAILURE' }), check({ id: 1, conclusion: 'SUCCESS' })]
   const checks = { required: ['ci'], results }
-  assert.equal(decidePullRequestAdvancement(snapshot({ review: passedReview, checks })).action, 'request-repair')
-  assert.equal(decidePullRequestAdvancement(snapshot({ review: passedReview, checks: { ...checks, results: [...results].reverse() } })).action, 'request-repair')
+  assert.equal(decidePullRequestAdvancement(snapshot({ review: passedReview, checks })).action, 'wait-checks')
+  assert.equal(decidePullRequestAdvancement(snapshot({ review: passedReview, checks: { ...checks, results: [...results].reverse() } })).action, 'wait-checks')
 })
 
 test('a newer pending check blocks an older success and an older pending cannot mask a newer success', () => {

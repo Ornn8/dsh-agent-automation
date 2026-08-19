@@ -36,7 +36,9 @@ on:
         type: string
 
 concurrency:
-  group: agent-advance-${{ github.repository }}-${{ inputs.pull_request_number }}-${{ inputs.head_sha }}
+  # All advancement wakes for one repository share one serialized decision lane.
+  # Raw event inputs are not a safe subject key: workflow_run wakes may omit the PR number.
+  group: agent-advance-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:

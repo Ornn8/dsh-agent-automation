@@ -9,7 +9,7 @@ const TERMINAL_ACTIONS = new Set([
   'wait-review', 'wait-checks', 'paused', 'stale', 'terminal', 'noop',
 ])
 
-/** @typedef {{ action: string, repository: string, pullRequestNumber: number, pair: { base: string, head: string }, stateVersion: string, workflow: { definitionHash: string, workflowId: string, stageId: string } }} AdvancementRequest */
+/** @typedef {{ action: string, repository: string, pullRequestNumber: number, pair: { base: string, head: string }, stateVersion: string, workflow: { definitionHash: string, workflowId: string, stageId: string }, repair?: { cause?: string, candidate?: { transition: string, observationId: string } | null } }} AdvancementRequest */
 /** @typedef {{ requestReview: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestRepair: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestLanding: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementEffects */
 /** @typedef {{ claim: (request: AdvancementRequest & { transitionIdentity: string }) => boolean | Promise<boolean>, markInflight?: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, markApplied: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementJournal */
 /** @typedef {{ status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
@@ -44,6 +44,16 @@ function requireRequest(value) {
     || (!MUTATIONS.has(request.action) && !TERMINAL_ACTIONS.has(request.action))) {
     throw new Error(`unsupported advancement action ${request.action}`)
   }
+  if (request.repair !== undefined) {
+    if (!request.repair || typeof request.repair !== 'object'
+      || (request.repair.cause !== undefined && (typeof request.repair.cause !== 'string' || !request.repair.cause))
+      || (request.repair.candidate !== undefined && request.repair.candidate !== null
+        && (typeof request.repair.candidate !== 'object'
+          || typeof request.repair.candidate.transition !== 'string'
+          || typeof request.repair.candidate.observationId !== 'string'))) {
+      throw new Error('advancement repair generation is invalid')
+    }
+  }
   return /** @type {AdvancementRequest} */ (request)
 }
 
@@ -61,6 +71,7 @@ export function advancementTransitionIdentity(value) {
     workflow: request.workflow,
     stateVersion: request.stateVersion,
     transition: request.action,
+    ...(request.action === 'request-repair' ? { repair: request.repair || null } : {}),
   })).digest('hex')
 }
 

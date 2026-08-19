@@ -313,11 +313,27 @@ export function decidePullRequestAdvancement(value) {
   if (review === 'untrusted') {
     return waitDecision(snapshot, 'wait-review', 'review evidence is not authoritative for this exact pair', 'trusted-exact-pair-review', ['review.completed'])
   }
-  if (snapshot.mergeability === 'conflicting') return repairDecision(snapshot, 'pull request has a merge conflict', 'merge-conflict')
+  if (snapshot.mergeability === 'conflicting') {
+    return waitDecision(
+      snapshot,
+      'wait-checks',
+      'pull request has a merge conflict; the existing repair route owns this transition',
+      'merge-conflict-repair-completed',
+      ['repair.completed', 'pull-request.updated'],
+    )
+  }
   if (snapshot.mergeability === 'unknown') {
     return waitDecision(snapshot, 'wait-checks', 'GitHub has not resolved mergeability', 'resolved-mergeability', ['pull-request.updated'])
   }
-  if (statuses.some(status => status === 'failed')) return repairDecision(snapshot, 'a required exact-head check failed', 'failed-check')
+  if (statuses.some(status => status === 'failed')) {
+    return waitDecision(
+      snapshot,
+      'wait-checks',
+      'a required exact-head check failed; the existing CI repair route owns this transition',
+      'ci-repair-completed',
+      ['repair.completed', 'ci.required-check.completed'],
+    )
+  }
   if (review !== 'pass') {
     if (review === 'missing') return decision(snapshot, 'request-review', 'no review is active for the exact pair')
     return waitDecision(snapshot, 'wait-review', 'trusted exact-pair review is missing', 'trusted-exact-pair-review', ['review.completed'])
