@@ -1969,34 +1969,87 @@ function Get-ManagedArtifactState {
   }
 }
 
+function Get-DshWebWorkerRoutes {
+  param(
+    [Parameter(Mandatory)]$Workers,
+    [Parameter(Mandatory)][string]$BaseUrl
+  )
+  $normalizedBaseUrl = $BaseUrl.TrimEnd('/')
+  if ([string]::IsNullOrWhiteSpace($normalizedBaseUrl) -or $null -eq $Workers) { return @() }
+  $routes = @(
+    foreach ($property in $Workers.psobject.Properties) {
+      $worker = $property.Value
+      if ($null -eq $worker -or [string]$worker.adapter -cne 'dsh-web') { continue }
+      $workerBaseUrl = [string]$worker.baseUrl
+      if ([string]::IsNullOrWhiteSpace($workerBaseUrl) -or -not $workerBaseUrl.TrimEnd('/').Equals($normalizedBaseUrl, [StringComparison]::OrdinalIgnoreCase)) { continue }
+      [pscustomobject]@{
+        id = [string]$property.Name
+        provider = [string]$worker.provider
+        model = [string]$worker.model
+        reasoningEffort = [string]$worker.reasoningEffort
+      }
+    }
+  )
+  return $routes
+}
+
 function Test-DshWebHost {
   param(
     [Parameter(Mandatory)]$HostConfig,
+    [Parameter(Mandatory)]$WorkerRoutes,
     [scriptblock]$Invoker = {
       param($Request)
       Invoke-WebRequest @Request
     }
   )
-  $rpcId = "operations-health-$([Guid]::NewGuid().ToString('N'))"
-  $request = @{
-    Uri = $HostConfig.baseUrl.TrimEnd('/') + $HostConfig.healthPath
-    Method = 'Post'
-    ContentType = 'application/json'
-    Body = (@{ type = 'client-request'; rpcId = $rpcId; method = 'session.list'; payload = @{} } | ConvertTo-Json -Compress -Depth 8)
-    UseBasicParsing = $true
-    TimeoutSec = 5
-    ErrorAction = 'Stop'
-  }
   try {
-    $responses = @(& $Invoker $request)
-    if ($responses.Count -ne 1) { return $false }
-    $response = $responses[0]
-    if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) { return $false }
-    if ($response.Content -isnot [string] -or [string]::IsNullOrWhiteSpace($response.Content)) { return $false }
-    $envelope = $response.Content | ConvertFrom-Json -Depth 16
-    if ($envelope.type -ne 'server-response' -or $envelope.rpcId -ne $rpcId -or $envelope.result.ok -ne $true) { return $false }
-    if ($null -eq $envelope.result.value -or $envelope.result.value.psobject.Properties.Name -notcontains 'items') { return $false }
-    return $envelope.result.value.items -is [array]
+    $routes = @($WorkerRoutes)
+    if ($routes.Count -eq 0) { return $false }
+    $invokeRpc = {
+      param([string]$Method)
+      $rpcId = "operations-health-$([Guid]::NewGuid().ToString('N'))"
+      $healthPath = if ($Method -ceq 'session.list') { [string]$HostConfig.healthPath } else { "/api/$Method" }
+      $request = @{
+        Uri = $HostConfig.baseUrl.TrimEnd('/') + $healthPath
+        Method = 'Post'
+        ContentType = 'application/json'
+        Body = (@{ type = 'client-request'; rpcId = $rpcId; method = $Method; payload = @{} } | ConvertTo-Json -Compress -Depth 8)
+        UseBasicParsing = $true
+        TimeoutSec = 5
+        ErrorAction = 'Stop'
+      }
+      $responses = @(& $Invoker $request)
+      if ($responses.Count -ne 1) { return $null }
+      $response = $responses[0]
+      if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) { return $null }
+      if ($response.Content -isnot [string] -or [string]::IsNullOrWhiteSpace($response.Content)) { return $null }
+      $envelope = $response.Content | ConvertFrom-Json -Depth 16
+      if ($envelope.type -ne 'server-response' -or $envelope.rpcId -ne $rpcId -or $envelope.result.ok -ne $true) { return $null }
+      return $envelope.result.value
+    }
+
+    $sessionValue = & $invokeRpc 'session.list'
+    if ($null -eq $sessionValue -or $sessionValue.psobject.Properties.Name -notcontains 'items' -or $sessionValue.items -isnot [array]) { return $false }
+    $providerValue = & $invokeRpc 'llm.providers'
+    if ($null -eq $providerValue -or $providerValue.psobject.Properties.Name -notcontains 'providers' -or $providerValue.providers -isnot [array]) { return $false }
+    $modelValue = & $invokeRpc 'llm.models'
+    if ($null -eq $modelValue -or $modelValue.psobject.Properties.Name -notcontains 'groups' -or $modelValue.groups -isnot [array] -or $modelValue.psobject.Properties.Name -notcontains 'failures' -or $modelValue.failures -isnot [array]) { return $false }
+
+    foreach ($route in $routes) {
+      foreach ($field in @('provider', 'model', 'reasoningEffort')) {
+        if ($null -eq $route.psobject.Properties[$field] -or [string]::IsNullOrWhiteSpace([string]$route.$field)) { return $false }
+      }
+      $providerRows = @($providerValue.providers | Where-Object { $_.provider -ceq [string]$route.provider -and $_.active -eq $true })
+      if ($providerRows.Count -ne 1) { return $false }
+      $groups = @($modelValue.groups | Where-Object { $_.id -ceq [string]$route.provider })
+      if ($groups.Count -ne 1) { return $false }
+      $models = @($groups[0].models | Where-Object { $_.id -ceq [string]$route.model })
+      if ($models.Count -ne 1) { return $false }
+      $reasoning = $models[0].reasoning
+      if ($null -eq $reasoning -or $reasoning.psobject.Properties.Name -notcontains 'efforts' -or $reasoning.efforts -isnot [array]) { return $false }
+      if (@($reasoning.efforts | Where-Object { $_.id -ceq [string]$route.reasoningEffort }).Count -ne 1) { return $false }
+    }
+    return $true
   } catch {
     return $false
   }
@@ -2198,54 +2251,76 @@ function Invoke-OperationsSelfTest {
   $unsafeBootstrapResponse = [pscustomobject]@{ allow_force_pushes = [pscustomobject]@{ enabled = $true }; allow_deletions = [pscustomobject]@{ enabled = $false }; required_pull_request_reviews = $null }
   $results += [pscustomobject]@{ Name = 'branch protection bootstrap verification rejects force pushes'; Passed = ((Test-BootstrapBranchProtection -Protection $safeBootstrapResponse).Ok -and -not (Test-BootstrapBranchProtection -Protection $unsafeBootstrapResponse).Ok) }
   $healthConfig = [pscustomobject]@{ baseUrl = 'http://127.0.0.1:3080'; healthPath = '/api/session.list' }
-  $validHealthInvoker = {
-    param($Request)
+  $healthRoutes = @([pscustomobject]@{ id = 'dsh'; provider = 'opencode-go'; model = 'deepseek-v4-flash'; reasoningEffort = 'max' })
+  $makeHealthResponse = {
+    param($Request, [bool]$ProviderActive, [string]$AdvertisedModel, [string[]]$AdvertisedEfforts, [bool]$InvalidSessionItems)
     $sent = $Request.Body | ConvertFrom-Json
-    if ($sent.type -ne 'client-request' -or $sent.method -ne 'session.list' -or $null -eq $sent.payload -or $sent.rpcId -notmatch '^operations-health-[a-f0-9]{32}$') {
+    if ($sent.type -ne 'client-request' -or $sent.method -notin @('session.list', 'llm.providers', 'llm.models') -or $null -eq $sent.payload -or $sent.rpcId -notmatch '^operations-health-[a-f0-9]{32}$') {
       return [pscustomobject]@{ StatusCode = 422; Content = '{}' }
     }
-    $content = @{
-      type = 'server-response'
-      rpcId = $sent.rpcId
-      result = @{ ok = $true; value = @{ items = @() } }
-    } | ConvertTo-Json -Compress -Depth 8
+    if ($InvalidSessionItems) { $items = [pscustomobject]@{} } else { $items = @([pscustomobject]@{ id = 'health-probe' }) }
+    $efforts = @($AdvertisedEfforts | ForEach-Object { [pscustomobject]@{ id = $_; name = $_ } })
+    $value = switch ($sent.method) {
+      'session.list' { @{ items = $items } }
+      'llm.providers' { @{ providers = @([pscustomobject]@{ provider = 'opencode-go'; displayName = 'OpenCode Go'; settingsNs = 'opencode'; settingsPath = @(); active = $ProviderActive }) } }
+      'llm.models' { @{ groups = @([pscustomobject]@{ id = 'opencode-go'; name = 'OpenCode Go'; models = @([pscustomobject]@{ id = $AdvertisedModel; name = $AdvertisedModel; reasoning = @{ efforts = $efforts } }) }); failures = @() } }
+    }
+    $content = @{ type = 'server-response'; rpcId = $sent.rpcId; result = @{ ok = $true; value = $value } } | ConvertTo-Json -Compress -Depth 12
     return [pscustomobject]@{ StatusCode = 200; Content = $content }
-  }
+  }.GetNewClosure()
+  $validHealthInvoker = {
+    param($Request)
+    & $makeHealthResponse $Request $true 'deepseek-v4-flash' ([string[]]@('max')) $false
+  }.GetNewClosure()
   $badStatusInvoker = {
     param($Request)
-    $sent = $Request.Body | ConvertFrom-Json
-    $content = @{ type = 'server-response'; rpcId = $sent.rpcId; result = @{ ok = $true; value = @{ items = @() } } } | ConvertTo-Json -Compress -Depth 8
-    return [pscustomobject]@{ StatusCode = 400; Content = $content }
-  }
+    $response = & $makeHealthResponse $Request $true 'deepseek-v4-flash' ([string[]]@('max')) $false
+    $response.StatusCode = 400
+    return $response
+  }.GetNewClosure()
+  $inactiveProviderInvoker = {
+    param($Request)
+    & $makeHealthResponse $Request $false 'deepseek-v4-flash' ([string[]]@('max')) $false
+  }.GetNewClosure()
+  $missingModelInvoker = {
+    param($Request)
+    & $makeHealthResponse $Request $true 'different-model' ([string[]]@('max')) $false
+  }.GetNewClosure()
+  $unsupportedEffortInvoker = {
+    param($Request)
+    & $makeHealthResponse $Request $true 'deepseek-v4-flash' ([string[]]@('high')) $false
+  }.GetNewClosure()
   $wrongRpcInvoker = {
     param($Request)
+    $sent = $Request.Body | ConvertFrom-Json
     $content = @{ type = 'server-response'; rpcId = 'wrong'; result = @{ ok = $true; value = @{ items = @() } } } | ConvertTo-Json -Compress -Depth 8
     return [pscustomobject]@{ StatusCode = 200; Content = $content }
-  }
+  }.GetNewClosure()
   $wrongTypeInvoker = {
     param($Request)
     $sent = $Request.Body | ConvertFrom-Json
     $content = @{ type = 'other'; rpcId = $sent.rpcId; result = @{ ok = $true; value = @{ items = @() } } } | ConvertTo-Json -Compress -Depth 8
     return [pscustomobject]@{ StatusCode = 200; Content = $content }
-  }
+  }.GetNewClosure()
   $failedResultInvoker = {
     param($Request)
     $sent = $Request.Body | ConvertFrom-Json
     $content = @{ type = 'server-response'; rpcId = $sent.rpcId; result = @{ ok = $false; error = @{ code = 'test'; message = 'test' } } } | ConvertTo-Json -Compress -Depth 8
     return [pscustomobject]@{ StatusCode = 200; Content = $content }
-  }
+  }.GetNewClosure()
   $invalidItemsInvoker = {
     param($Request)
-    $sent = $Request.Body | ConvertFrom-Json
-    $content = @{ type = 'server-response'; rpcId = $sent.rpcId; result = @{ ok = $true; value = @{ items = @{} } } } | ConvertTo-Json -Compress -Depth 8
-    return [pscustomobject]@{ StatusCode = 200; Content = $content }
-  }
-  $results += [pscustomobject]@{ Name = 'DSH health accepts valid session.list envelope'; Passed = (Test-DshWebHost -HostConfig $healthConfig -Invoker $validHealthInvoker) }
-  $results += [pscustomobject]@{ Name = 'DSH health rejects HTTP 400'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -Invoker $badStatusInvoker)) }
-  $results += [pscustomobject]@{ Name = 'DSH health rejects mismatched rpcId'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -Invoker $wrongRpcInvoker)) }
-  $results += [pscustomobject]@{ Name = 'DSH health requires server-response type'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -Invoker $wrongTypeInvoker)) }
-  $results += [pscustomobject]@{ Name = 'DSH health requires result.ok true'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -Invoker $failedResultInvoker)) }
-  $results += [pscustomobject]@{ Name = 'DSH health requires items array'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -Invoker $invalidItemsInvoker)) }
+    & $makeHealthResponse $Request $true 'deepseek-v4-flash' ([string[]]@('max')) $true
+  }.GetNewClosure()
+  $results += [pscustomobject]@{ Name = 'DSH health accepts session.list and configured worker route metadata'; Passed = (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $validHealthInvoker) }
+  $results += [pscustomobject]@{ Name = 'DSH health rejects HTTP 400'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $badStatusInvoker)) }
+  $results += [pscustomobject]@{ Name = 'DSH health rejects mismatched rpcId'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $wrongRpcInvoker)) }
+  $results += [pscustomobject]@{ Name = 'DSH health requires server-response type'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $wrongTypeInvoker)) }
+  $results += [pscustomobject]@{ Name = 'DSH health requires result.ok true'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $failedResultInvoker)) }
+  $results += [pscustomobject]@{ Name = 'DSH health requires items array'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $invalidItemsInvoker)) }
+  $results += [pscustomobject]@{ Name = 'DSH health requires every configured provider to be active'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $inactiveProviderInvoker)) }
+  $results += [pscustomobject]@{ Name = 'DSH health requires every configured model to be advertised'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $missingModelInvoker)) }
+  $results += [pscustomobject]@{ Name = 'DSH health requires every configured reasoning effort to be advertised'; Passed = (-not (Test-DshWebHost -HostConfig $healthConfig -WorkerRoutes $healthRoutes -Invoker $unsupportedEffortInvoker)) }
   return $results
 }
 
@@ -2270,5 +2345,5 @@ Export-ModuleMember -Function @(
   'Test-ScheduledTaskRuntimePath',
   'ConvertTo-ManifestEntry', 'Get-InstallManifestPath', 'New-InstallManifest', 'Read-InstallManifest',
   'Write-InstallManifest', 'Set-ManifestEntry', 'Remove-ManifestEntry', 'Get-ManagedArtifactState',
-  'Test-DshWebHost', 'Invoke-OperationsSelfTest'
+  'Get-DshWebWorkerRoutes', 'Test-DshWebHost', 'Invoke-OperationsSelfTest'
 )
