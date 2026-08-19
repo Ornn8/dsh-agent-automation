@@ -35,8 +35,9 @@ export function observeReviewInfrastructureFault({ run, jobs, repository, trust 
     && pullRequest.head.sha === run.head_sha)
   if (candidates.length !== 1) return null
   const [{ number, base, head }] = candidates
-  const failure = ['cancelled', 'timed_out', 'startup_failure', 'stale'].includes(run.conclusion)
-    ? { failureClass: 'transport', errorCode: run.conclusion }
+  const reviewConclusion = reviewJobs[0].conclusion
+  const failure = ['cancelled', 'timed_out', 'startup_failure', 'stale'].includes(reviewConclusion)
+    ? { failureClass: 'transport', errorCode: reviewConclusion }
     : { failureClass: 'host', errorCode: 'review-infrastructure-failure' }
   return {
     repository,

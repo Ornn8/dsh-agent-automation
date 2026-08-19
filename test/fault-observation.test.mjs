@@ -6,8 +6,16 @@ import {
   recordedReviewFailure,
   trustedFaultProjectionRun,
 } from '../src/fault-observation.mjs'
-import { applyReviewFaultDecision, loadReviewFaultAuditDecision, reviewFaultAuditDecision } from '../src/review-fault-audit.mjs'
+import {
+  applyReviewFaultDecision,
+  loadReviewFaultAuditDecision,
+  reviewFaultAttemptEndpoints,
+  reviewFaultAuditDecision,
+  verifyReviewFaultAttempt,
+} from '../src/review-fault-audit.mjs'
 import { reviewCheckIdentity } from '../src/review-check.mjs'
+import { faultIdentity } from '../src/fault-record.mjs'
+import { workflowFailureSignature } from '../src/failure-classification.mjs'
 
 const repository = 'owner/product'
 const controllerRepository = 'owner/controller'
@@ -281,6 +289,61 @@ test('review fault signature is stable when only an unrelated sibling job change
   const second = reviewFaultAuditDecision({ ...input, jobs: [...infrastructureJobs, sibling('cancelled')] })
   assert.equal(first.failureSignature, second.failureSignature)
   assert.match(first.failureSignature, /^workflow:[0-9a-f]{64}$/)
+})
+
+test('review fault identity and signature follow the authoritative review job rather than caller failure', () => {
+  const reviewJob = {
+    id: 501,
+    name: 'agent-review / agent/review',
+    status: 'completed',
+    conclusion: 'cancelled',
+    steps: [{ number: 1, name: 'Review exact PR head with the configured Agent', status: 'completed', conclusion: 'cancelled' }],
+  }
+  const sibling = {
+    id: 502,
+    name: 'caller / unrelated',
+    status: 'completed',
+    conclusion: 'failure',
+    steps: [{ number: 1, name: 'Unrelated caller step', status: 'completed', conclusion: 'failure' }],
+  }
+  const firstRun = reviewRun({ conclusion: 'cancelled' })
+  const secondRun = reviewRun({ conclusion: 'failure' })
+  const first = reviewFaultAuditDecision({
+    run: firstRun,
+    jobs: [reviewJob],
+    repository,
+    trust: { controllerRepository, controllerSha },
+    current: currentPullRequest,
+    checkRuns: [],
+  })
+  const second = reviewFaultAuditDecision({
+    run: secondRun,
+    jobs: [reviewJob, sibling],
+    repository,
+    trust: { controllerRepository, controllerSha },
+    current: currentPullRequest,
+    checkRuns: [],
+  })
+  assert.deepEqual(
+    { failureClass: first.observation.failureClass, errorCode: first.observation.errorCode },
+    { failureClass: 'transport', errorCode: 'cancelled' },
+  )
+  assert.equal(faultIdentity(first.observation), faultIdentity(second.observation))
+  assert.equal(first.failureSignature, second.failureSignature)
+  assert.notEqual(
+    workflowFailureSignature(firstRun, [reviewJob]),
+    workflowFailureSignature(secondRun, [reviewJob, sibling]),
+  )
+})
+
+test('review fault source APIs and response validation bind one immutable workflow attempt', () => {
+  assert.deepEqual(reviewFaultAttemptEndpoints(repository, 81, 2), {
+    run: 'repos/owner/product/actions/runs/81/attempts/2',
+    jobs: 'repos/owner/product/actions/runs/81/attempts/2/jobs',
+  })
+  assert.doesNotThrow(() => verifyReviewFaultAttempt({ id: 81, run_attempt: 2 }, 81, 2))
+  assert.throws(() => verifyReviewFaultAttempt({ id: 81, run_attempt: 3 }, 81, 2), /attempt changed/)
+  assert.throws(() => reviewFaultAttemptEndpoints(repository, 81, 0), /attempt identity/)
 })
 
 test('repository-dispatch review evidence remains unknown without a production trusted subject input', () => {

@@ -100,6 +100,13 @@ export function reviewWorkflowFailureJobs(jobs) {
     ? matches : null
 }
 
+/** Build a stable failure signature from the one authoritative reusable review job. @param {object} run @param {object[]} jobs @returns {string} @throws {Error} Missing authoritative review failure. */
+export function reviewWorkflowFailureSignature(run, jobs) {
+  const reviewJobs = reviewWorkflowFailureJobs(jobs)
+  if (!reviewJobs) throw new Error('Authoritative review failure evidence is invalid')
+  return workflowFailureSignature({ ...run, conclusion: reviewJobs[0].conclusion }, reviewJobs)
+}
+
 function roleEvidenceJobs(value, jobs) {
   return (value?.kind || value?.roleKind) === 'agent-review' ? reviewWorkflowFailureJobs(jobs) : jobs
 }
@@ -203,7 +210,8 @@ export function verifyReviewInfrastructureFailureEvidence({ run, jobs, provenanc
   if (!verifiedForEvidence(provenance, VERIFIED_ROLES, run, jobs)
     || provenance.kind !== 'agent-review'
     || intentionalReviewBlock(run, jobs)) return null
-  const failureClass = ['cancelled', 'timed_out', 'startup_failure', 'stale'].includes(run.conclusion) ? 'transport' : 'host'
+  const reviewConclusion = roleEvidenceJobs(provenance, jobs)?.[0]?.conclusion
+  const failureClass = ['cancelled', 'timed_out', 'startup_failure', 'stale'].includes(reviewConclusion) ? 'transport' : 'host'
   return verifiedFailureEvidence({ failureClass, source: 'review-workflow' }, run, jobs, provenance)
 }
 

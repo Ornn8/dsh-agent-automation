@@ -1159,12 +1159,15 @@ test('review infrastructure faults are observed on hosted compute before bounded
   const review = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
   const failure = await readFile(new URL('../src/review-failure.mjs', import.meta.url), 'utf8')
   assert.match(target, /uses: .*\/observe-agent-fault\.yml@/)
+  assert.match(target, /source_run_attempt: \$\{\{ github\.event\.workflow_run\.run_attempt \}\}/)
   assert.doesNotMatch(target, /workflow_dispatch:/)
   assert.match(target, /needs: observe/)
   assert.match(target, /if: always\(\)/)
   assert.doesNotMatch(target, /github\.event\.workflow_run\.conclusion/)
   assert.doesNotMatch(target, /github\.event\.workflow_run\.name != github\.workflow/)
   assert.match(observer, /runs-on: ubuntu-latest/)
+  assert.match(observer, /source_run_attempt:/)
+  assert.match(observer, /FAULT_SOURCE_RUN_ATTEMPT: \$\{\{ inputs\.source_run_attempt \}\}/)
   for (const permission of ['actions: read', 'checks: read', 'contents: read', 'issues: write']) {
     assert.match(observer, new RegExp(`^      ${permission}$`, 'm'))
   }

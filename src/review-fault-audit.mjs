@@ -1,11 +1,11 @@
 import { observeReviewInfrastructureFault } from './fault-observation.mjs'
 import {
   classifyControllerFailure,
+  reviewWorkflowFailureSignature,
   reviewWorkflowFailureJobs,
   verifyAgentFailureRole,
   verifyReviewEvidenceDisagreement,
   verifyReviewInfrastructureFailureEvidence,
-  workflowFailureSignature,
 } from './failure-classification.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
@@ -13,6 +13,28 @@ import { REVIEW_CHECK_NAME, REVIEW_WORKFLOW_PATH } from './review-authority.mjs'
 
 const GITHUB_ACTIONS_APP_ID = 15368
 const FULL_SHA = /^[0-9a-f]{40}$/
+const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
+function positiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0
+}
+
+/** Return the GitHub API paths that freeze one workflow attempt for fault observation. @param {string} repository @param {number} runId @param {number} runAttempt @returns {{run: string, jobs: string}} @throws {Error} Invalid attempt identity. */
+export function reviewFaultAttemptEndpoints(repository, runId, runAttempt) {
+  if (!REPOSITORY.test(repository || '') || !positiveInteger(runId) || !positiveInteger(runAttempt)) {
+    throw new Error('Review fault attempt identity is invalid')
+  }
+  const prefix = `repos/${repository}/actions/runs/${runId}/attempts/${runAttempt}`
+  return { run: prefix, jobs: `${prefix}/jobs` }
+}
+
+/** Verify that an attempt-specific API response still identifies the requested workflow attempt. @param {object} run @param {number} runId @param {number} runAttempt @returns {void} @throws {Error} The API returned another attempt. */
+export function verifyReviewFaultAttempt(run, runId, runAttempt) {
+  if (!positiveInteger(runId) || !positiveInteger(runAttempt)
+    || run?.id !== runId || run.run_attempt !== runAttempt) {
+    throw new Error('Review fault source run attempt changed')
+  }
+}
 
 /** Return the exact pull-request subject carried by a pull-request-target review run. @param {object} run @param {string} repository @returns {{number: number, base: string, head: string} | null} */
 export function reviewFaultSubject(run, repository) {
@@ -121,7 +143,7 @@ export function reviewFaultAuditDecision({ run, jobs, repository, trust, current
     classification: preliminaryClassification,
     observation: observed,
     reason: 'qualified review infrastructure fault',
-    failureSignature: workflowFailureSignature(run, authoritativeJobs),
+    failureSignature: reviewWorkflowFailureSignature(run, authoritativeJobs),
   }
 }
 

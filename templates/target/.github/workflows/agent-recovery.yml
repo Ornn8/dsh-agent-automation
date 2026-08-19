@@ -17,6 +17,7 @@ jobs:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/observe-agent-fault.yml@{{CONTROLLER_SHA}}
     with:
       source_run_id: ${{ github.event.workflow_run.id }}
+      source_run_attempt: ${{ github.event.workflow_run.run_attempt }}
 
   recover:
     needs: observe
