@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
+import { validateRepositoryAutomationConfig } from './common.mjs'
 import { recordedReviewFailure } from './fault-observation.mjs'
 import { GOVERNOR_WORKFLOW_PATHS } from './governor-state.mjs'
-import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
-import { REVIEW_CHECK_NAME } from './review-authority.mjs'
+import { hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { intentionalReviewBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { trustedCiFailure } from './dispatch-policy.mjs'
 
@@ -37,7 +37,7 @@ const CONTROLLER_ORCHESTRATION_PATHS = new Set([
 const VERIFIED_ROLES = new WeakSet()
 const VERIFIED_FAILURE_EVIDENCE = new WeakSet()
 
-/** @typedef {'target-required-ci' | 'agent-review' | 'dsh-change' | 'dsh-repair' | 'controller-orchestration'} VerifiedFailureRoleKind */
+/** @typedef {'target-required-ci' | 'agent-review' | 'controller-orchestration'} VerifiedFailureRoleKind */
 /** @typedef {{ kind: VerifiedFailureRoleKind, repository: string, evidenceSignature: string, controllerSha?: string, workflowName?: string, workflowPath?: string }} VerifiedFailureRole */
 /** @typedef {{ failureClass: string, evidenceSignature: string, roleKind: VerifiedFailureRoleKind, source: string }} VerifiedFailureEvidence */
 
@@ -143,39 +143,40 @@ function verifiedForEvidence(value, registry, run, jobs) {
 /** Verify one existing Agent workflow and return its closed failure-classification role. @param {object} input @returns {VerifiedFailureRole | null} */
 export function verifyAgentFailureRole({ run, jobs, repository, trust }) {
   const subjectRole = trustedFailedAgentRun({ run, repository, trust })
-  const kind = subjectRole === 'review' ? 'agent-review' : subjectRole === 'issue' ? 'dsh-change' : subjectRole === 'pull-request' ? 'dsh-repair' : null
-  if (!kind) return null
-  return verifiedRole({ kind, repository, controllerSha: trust.controllerSha }, run, jobs)
+  if (subjectRole !== 'review') return null
+  return verifiedRole({ kind: 'agent-review', repository, controllerSha: trust.controllerSha }, run, jobs)
 }
 
-/** Verify one configured target required-CI failure and return its closed role. @param {object} input @returns {VerifiedFailureRole | null} */
-export function verifyTargetCiFailureRole({ run, jobs, checkRun, authority }) {
-  if (!authority || authority.repository !== run?.repository?.full_name
-    || typeof authority.workflowName !== 'string' || !authority.workflowName
-    || !/^\.github\/workflows\/[A-Za-z0-9_.-]+\.ya?ml$/.test(authority.workflowPath || '')
-    || typeof authority.requiredCheckName !== 'string' || !authority.requiredCheckName
-    || !Number.isSafeInteger(authority.appId) || authority.appId < 1
-    || !Number.isSafeInteger(authority.pullRequestNumber) || authority.pullRequestNumber < 1
-    || !FULL_SHA.test(authority.expectedHead || '')
-    || run.path !== authority.workflowPath
+/** Verify one target required-CI failure against trusted machine configuration and a caller-owned static workflow route. @param {object} input @returns {VerifiedFailureRole | null} @throws {Error} Invalid machine configuration. */
+export function verifyTargetCiFailureRole({ run, jobs, checkRun, config, repository, workflowName, workflowPath, requiredCheckName, subject }) {
+  validateRepositoryAutomationConfig(config)
+  const mappings = config.operations.repositoryMappings.filter(mapping => mapping.repository === repository)
+  if (mappings.length !== 1
+    || !mappings[0].ciWorkflows.includes(workflowName)
+    || !mappings[0].requiredChecks.includes(requiredCheckName)
+    || !/^\.github\/workflows\/[A-Za-z0-9_.-]+\.ya?ml$/.test(workflowPath || '')
+    || repository !== run?.repository?.full_name
+    || !Number.isSafeInteger(subject?.pullRequestNumber) || subject.pullRequestNumber < 1
+    || !FULL_SHA.test(subject?.expectedHead || '')
+    || run.path !== workflowPath
     || !trustedCiFailure({
       run,
-      pullRequestNumber: authority.pullRequestNumber,
-      expectedHead: authority.expectedHead,
-      workflowName: authority.workflowName,
+      pullRequestNumber: subject.pullRequestNumber,
+      expectedHead: subject.expectedHead,
+      workflowName,
     })
     || !Number.isSafeInteger(checkRun?.id) || checkRun.id < 1
-    || checkRun.name !== authority.requiredCheckName
-    || checkRun.app?.id !== authority.appId
+    || checkRun.name !== requiredCheckName
+    || checkRun.app?.id !== GITHUB_ACTIONS_APP_ID
     || checkRun.status !== 'completed'
     || checkRun.conclusion !== 'failure'
-    || checkRun.head_sha !== authority.expectedHead
-    || actionsRunIdFromDetailsUrl(checkRun.details_url, authority.repository) !== run.id) return null
+    || checkRun.head_sha !== subject.expectedHead
+    || actionsRunIdFromDetailsUrl(checkRun.details_url, repository) !== run.id) return null
   return verifiedRole({
     kind: 'target-required-ci',
-    repository: authority.repository,
-    workflowName: authority.workflowName,
-    workflowPath: authority.workflowPath,
+    repository,
+    workflowName,
+    workflowPath,
   }, run, jobs)
 }
 
@@ -209,15 +210,6 @@ export function classifyAgentFailure(error) {
   return 'task'
 }
 
-/** Verify one caught Controller/Worker error and bind its derived class to the exact workflow evidence. @param {object} input @returns {VerifiedFailureEvidence | null} */
-export function verifyAgentFailureEvidence({ run, jobs, provenance, error }) {
-  if (!verifiedForEvidence(provenance, VERIFIED_ROLES, run, jobs) || !(error instanceof Error)) return null
-  return verifiedFailureEvidence({
-    failureClass: classifyAgentFailure(error),
-    source: 'caught-error',
-  }, run, jobs, provenance)
-}
-
 /** Derive exact review-infrastructure evidence without trusting a recorded or model-provided class. @param {object} input @returns {VerifiedFailureEvidence | null} */
 export function verifyReviewInfrastructureFailureEvidence({ run, jobs, provenance }) {
   if (!verifiedForEvidence(provenance, VERIFIED_ROLES, run, jobs)
@@ -235,15 +227,18 @@ export function verifyRecordedReviewFailureEvidence({ run, jobs, provenance, che
 }
 
 /** Verify a contradiction between one trusted review workflow failure and its Actions-owned CheckRun. @param {object} input @returns {VerifiedFailureEvidence | null} */
-export function verifyReviewEvidenceDisagreement({ run, jobs, provenance, checkRun, repository }) {
+export function verifyReviewEvidenceDisagreement({ run, jobs, provenance, pullRequest, reviewProof, trustedReview }) {
+  const checkRun = reviewProof?.checkRun
   if (!verifiedForEvidence(provenance, VERIFIED_ROLES, run, jobs)
     || provenance.kind !== 'agent-review'
-    || checkRun?.name !== REVIEW_CHECK_NAME
-    || checkRun.app?.id !== GITHUB_ACTIONS_APP_ID
-    || checkRun.status !== 'completed'
-    || checkRun.conclusion !== 'success'
+    || !FULL_SHA.test(pullRequest?.baseRefOid || '')
+    || !FULL_SHA.test(pullRequest?.headRefOid || '')
+    || checkRun?.head_sha !== pullRequest.headRefOid
+    || workflowEvidenceIdentity(reviewProof?.run, jobs) !== provenance.evidenceSignature
+    || !hasTrustedExactReviewRun({ pullRequest, reviewProof, trustedReview })
+    || String(checkRun.conclusion).toUpperCase() !== 'SUCCESS'
     || run.conclusion !== 'failure'
-    || reviewRunIdFromCheckRun(checkRun, repository) !== run.id) return null
+    || reviewProof.run.id !== run.id) return null
   return verifiedFailureEvidence({
     failureClass: 'review-evidence-disagreement',
     source: 'review-check-run-disagreement',
@@ -365,9 +360,6 @@ export function classifyControllerFailure({ run, jobs, provenance, failureEviden
   }
   if (provenance.kind === 'target-required-ci') {
     return { category: 'implementation', reason: 'trusted required CI reported a target failure', evidence }
-  }
-  if (verifiedFailureClass === 'task' && ['dsh-change', 'dsh-repair'].includes(provenance.kind)) {
-    return { category: 'implementation', reason: 'trusted target task failed', evidence }
   }
   if (provenance.kind === 'controller-orchestration') {
     return { category: 'orchestration', reason: 'trusted controller workflow failed', evidence }

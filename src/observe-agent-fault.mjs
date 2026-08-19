@@ -1,14 +1,9 @@
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
-import { observeReviewInfrastructureFault, recordedReviewFailure } from './fault-observation.mjs'
-import {
-  classifyControllerFailure,
-  verifyAgentFailureRole,
-  verifyRecordedReviewFailureEvidence,
-  verifyReviewInfrastructureFailureEvidence,
-  workflowFailureSignature,
-} from './failure-classification.mjs'
+import { observeReviewInfrastructureFault } from './fault-observation.mjs'
+import { workflowFailureSignature } from './failure-classification.mjs'
 import { faultIdentity } from './fault-record.mjs'
 import { faultProjectionBody, faultProjectionMarker, parseFaultProjection } from './fault-projection.mjs'
+import { applyReviewFaultDecision, reviewFaultAuditDecision } from './review-fault-audit.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('FAULT_SOURCE_RUN_ID')
@@ -79,66 +74,49 @@ if (!Number.isSafeInteger(projectionRunId) || projectionRunId < 1
   || String(sourceRunNumber) !== sourceRunId) throw new Error('Fault observer run identity is invalid')
 const sourceRun = await ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'fault source workflow run')
 const sourceJobs = await pages(`repos/${repository}/actions/runs/${sourceRunId}/jobs`, 'fault source workflow jobs', 'jobs')
-const verifiedRole = verifyAgentFailureRole({
+const candidate = observeReviewInfrastructureFault({
   run: sourceRun,
   jobs: sourceJobs,
   repository,
   trust: { controllerRepository, controllerSha },
 })
-const preliminaryFailureEvidence = verifyReviewInfrastructureFailureEvidence({
-  run: sourceRun,
-  jobs: sourceJobs,
-  provenance: verifiedRole,
-})
-const preliminaryClassification = classifyControllerFailure({
-  run: sourceRun,
-  jobs: sourceJobs,
-  provenance: verifiedRole,
-  failureEvidence: preliminaryFailureEvidence || undefined,
-})
-const observed = observeReviewInfrastructureFault({
+let current = null
+let checkRuns = []
+if (candidate) {
+  current = await ghJson(['api', `repos/${repository}/pulls/${candidate.subject.number}`], `pull request #${candidate.subject.number}`)
+  if (current.state === 'open'
+    && current.base?.sha === candidate.subject.base
+    && current.head?.sha === candidate.subject.head
+    && current.head?.repo?.full_name === repository) {
+    checkRuns = await pages(`repos/${repository}/commits/${candidate.subject.head}/check-runs`, 'exact-head review checks', 'check_runs')
+  }
+}
+const audit = reviewFaultAuditDecision({
   run: sourceRun,
   jobs: sourceJobs,
   repository,
   trust: { controllerRepository, controllerSha },
-})
-if (!observed) {
-  process.stdout.write(`Failure classification: ${JSON.stringify(preliminaryClassification)}\n`)
-  process.stdout.write(`Fault observer ignored source workflow run ${sourceRunId}.\n`)
-  process.exit(0)
-}
-const current = await ghJson(['api', `repos/${repository}/pulls/${observed.subject.number}`], `pull request #${observed.subject.number}`)
-if (current.state !== 'open'
-  || current.base?.sha !== observed.subject.base
-  || current.head?.sha !== observed.subject.head
-  || current.head?.repo?.full_name !== repository) {
-  process.stdout.write(`Fault observer ignored stale review pair #${observed.subject.number}.\n`)
-  process.exit(0)
-}
-const checkRuns = await pages(`repos/${repository}/commits/${observed.subject.head}/check-runs`, 'exact-head review checks', 'check_runs')
-const recordedFailure = recordedReviewFailure(checkRuns, sourceRunNumber, repository)
-const recordedFailureEvidence = verifyRecordedReviewFailureEvidence({
-  run: sourceRun,
-  jobs: sourceJobs,
-  provenance: verifiedRole,
+  current,
   checkRuns,
-  repository,
 })
-const observation = {
-  ...observed,
-  ...(recordedFailure || {}),
-  failureSignature: workflowFailureSignature(sourceRun, sourceJobs),
-  projectionRunId,
-  controllerRepository,
-  controllerSha,
+if (audit.observation) {
+  audit.observation = {
+    ...audit.observation,
+    failureSignature: workflowFailureSignature(sourceRun, sourceJobs),
+    projectionRunId,
+    controllerRepository,
+    controllerSha,
+  }
+  delete audit.observation.subject
 }
-delete observation.subject
-const classification = classifyControllerFailure({
-  run: sourceRun,
-  jobs: sourceJobs,
-  provenance: verifiedRole,
-  failureEvidence: recordedFailureEvidence || preliminaryFailureEvidence || undefined,
+const issueNumber = await applyReviewFaultDecision(audit, {
+  writeAudit(classification) {
+    process.stdout.write(`Failure classification: ${JSON.stringify(classification)}\n`)
+  },
+  upsertFault,
 })
-const issueNumber = await upsertFault(observation)
-process.stdout.write(`Failure classification: ${JSON.stringify(classification)}\n`)
-process.stdout.write(`Fault observer projected review infrastructure fault as Issue #${issueNumber}.\n`)
+if (issueNumber === null) {
+  process.stdout.write(`Fault observer ignored source workflow run ${sourceRunId}: ${audit.reason}.\n`)
+} else {
+  process.stdout.write(`Fault observer projected review infrastructure fault as Issue #${issueNumber}.\n`)
+}

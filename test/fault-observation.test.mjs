@@ -6,6 +6,7 @@ import {
   recordedReviewFailure,
   trustedFaultProjectionRun,
 } from '../src/fault-observation.mjs'
+import { applyReviewFaultDecision, reviewFaultAuditDecision } from '../src/review-fault-audit.mjs'
 
 const repository = 'owner/product'
 const controllerRepository = 'owner/controller'
@@ -34,10 +35,33 @@ function reviewRun(overrides = {}) {
 }
 
 const infrastructureJobs = [{
+  id: 501,
   name: 'agent-review / agent/review',
+  status: 'completed',
   conclusion: 'failure',
-  steps: [{ name: 'Review exact PR head with the configured Agent', conclusion: 'failure' }],
+  steps: [{ number: 1, name: 'Review exact PR head with the configured Agent', status: 'completed', conclusion: 'failure' }],
 }]
+
+const currentPullRequest = {
+  number: 25,
+  state: 'open',
+  draft: false,
+  base: { ref: 'main', sha: base },
+  head: { sha: head, repo: { full_name: repository } },
+}
+
+function successfulReviewCheck(runId = 81, overrides = {}) {
+  return {
+    id: 701,
+    name: 'agent/review',
+    app: { id: 15368 },
+    status: 'completed',
+    conclusion: 'success',
+    head_sha: head,
+    details_url: `https://github.com/${repository}/actions/runs/${runId}/job/9001`,
+    ...overrides,
+  }
+}
 
 test('a trusted exact-pair reviewer infrastructure failure becomes one host fault observation', () => {
   const observation = observeReviewInfrastructureFault({
@@ -61,11 +85,13 @@ test('a trusted exact-pair reviewer infrastructure failure becomes one host faul
 
 test('an intentional BLOCK and an untrusted review run never become infrastructure faults', () => {
   const blockJobs = [{
+    id: 501,
     name: 'agent-review / agent/review',
+    status: 'completed',
     conclusion: 'failure',
     steps: [
-      { name: 'Publish an independent change work request', conclusion: 'success' },
-      { name: 'Preserve the blocking review conclusion', conclusion: 'failure' },
+      { number: 1, name: 'Publish an independent change work request', status: 'completed', conclusion: 'success' },
+      { number: 2, name: 'Preserve the blocking review conclusion', status: 'completed', conclusion: 'failure' },
     ],
   }]
   assert.equal(observeReviewInfrastructureFault({
@@ -77,6 +103,13 @@ test('an intentional BLOCK and an untrusted review run never become infrastructu
     repository,
     trust: { controllerRepository, controllerSha },
   }), null)
+
+  const decision = reviewFaultAuditDecision({
+    run: reviewRun(), jobs: blockJobs, repository,
+    trust: { controllerRepository, controllerSha }, current: currentPullRequest, checkRuns: [],
+  })
+  assert.equal(decision.classification.category, 'review')
+  assert.equal(decision.observation, null)
 })
 
 test('a fault projection is authorized only by the exact hosted observer workflow provenance', () => {
@@ -139,4 +172,81 @@ test('the hosted observer accepts failure identity only from the exact Actions-o
     errorCode: 'review-workspace-busy',
   })
   assert.equal(recordedReviewFailure([{ ...check, app: { id: 1 } }], 81, repository), null)
+})
+
+test('observer records exact-pair review disagreement before routing and creates no fault', async () => {
+  const decision = reviewFaultAuditDecision({
+    run: reviewRun(),
+    jobs: infrastructureJobs,
+    repository,
+    trust: { controllerRepository, controllerSha },
+    current: currentPullRequest,
+    checkRuns: [successfulReviewCheck()],
+  })
+  assert.equal(decision.classification.category, 'review-evidence-disagreement')
+  assert.equal(decision.observation, null)
+
+  const effects = []
+  const result = await applyReviewFaultDecision(decision, {
+    writeAudit(value) { effects.push(['audit', value.category]) },
+    async upsertFault() { effects.push(['fault']); return 99 },
+  })
+  assert.equal(result, null)
+  assert.deepEqual(effects, [['audit', 'review-evidence-disagreement']])
+})
+
+test('observer emits unknown audit for stale exact pairs without writing a fault', async () => {
+  const decision = reviewFaultAuditDecision({
+    run: reviewRun(),
+    jobs: infrastructureJobs,
+    repository,
+    trust: { controllerRepository, controllerSha },
+    current: { ...currentPullRequest, base: { ...currentPullRequest.base, sha: 'd'.repeat(40) } },
+    checkRuns: [],
+  })
+  assert.equal(decision.classification.category, 'unknown')
+  assert.equal(decision.observation, null)
+
+  const effects = []
+  await applyReviewFaultDecision(decision, {
+    writeAudit(value) { effects.push(['audit', value.category]) },
+    async upsertFault() { effects.push(['fault']); return 99 },
+  })
+  assert.deepEqual(effects, [['audit', 'unknown']])
+})
+
+test('observer emits unknown audit for untrusted review provenance without writing a fault', async () => {
+  const decision = reviewFaultAuditDecision({
+    run: reviewRun({ referenced_workflows: [] }),
+    jobs: infrastructureJobs,
+    repository,
+    trust: { controllerRepository, controllerSha },
+    current: currentPullRequest,
+    checkRuns: [successfulReviewCheck()],
+  })
+  assert.equal(decision.classification.category, 'unknown')
+  assert.equal(decision.observation, null)
+
+  const effects = []
+  await applyReviewFaultDecision(decision, {
+    writeAudit(value) { effects.push(['audit', value.category]) },
+    async upsertFault() { effects.push(['fault']); return 99 },
+  })
+  assert.deepEqual(effects, [['audit', 'unknown']])
+})
+
+test('observer writes qualified audit before the first fault mutation', async () => {
+  const decision = reviewFaultAuditDecision({
+    run: reviewRun(), jobs: infrastructureJobs, repository,
+    trust: { controllerRepository, controllerSha }, current: currentPullRequest, checkRuns: [],
+  })
+  assert.equal(decision.classification.category, 'ci-environment')
+  assert.ok(decision.observation)
+  const effects = []
+  const issue = await applyReviewFaultDecision(decision, {
+    writeAudit(value) { effects.push(['audit', value.category]) },
+    async upsertFault(observation) { effects.push(['fault', observation.sourceRunId]); return 99 },
+  })
+  assert.equal(issue, 99)
+  assert.deepEqual(effects, [['audit', 'ci-environment'], ['fault', 81]])
 })
