@@ -39,6 +39,7 @@ const config = await loadConfig()
 const profileId = requiredEnv('PROFILE_ID')
 const workflowId = requiredEnv('WORKFLOW_ID')
 const stageId = requiredEnv('STAGE_ID')
+const runAttempt = Number.parseInt(requiredEnv('GITHUB_RUN_ATTEMPT'), 10)
 const marker = reviewMarker(expectedHead)
 const githubEnvironment = actionsCredentialEnvironment()
 const reviewTimeoutMs = 60 * 60 * 1000
@@ -46,6 +47,9 @@ const reviewTimeoutMs = 60 * 60 * 1000
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
   throw new Error(`Invalid PR_NUMBER: ${process.env.PR_NUMBER}`)
+}
+if (!Number.isSafeInteger(runAttempt) || runAttempt < 1 || String(runAttempt) !== process.env.GITHUB_RUN_ATTEMPT) {
+  throw new Error(`Invalid GITHUB_RUN_ATTEMPT: ${process.env.GITHUB_RUN_ATTEMPT}`)
 }
 
 async function ghJson(args, description) {
@@ -183,6 +187,7 @@ const reviewCheckId = await startReviewCheck({
   repository,
   head: expectedHead,
   runUrl: requiredEnv('RUN_URL'),
+  runAttempt,
   identity: {
     workflowId,
     stageId,

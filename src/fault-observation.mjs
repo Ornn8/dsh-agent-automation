@@ -1,4 +1,5 @@
-import { intentionalReviewBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
+import { intentionalReviewJobBlock, trustedFailedAgentRun } from './recovery-policy.mjs'
+import { reviewWorkflowFailureJobs } from './failure-classification.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { REVIEW_CHECK_NAME } from './review-authority.mjs'
 
@@ -23,8 +24,10 @@ export function recordedReviewFailure(checkRuns, sourceRunId, repository) {
 
 /** Derive one exact root-fault observation from a trusted review infrastructure failure. */
 export function observeReviewInfrastructureFault({ run, jobs, repository, trust }) {
+  const reviewJobs = reviewWorkflowFailureJobs(jobs)
   if (trustedFailedAgentRun({ run, repository, trust }) !== 'review'
-    || intentionalReviewBlock(run, jobs)) return null
+    || !reviewJobs
+    || intentionalReviewJobBlock(reviewJobs)) return null
   const candidates = (run.pull_requests || []).filter(pullRequest => Number.isSafeInteger(pullRequest.number)
     && pullRequest.number > 0
     && FULL_SHA.test(pullRequest.base?.sha || '')
@@ -32,8 +35,9 @@ export function observeReviewInfrastructureFault({ run, jobs, repository, trust 
     && pullRequest.head.sha === run.head_sha)
   if (candidates.length !== 1) return null
   const [{ number, base, head }] = candidates
-  const failure = ['cancelled', 'timed_out', 'startup_failure', 'stale'].includes(run.conclusion)
-    ? { failureClass: 'transport', errorCode: run.conclusion }
+  const reviewConclusion = reviewJobs[0].conclusion
+  const failure = ['cancelled', 'timed_out', 'startup_failure', 'stale'].includes(reviewConclusion)
+    ? { failureClass: 'transport', errorCode: reviewConclusion }
     : { failureClass: 'host', errorCode: 'review-infrastructure-failure' }
   return {
     repository,
