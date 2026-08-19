@@ -12,6 +12,7 @@ import {
   reviewFaultAttemptEndpoints,
   reviewFaultAuditDecision,
   verifyReviewFaultAttempt,
+  verifyReviewFaultJobs,
 } from '../src/review-fault-audit.mjs'
 import { reviewCheckIdentity } from '../src/review-check.mjs'
 import { faultIdentity } from '../src/fault-record.mjs'
@@ -244,7 +245,15 @@ test('a successful prior attempt cannot suppress a cancelled or timed-out curren
       checkRuns: [successfulReviewCheck(81, 1)],
     })
     assert.notEqual(decision.classification.category, 'review-evidence-disagreement', conclusion)
+    assert.equal(decision.classification.category, 'ci-environment', conclusion)
+    assert.deepEqual(decision.classification.evidence.failedJobs, [{
+      name: 'agent-review / agent/review',
+      conclusion,
+      failedSteps: ['Review exact PR head with the configured Agent'],
+    }])
     assert.ok(decision.observation, conclusion)
+    assert.equal(decision.observation.failureClass, 'transport', conclusion)
+    assert.equal(decision.observation.errorCode, conclusion)
   }
 })
 
@@ -344,6 +353,21 @@ test('review fault source APIs and response validation bind one immutable workfl
   assert.doesNotThrow(() => verifyReviewFaultAttempt({ id: 81, run_attempt: 2 }, 81, 2))
   assert.throws(() => verifyReviewFaultAttempt({ id: 81, run_attempt: 3 }, 81, 2), /attempt changed/)
   assert.throws(() => reviewFaultAttemptEndpoints(repository, 81, 0), /attempt identity/)
+})
+
+test('every attempt job must carry the exact requested run and attempt before audit', () => {
+  const valid = [{ id: 501, run_id: 81, run_attempt: 2 }]
+  assert.doesNotThrow(() => verifyReviewFaultJobs(valid, 81, 2))
+  for (const jobs of [
+    [{ id: 501, run_id: 82, run_attempt: 2 }],
+    [{ id: 501, run_id: 81, run_attempt: 3 }],
+    [{ id: 501, run_attempt: 2 }],
+    [{ id: 501, run_id: 81 }],
+    [{ id: 501, run_id: 81, run_attempt: 0 }],
+    [{ id: 501, run_id: 81, run_attempt: 2 }, { id: 502, run_id: 81, run_attempt: 3 }],
+  ]) {
+    assert.throws(() => verifyReviewFaultJobs(jobs, 81, 2), /job attempt changed/)
+  }
 })
 
 test('repository-dispatch review evidence remains unknown without a production trusted subject input', () => {

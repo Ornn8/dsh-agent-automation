@@ -36,6 +36,17 @@ export function verifyReviewFaultAttempt(run, runId, runAttempt) {
   }
 }
 
+/** Verify that every attempt-specific job response identifies the requested workflow attempt. @param {object[]} jobs @param {number} runId @param {number} runAttempt @returns {void} @throws {Error} A job belongs to another or unproven attempt. */
+export function verifyReviewFaultJobs(jobs, runId, runAttempt) {
+  if (!Array.isArray(jobs) || !positiveInteger(runId) || !positiveInteger(runAttempt)
+    || jobs.some(job => !positiveInteger(job?.run_id)
+      || job.run_id !== runId
+      || !positiveInteger(job.run_attempt)
+      || job.run_attempt !== runAttempt)) {
+    throw new Error('Review fault source job attempt changed')
+  }
+}
+
 /** Return the exact pull-request subject carried by a pull-request-target review run. @param {object} run @param {string} repository @returns {{number: number, base: string, head: string} | null} */
 export function reviewFaultSubject(run, repository) {
   if (run?.event !== 'pull_request_target'

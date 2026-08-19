@@ -6,6 +6,7 @@ import {
   loadReviewFaultAuditDecision,
   reviewFaultAttemptEndpoints,
   verifyReviewFaultAttempt,
+  verifyReviewFaultJobs,
 } from './review-fault-audit.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
@@ -83,6 +84,7 @@ const attemptEndpoints = reviewFaultAttemptEndpoints(repository, sourceRunNumber
 const sourceRun = await ghJson(['api', attemptEndpoints.run], 'fault source workflow run attempt')
 verifyReviewFaultAttempt(sourceRun, sourceRunNumber, sourceRunAttempt)
 const sourceJobs = await pages(attemptEndpoints.jobs, 'fault source workflow attempt jobs', 'jobs')
+verifyReviewFaultJobs(sourceJobs, sourceRunNumber, sourceRunAttempt)
 const audit = await loadReviewFaultAuditDecision({
   run: sourceRun,
   jobs: sourceJobs,

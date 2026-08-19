@@ -228,6 +228,30 @@ test('controller classifies verified review infrastructure failure as ci-environ
   assert.equal(provider.category, 'ci-environment')
 })
 
+test('controller records an authoritative cancelled review job as bounded terminal infrastructure evidence', () => {
+  const run = reviewFailureRun({ conclusion: 'cancelled' })
+  const jobs = [{
+    id: 501,
+    name: 'agent-review / agent/review',
+    status: 'completed',
+    conclusion: 'cancelled',
+    steps: [{ number: 1, name: 'Review exact PR head with the configured Agent', status: 'completed', conclusion: 'cancelled' }],
+  }]
+  const provenance = agentRole(run, jobs)
+  const result = classifyControllerFailure({
+    run,
+    jobs,
+    provenance,
+    failureEvidence: verifyReviewInfrastructureFailureEvidence({ run, jobs, provenance }),
+  })
+  assert.equal(result.category, 'ci-environment')
+  assert.deepEqual(result.evidence.failedJobs, [{
+    name: 'agent-review / agent/review',
+    conclusion: 'cancelled',
+    failedSteps: ['Review exact PR head with the configured Agent'],
+  }])
+})
+
 test('controller reports unknown when trusted evidence cannot establish a category', () => {
   const run = reviewFailureRun()
   const jobs = failedJobs('custom', 'unknown')
