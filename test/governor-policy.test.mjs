@@ -81,6 +81,7 @@ test('an applied transition removes its durable candidate from pending reconcili
     subject: { type: 'pull-request', number: 21 }, stateVersion, observationId: 'recovery-run-2',
   }
   assert.equal(unappliedGovernorCandidate([candidate], () => true), candidate)
+  assert.equal(unappliedGovernorCandidate([{ ...candidate, status: 'admitted' }], () => true).status, 'admitted')
   assert.equal(unappliedGovernorCandidate([candidate, applied], () => true), undefined)
 })
 

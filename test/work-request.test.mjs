@@ -10,6 +10,7 @@ import {
   repositoryDispatchBody,
 } from '../src/work-request.mjs'
 import { loadWorkflowProfile } from '../src/workflow-profile.mjs'
+import { workflowDefinitionHash } from '../src/workflow-definition.mjs'
 
 const base = 'a'.repeat(40)
 const head = 'b'.repeat(40)
@@ -59,6 +60,29 @@ test('advancement repair ids bind the complete deterministic transition identity
   assert.equal(reviewRepairTransition(observationId), `review-repair:${observationId}`)
   assert.equal(isReviewRepairRequestId(request.requestId, head), true)
   assert.equal(isReviewRepairRequestId(request.requestId, base), false)
+})
+
+test('review repair resolves the unique repair Stage from a custom Profile workflow', () => {
+  const definition = structuredClone(profile.definition)
+  definition.profileId = 'custom-profile'
+  definition.workflows['pull-request-fix'] = {
+    ...definition.workflows.repair,
+    stages: [{ ...definition.workflows.repair.stages[0], id: 'repair-change' }],
+  }
+  delete definition.workflows.repair
+  const request = createReviewRepairRequest({
+    definition,
+    definitionHash: workflowDefinitionHash(definition),
+    repository: 'owner/repository',
+    pullRequestNumber: 12,
+    base,
+    head,
+    reviewObservationId: 'comment-42',
+  })
+  assert.equal(request.profileId, 'custom-profile')
+  assert.equal(request.workflowId, 'pull-request-fix')
+  assert.equal(request.stageId, 'repair-change')
+  assert.equal(request.requestId, `review-repair-${head}-comment-42`)
 })
 
 test('Issue requests resolve their root Stage and bind the Profile hash', () => {

@@ -24,9 +24,8 @@ import {
   pullRequestGovernorSubject,
   trustedGovernorRecords,
 } from './governor-state.mjs'
-import { createReviewRepairRequest, repositoryDispatchBody } from './work-request.mjs'
+import { createReviewRepairRequest, repositoryDispatchBody, resolveRepairEntryStage } from './work-request.mjs'
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
-import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
@@ -110,11 +109,16 @@ async function governTransition(pullRequest, transition, { limit, workIdentity, 
   const subject = pullRequestGovernorSubject(pullRequest)
   const stateVersion = subjectStateVersion(subject)
   const records = await pullRequestGovernorRecords(pullRequest.number)
+  const admitted = records.some(record => record.status === 'admitted'
+    && record.transition === transition && record.stateVersion === stateVersion)
   const decision = governorDecision({
     transition, subject, stateVersion, observationId: governorObservationId, records,
   })
   if (decision.record) await writeGovernorRecord(pullRequest.number, decision.record)
-  if (!decision.execute) return { execute: false, action: decision.action }
+  if (!decision.execute) {
+    if (!admitted || decision.action !== 'wait') return { execute: false, action: decision.action }
+    return { execute: true, replay: true, subject, stateVersion }
+  }
   if (limit) {
     const budget = governorBudgetDecision({
       transition: budgetTransition,
@@ -317,9 +321,8 @@ for (const summary of summaries.flat()) {
     const repairProfile = reviewRepair || mergeRepair
       ? await targetProfile(reviewConfiguration?.profileId || 'github-pr-cycle', pullRequest.base.sha)
       : null
-    const repairLimit = repairProfile
-      ? resolveGithubPrCycle(repairProfile.definition, 'repair').change.retry?.limit
-      : 3
+    const repairStage = repairProfile ? resolveRepairEntryStage(repairProfile.definition) : null
+    const repairLimit = repairStage?.stage.retry?.limit
     if (!Number.isSafeInteger(repairLimit)) throw new Error('Repair Profile must declare a bounded retry limit')
     const governed = await governTransition(pullRequest, pendingTransition, {
       limit: repairLimit,
@@ -328,35 +331,22 @@ for (const summary of summaries.flat()) {
     })
     if (governed.execute) {
       if (reviewRepair) {
-        if (pendingRecord.transition === 'review-repair' && pendingRecord.observationId.startsWith('comment-')) {
-          await dispatchWithReceipt({
-            executable: githubExecutable, environment: actionsEnvironment, repository,
-            workflowFile: 'agent-pr-rework.yml',
-            payload: {
-              event_type: 'dsh-repair',
-              client_payload: {
-                pr_number: pullRequest.number,
-                head_sha: pullRequest.head.sha,
-                request_id: pendingRecord.observationId,
-              },
-            },
-            requestId: pendingRecord.observationId,
-          })
-        } else {
-          const request = createReviewRepairRequest({
-            ...repairProfile,
-            repository,
-            pullRequestNumber: pullRequest.number,
-            base: pullRequest.base.sha,
-            head: pullRequest.head.sha,
-            reviewObservationId: pendingTransition.slice('review-repair:'.length),
-          })
-          await dispatchWithReceipt({
-            executable: githubExecutable, environment: actionsEnvironment,
-            workflowFile: 'agent-pr-rework.yml', payload: repositoryDispatchBody(request),
-            requestId: request.requestId,
-          })
-        }
+        const observationId = pendingTransition.startsWith('review-repair:')
+          ? pendingTransition.slice('review-repair:'.length)
+          : pendingRecord.observationId
+        const request = createReviewRepairRequest({
+          ...repairProfile,
+          repository,
+          pullRequestNumber: pullRequest.number,
+          base: pullRequest.base.sha,
+          head: pullRequest.head.sha,
+          reviewObservationId: observationId,
+        })
+        await dispatchWithReceipt({
+          executable: githubExecutable, environment: actionsEnvironment,
+          workflowFile: 'agent-pr-rework.yml', payload: repositoryDispatchBody(request),
+          requestId: request.requestId,
+        })
       } else if (mergeRepair) {
         const request = createReviewRepairRequest({
           ...repairProfile,
@@ -364,7 +354,9 @@ for (const summary of summaries.flat()) {
           pullRequestNumber: pullRequest.number,
           base: pullRequest.base.sha,
           head: pullRequest.head.sha,
-          reviewObservationId: pendingTransition.slice('merge-repair:'.length),
+          reviewObservationId: pendingTransition.startsWith('merge-repair:')
+            ? pendingTransition.slice('merge-repair:'.length)
+            : pendingRecord.observationId,
         })
         const dispatch = repositoryDispatchBody(request)
         dispatch.client_payload.repair_cause = 'merge-conflict'

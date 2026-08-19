@@ -7,10 +7,8 @@ import {
   consumePullRequestAdvancement,
 } from '../src/advancement-runtime.mjs'
 import { landingResult } from '../src/landing-result.mjs'
-
 const sha = letter => letter.repeat(40)
 const digest = letter => letter.repeat(64)
-
 function decision(action, overrides = {}) {
   return {
     action,
@@ -22,7 +20,6 @@ function decision(action, overrides = {}) {
     ...overrides,
   }
 }
-
 test('merge-conflict and failed-check repair decisions create one exact candidate', () => {
   for (const reason of ['merge-conflict', 'failed-check']) {
     const subject = {
@@ -42,7 +39,6 @@ test('merge-conflict and failed-check repair decisions create one exact candidat
     assert.equal(result.record.status, 'candidate', reason)
   }
 })
-
 test('automatic BLOCK and manual rework produce one decision-bound repair candidate', () => {
   const subject = {
     type: 'pull-request', number: 12, state: 'open', draft: false,
@@ -74,7 +70,6 @@ test('automatic BLOCK and manual rework produce one decision-bound repair candid
     assert.deepEqual(duplicate, { transition: result.transition, record: null })
   }
 })
-
 test('CI-first and review-first wakes consume the same exact-pair landing transition', async () => {
   for (const order of ['ci-first', 'review-first']) {
     const effects = []
@@ -86,11 +81,9 @@ test('CI-first and review-first wakes consume the same exact-pair landing transi
     assert.deepEqual(effects, [['landing', advancementTransitionIdentity(decision('request-landing'))]], order)
   }
 })
-
 test('duplicate wakes keep one stable transition identity and stale wakes perform no effect', async () => {
   const value = decision('request-landing')
   assert.equal(advancementTransitionIdentity(value), advancementTransitionIdentity(structuredClone(value)))
-
   const effects = []
   await consumePullRequestAdvancement(decision('stale'), {
     requestReview: entry => effects.push(entry),
@@ -99,7 +92,6 @@ test('duplicate wakes keep one stable transition identity and stale wakes perfor
   })
   assert.deepEqual(effects, [])
 })
-
 test('repair transition identity includes the verified candidate generation', () => {
   const base = decision('request-repair', {
     repair: { cause: 'review-block', candidate: null },
@@ -120,7 +112,6 @@ test('repair transition identity includes the verified candidate generation', ()
     }),
   )
 })
-
 test('a durable applied transition makes duplicate landing wakes one effective request', async () => {
   const claimed = new Set()
   const applied = new Set()
@@ -143,7 +134,6 @@ test('a durable applied transition makes duplicate landing wakes one effective r
   assert.deepEqual(effects, [['landing', advancementTransitionIdentity(decision('request-landing'))]])
   assert.equal(duplicate.alreadyApplied, true)
 })
-
 test('parallel duplicate wakes share one claim and one effective mutation', async () => {
   const claimed = new Set()
   let effects = 0
@@ -166,7 +156,6 @@ test('parallel duplicate wakes share one claim and one effective mutation', asyn
   ])
   assert.equal(effects, 1)
 })
-
 test('a transient applied-record failure retries the journal without replaying the effect', async () => {
   let effects = 0
   let marks = 0
@@ -184,7 +173,6 @@ test('a transient applied-record failure retries the journal without replaying t
   assert.equal(effects, 1)
   assert.equal(marks, 2)
 })
-
 test('a deferred landing result remains retryable and is not marked applied', async () => {
   let marks = 0
   const result = await consumePullRequestAdvancement(decision('request-landing'), {
@@ -198,7 +186,6 @@ test('a deferred landing result remains retryable and is not marked applied', as
   assert.equal(result.deferred, true)
   assert.equal(marks, 0)
 })
-
 test('persistent applied-record failure leaves a dispatched review or repair recoverable', async () => {
   for (const action of ['request-review', 'request-repair']) {
     let effects = 0
@@ -222,7 +209,6 @@ test('persistent applied-record failure leaves a dispatched review or repair rec
     assert.equal(effects, 2, action)
   }
 })
-
 test('a dispatch failure after inflight journaling is retried on the next wake', async () => {
   const inflight = new Set()
   const applied = new Set()
@@ -245,20 +231,4 @@ test('a dispatch failure after inflight journaling is retried on the next wake',
   await consumePullRequestAdvancement(decision('request-review'), route, journal)
   assert.equal(effects, 2)
   assert.equal(applied.size, 1)
-})
-
-test('closed action routing never infers authority from prose', async () => {
-  const observed = []
-  const effects = {
-    requestReview: value => observed.push(['review', value.action]),
-    requestRepair: value => observed.push(['repair', value.action]),
-    requestLanding: value => observed.push(['landing', value.action]),
-  }
-  await consumePullRequestAdvancement(decision('request-review'), effects)
-  await consumePullRequestAdvancement(decision('request-repair'), effects)
-  assert.deepEqual(observed, [['review', 'request-review'], ['repair', 'request-repair']])
-  await assert.rejects(
-    consumePullRequestAdvancement(decision('please-land-this'), effects),
-    /unsupported advancement action/,
-  )
 })

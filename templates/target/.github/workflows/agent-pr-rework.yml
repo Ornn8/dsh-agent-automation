@@ -48,8 +48,6 @@ jobs:
         || (github.event.action == 'agent_work_requested'
           && github.event.client_payload.work_request.version == 2
           && github.event.client_payload.work_request.role == 'change'
-          && github.event.client_payload.work_request.workflowId == 'repair'
-          && github.event.client_payload.work_request.stageId == 'change'
           && github.event.client_payload.work_request.repository == github.repository
           && github.event.client_payload.work_request.subject.type == 'pull-request'))
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-repair.yml@{{CONTROLLER_SHA}}

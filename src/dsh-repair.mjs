@@ -91,7 +91,11 @@ const marker = requestId
 const ciRequest = ciRepairRequest(requestId)
 const mergeRequest = repairCause === 'merge-conflict'
 if (repairCause && !mergeRequest) throw new Error(`Unsupported repair cause ${repairCause}`)
+const reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
+  ? transportedRequest.requestId.slice(`review-repair-${expectedHead}-`.length)
+  : null
 const explicitRequest = Boolean(ciRequest)
+  || reviewObservationId?.startsWith('comment-') === true
   || (!isReviewRepairRequestId(requestId, expectedHead)
     && requestId.startsWith('comment-'))
 const recoveryRequest = /(?:^recovery-|\.recovery-\d+$)/.test(requestId)
@@ -102,10 +106,6 @@ const repairClass = ciRequest
   : explicitRequest
     ? 'explicit-human'
     : 'automatic-review'
-const reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
-  ? transportedRequest.requestId.slice(`review-repair-${expectedHead}-`.length)
-  : null
-
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (transportedRequest && (transportedRequest.repository !== repository
   || transportedRequest.subject.type !== 'pull-request'
@@ -286,6 +286,7 @@ if (transportedRequest) {
   if (stage.role !== transportedRequest.role) {
     throw new Error('Transported WorkRequest role does not match the trusted repair Stage')
   }
+  if (stage.procedure !== 'github-pr-repair') throw new Error('Transported WorkRequest is not a pull-request repair Stage')
   repairProcedure = stage.procedure
 }
 
@@ -330,7 +331,8 @@ if (ciRequest) {
     throw new Error('Workflow run is not trusted failed CI evidence for this pull request head')
   }
 } else if (explicitRequest) {
-  const feedbackId = Number.parseInt(requestId.slice('comment-'.length), 10)
+  const commentRequestId = reviewObservationId?.startsWith('comment-') ? reviewObservationId : requestId
+  const feedbackId = Number.parseInt(commentRequestId.slice('comment-'.length), 10)
   if (!Number.isSafeInteger(feedbackId) || feedbackId < 1) throw new Error('Invalid explicit repair request id')
   const comment = await ghJson(['api', `repos/${repository}/issues/comments/${feedbackId}`], 'rework comment')
   if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
