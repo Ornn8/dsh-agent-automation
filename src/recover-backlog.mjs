@@ -229,7 +229,13 @@ async function reviewJobs() {
   return pages(`repos/${repository}/actions/runs/${sourceRunId}/jobs`, 'review workflow jobs', 'jobs')
 }
 
+function reviewProfileId(run) {
+  const match = /^Agent PR Review #\d+ [0-9a-f]{40}\.\.[0-9a-f]{40} profile:([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/.exec(String(run.display_title || ''))
+  return match?.[1] || 'github-pr-cycle'
+}
+
 async function reviewSubject(run) {
+  const profileId = reviewProfileId(run)
   const candidates = (run.pull_requests || []).filter(pullRequest => Number.isSafeInteger(pullRequest.number)
     && /^[0-9a-f]{40}$/.test(pullRequest.base?.sha || '')
     && /^[0-9a-f]{40}$/.test(pullRequest.head?.sha || '')
@@ -240,12 +246,13 @@ async function reviewSubject(run) {
       number: candidates[0].number,
       base: candidates[0].base.sha,
       head: candidates[0].head.sha,
+      profileId,
     }
   }
   const title = /^Agent PR Review #(\d+) ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: profile:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$/.exec(String(run.display_title || ''))
   if (title && ((run.event === 'pull_request_target' && title[3] === run.head_sha)
     || (run.event === 'repository_dispatch' && title[2] === run.head_sha))) {
-    return { type: 'pull-request', number: Number.parseInt(title[1], 10), base: title[2], head: title[3] }
+    return { type: 'pull-request', number: Number.parseInt(title[1], 10), base: title[2], head: title[3], profileId }
   }
   const pullRequests = await pages(`repos/${repository}/pulls?state=open&per_page=100`, 'open pull requests for review recovery')
   const matches = []
@@ -289,6 +296,7 @@ async function wakeExactReview(subject) {
     '-F', `client_payload[pull_request_number]=${subject.number}`,
     '-f', `client_payload[base_sha]=${subject.base}`,
     '-f', `client_payload[head_sha]=${subject.head}`,
+    '-f', `client_payload[profile_id]=${subject.profileId || 'github-pr-cycle'}`,
     '-f', `client_payload[request_id]=recovery-${sourceRunId}`], { env: environment })
 }
 

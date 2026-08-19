@@ -280,6 +280,7 @@ test('all direct and scheduled wake sources enter the exact-state advancement pa
   const resume = await readFile(new URL('../src/wake-rework.mjs', import.meta.url), 'utf8')
   const reconcile = await readFile(new URL('../src/reconcile-landing.mjs', import.meta.url), 'utf8')
   const reviewReconcile = await readFile(new URL('../src/reconcile-reviews.mjs', import.meta.url), 'utf8')
+  const recovery = await readFile(new URL('../src/recover-backlog.mjs', import.meta.url), 'utf8')
 
   assert.match(targetAdvance, /types: \[dsh-land, dsh-advance\]/)
   assert.match(targetAdvance, /workflow_run:/)
@@ -294,6 +295,7 @@ test('all direct and scheduled wake sources enter the exact-state advancement pa
   assert.match(targetAdvance, /source_run_attempt: \$\{\{ github\.event_name == 'workflow_run' && github\.event\.workflow_run\.name == 'Agent PR Review'/)
   assert.match(targetReview, /profile:\$\{\{ github\.event_name == 'repository_dispatch'/)
   assert.match(targetAdvance, /profile_id: \$\{\{ github\.event_name == 'repository_dispatch'.*github\.event_name == 'pull_request_target'.*\|\| '' \}\}/s)
+  assert.match(recovery, /client_payload\[profile_id\]=\$\{subject\.profileId \|\| 'github-pr-cycle'\}/)
   assert.match(advanceWorkflow, /source_run_id:/)
   assert.match(advanceWorkflow, /source_run_attempt:/)
   assert.match(advanceRuntime, /terminalReviewSource\(source/)
