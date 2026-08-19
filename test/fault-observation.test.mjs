@@ -7,6 +7,7 @@ import {
   trustedFaultProjectionRun,
 } from '../src/fault-observation.mjs'
 import { applyReviewFaultDecision, loadReviewFaultAuditDecision, reviewFaultAuditDecision } from '../src/review-fault-audit.mjs'
+import { reviewCheckIdentity } from '../src/review-check.mjs'
 
 const repository = 'owner/product'
 const controllerRepository = 'owner/controller'
@@ -17,6 +18,7 @@ const head = 'b'.repeat(40)
 function reviewRun(overrides = {}) {
   return {
     id: 81,
+    run_attempt: 2,
     name: `Agent PR Review #25 ${base}..${head}`,
     display_title: `Agent PR Review #25 ${base}..${head}`,
     status: 'completed',
@@ -50,7 +52,7 @@ const currentPullRequest = {
   head: { sha: head, repo: { full_name: repository } },
 }
 
-function successfulReviewCheck(runId = 81, overrides = {}) {
+function successfulReviewCheck(runId = 81, runAttempt = 2, overrides = {}) {
   return {
     id: 701,
     name: 'agent/review',
@@ -59,6 +61,13 @@ function successfulReviewCheck(runId = 81, overrides = {}) {
     conclusion: 'success',
     head_sha: head,
     details_url: `https://github.com/${repository}/actions/runs/${runId}/job/9001`,
+    external_id: reviewCheckIdentity({
+      workflowId: 'change',
+      stageId: 'review',
+      definitionHash: 'd'.repeat(64),
+      runId,
+      runAttempt,
+    }),
     ...overrides,
   }
 }
@@ -206,6 +215,72 @@ test('observer records authoritative review disagreement for every recoverable c
     assert.equal(result, null)
     assert.deepEqual(effects, [['audit', 'review-evidence-disagreement']])
   }
+})
+
+test('a successful prior attempt cannot suppress a cancelled or timed-out current review attempt', () => {
+  for (const conclusion of ['cancelled', 'timed_out']) {
+    const run = reviewRun({ conclusion, run_attempt: 2 })
+    const jobs = [{
+      id: 501,
+      name: 'agent-review / agent/review',
+      status: 'completed',
+      conclusion,
+      steps: [{ number: 1, name: 'Review exact PR head with the configured Agent', status: 'completed', conclusion }],
+    }]
+    const decision = reviewFaultAuditDecision({
+      run,
+      jobs,
+      repository,
+      trust: { controllerRepository, controllerSha },
+      current: currentPullRequest,
+      checkRuns: [successfulReviewCheck(81, 1)],
+    })
+    assert.notEqual(decision.classification.category, 'review-evidence-disagreement', conclusion)
+    assert.ok(decision.observation, conclusion)
+  }
+})
+
+test('a successful check without an encoded attempt cannot suppress a current review fault', () => {
+  const decision = reviewFaultAuditDecision({
+    run: reviewRun({ conclusion: 'timed_out', run_attempt: 2 }),
+    jobs: [{
+      id: 501,
+      name: 'agent-review / agent/review',
+      status: 'completed',
+      conclusion: 'timed_out',
+      steps: [{ number: 1, name: 'Review exact PR head with the configured Agent', status: 'completed', conclusion: 'timed_out' }],
+    }],
+    repository,
+    trust: { controllerRepository, controllerSha },
+    current: currentPullRequest,
+    checkRuns: [{
+      ...successfulReviewCheck(),
+      external_id: `https://github.com/${repository}/actions/runs/81`,
+    }],
+  })
+  assert.notEqual(decision.classification.category, 'review-evidence-disagreement')
+  assert.ok(decision.observation)
+})
+
+test('review fault signature is stable when only an unrelated sibling job changes', () => {
+  const sibling = conclusion => ({
+    id: 502,
+    name: 'caller / unrelated',
+    status: 'completed',
+    conclusion,
+    steps: [{ number: 1, name: 'Unrelated caller step', status: 'completed', conclusion }],
+  })
+  const input = {
+    run: reviewRun(),
+    repository,
+    trust: { controllerRepository, controllerSha },
+    current: currentPullRequest,
+    checkRuns: [],
+  }
+  const first = reviewFaultAuditDecision({ ...input, jobs: [...infrastructureJobs, sibling('failure')] })
+  const second = reviewFaultAuditDecision({ ...input, jobs: [...infrastructureJobs, sibling('cancelled')] })
+  assert.equal(first.failureSignature, second.failureSignature)
+  assert.match(first.failureSignature, /^workflow:[0-9a-f]{64}$/)
 })
 
 test('repository-dispatch review evidence remains unknown without a production trusted subject input', () => {

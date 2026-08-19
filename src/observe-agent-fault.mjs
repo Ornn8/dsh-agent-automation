@@ -1,5 +1,4 @@
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
-import { workflowFailureSignature } from './failure-classification.mjs'
 import { faultIdentity } from './fault-record.mjs'
 import { faultProjectionBody, faultProjectionMarker, parseFaultProjection } from './fault-projection.mjs'
 import { applyReviewFaultDecision, loadReviewFaultAuditDecision } from './review-fault-audit.mjs'
@@ -88,7 +87,7 @@ const audit = await loadReviewFaultAuditDecision({
 if (audit.observation) {
   audit.observation = {
     ...audit.observation,
-    failureSignature: workflowFailureSignature(sourceRun, sourceJobs),
+    failureSignature: audit.failureSignature,
     projectionRunId,
     controllerRepository,
     controllerSha,

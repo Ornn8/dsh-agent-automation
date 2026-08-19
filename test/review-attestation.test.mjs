@@ -134,7 +134,7 @@ test('review check provenance remains bound when identity metadata replaces the 
   const normalized = proof({ checkRun: {
     ...proof().checkRun,
     details_url: 'https://github.com/owner/repository/runs/91',
-    external_id: `agent-review-v2:default:review:${'d'.repeat(64)}:17`,
+    external_id: `agent-review-v3:default:review:${'d'.repeat(64)}:17:1`,
   } })
   const trustedReview = { controllerRepository, controllerSha, workflowPath: '.github/workflows/agent-review.yml' }
   assert.equal(reviewRunIdFromCheckRun(normalized.checkRun, repository), 17)

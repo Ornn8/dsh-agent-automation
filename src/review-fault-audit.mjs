@@ -1,11 +1,14 @@
 import { observeReviewInfrastructureFault } from './fault-observation.mjs'
 import {
   classifyControllerFailure,
+  reviewWorkflowFailureJobs,
   verifyAgentFailureRole,
   verifyReviewEvidenceDisagreement,
   verifyReviewInfrastructureFailureEvidence,
+  workflowFailureSignature,
 } from './failure-classification.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
+import { parseReviewCheckIdentity } from './review-check.mjs'
 import { REVIEW_CHECK_NAME, REVIEW_WORKFLOW_PATH } from './review-authority.mjs'
 
 const GITHUB_ACTIONS_APP_ID = 15368
@@ -58,7 +61,7 @@ function unknownAudit(run, jobs) {
  * Decide the auditable classification and optional infrastructure projection for one review run.
  *
  * @param {object} input Exact workflow, job, pull-request, and CheckRun snapshot.
- * @returns {{classification: object, observation: object | null, reason: string}}
+ * @returns {{classification: object, observation: object | null, reason: string, failureSignature?: string}}
  */
 export function reviewFaultAuditDecision({ run, jobs, repository, trust, current, checkRuns = [] }) {
   const provenance = verifyAgentFailureRole({ run, jobs, repository, trust })
@@ -75,7 +78,10 @@ export function reviewFaultAuditDecision({ run, jobs, repository, trust, current
   const exactReviewChecks = checkRuns.filter(check => check?.name === REVIEW_CHECK_NAME
     && check.app?.id === GITHUB_ACTIONS_APP_ID
     && check.head_sha === pullRequest.headRefOid
-    && reviewRunIdFromCheckRun(check, repository) === run.id)
+    && reviewRunIdFromCheckRun(check, repository) === run.id
+    && Number.isSafeInteger(run.run_attempt)
+    && run.run_attempt > 0
+    && parseReviewCheckIdentity(check)?.runAttempt === run.run_attempt)
   if (exactReviewChecks.length > 1) {
     return { classification: unknownAudit(run, jobs), observation: null, reason: 'ambiguous exact-pair review checks' }
   }
@@ -104,6 +110,8 @@ export function reviewFaultAuditDecision({ run, jobs, repository, trust, current
 
   const observed = observeReviewInfrastructureFault({ run, jobs, repository, trust })
   if (!observed) return { classification: preliminaryClassification, observation: null, reason: 'not an infrastructure fault' }
+  const authoritativeJobs = reviewWorkflowFailureJobs(jobs)
+  if (!authoritativeJobs) return { classification: unknownAudit(run, jobs), observation: null, reason: 'review job evidence changed' }
   if (observed.subject.number !== pullRequest.number
     || observed.subject.base !== pullRequest.baseRefOid
     || observed.subject.head !== pullRequest.headRefOid) {
@@ -113,6 +121,7 @@ export function reviewFaultAuditDecision({ run, jobs, repository, trust, current
     classification: preliminaryClassification,
     observation: observed,
     reason: 'qualified review infrastructure fault',
+    failureSignature: workflowFailureSignature(run, authoritativeJobs),
   }
 }
 
