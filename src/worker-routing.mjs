@@ -417,7 +417,9 @@ export function classifyWorkRequest({ workRequest, subjectState, subjectStateVer
   if (typeof classifier === 'function') {
     try {
       const result = classifier({ workRequest, trustedTaskSnapshot: evidence, routingPolicy: policy })
-      const selected = result && typeof result.then === 'function'
+      const asynchronous = result && typeof result.then === 'function'
+      if (asynchronous) void Promise.resolve(result).catch(() => undefined)
+      const selected = asynchronous
         ? null
         : classifierResult(result, routes, policy.classifierMinimumConfidence ?? 0.8)
       if (selected) return { version: 1, ...binding, taskClass: selected, policyHash: hash, evidenceHash, source: 'optional-classifier' }
@@ -472,13 +474,19 @@ function workRequestIdentity(workRequest) {
   return { requestId: boundedText(workRequest.requestId, 'WorkRequest requestId', 160), role: workRequest.role }
 }
 
-/** @param {AnyObject} options @returns {AnyValue} */
+/** Resolve one exact subject state version and reject conflicting aliases.
+ * @param {AnyObject} options
+ * @returns {AnyValue}
+ */
 function exactStateVersion({ subjectState, subjectStateVersion, stateVersion }) {
-  if (subjectStateVersion !== undefined) return subjectStateVersion
-  if (stateVersion !== undefined) return stateVersion
-  if (typeof subjectState === 'string') return subjectState
-  if (subjectState && typeof subjectState === 'object') return subjectState.stateVersion ?? subjectState.version
-  return undefined
+  const candidates = [subjectStateVersion, stateVersion]
+  if (typeof subjectState === 'string') candidates.push(subjectState)
+  if (subjectState && typeof subjectState === 'object') {
+    candidates.push(subjectState.stateVersion, subjectState.version)
+  }
+  const defined = candidates.filter(candidate => candidate !== undefined)
+  if (new Set(defined).size > 1) throw new Error('Exact subject state version inputs must agree')
+  return defined[0]
 }
 
 /** Create a strict durable WorkerRouteDecision v1 without selecting a concrete Worker.
@@ -566,14 +574,18 @@ export function workerRouteDecisionBody(value) {
 /** Parse one durable decision record and optionally verify its WorkRequest and exact subject state. */
 /** @param {AnyValue} body @param {AnyObject} options @returns {AnyObject} */
 export function parseWorkerRouteDecisionBody(body, options = {}) {
-  if (typeof body !== 'string'
-    || body.indexOf(ROUTE_DECISION_MARKER) !== body.lastIndexOf(ROUTE_DECISION_MARKER)
-    || body.indexOf(ROUTE_DECISION_TRAILER) !== body.lastIndexOf(ROUTE_DECISION_TRAILER)) {
-    throw new Error('WorkerRouteDecision body must contain one durable v1 record')
+  if (typeof body !== 'string') throw new Error('WorkerRouteDecision body must be text')
+  const markerIndex = body.indexOf(ROUTE_DECISION_MARKER)
+  const trailerIndex = body.indexOf(ROUTE_DECISION_TRAILER)
+  if (markerIndex !== 0
+    || markerIndex !== body.lastIndexOf(ROUTE_DECISION_MARKER)
+    || trailerIndex <= markerIndex
+    || trailerIndex !== body.lastIndexOf(ROUTE_DECISION_TRAILER)
+    || trailerIndex + ROUTE_DECISION_TRAILER.length !== body.length) {
+    throw new Error('WorkerRouteDecision body must contain one exact durable v1 record with no surrounding content')
   }
-  const start = body.indexOf(ROUTE_DECISION_MARKER) + ROUTE_DECISION_MARKER.length
-  const end = body.indexOf(ROUTE_DECISION_TRAILER)
-  if (end < start) throw new Error('WorkerRouteDecision body is malformed')
+  const start = markerIndex + ROUTE_DECISION_MARKER.length
+  const end = trailerIndex
   const serialized = body.slice(start, end).trim()
   rejectDuplicateJsonMembers(serialized)
   let value

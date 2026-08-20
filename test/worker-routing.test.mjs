@@ -129,6 +129,29 @@ test('unknown, malformed, asynchronous, and low-confidence classifiers use deter
   }
 })
 
+test('rejected asynchronous classifier falls back without an unhandled rejection', async () => {
+  let unhandled
+  const observeUnhandled = reason => { unhandled = reason }
+  process.on('unhandledRejection', observeUnhandled)
+  try {
+    const result = classify({
+      routingPolicy: {
+        ...routingPolicy,
+        classifier: () => Promise.reject(new Error('classifier rejected')),
+      },
+      trustedTaskSnapshot: { labels: ['unrelated'] },
+    })
+    assert.deepEqual(
+      { taskClass: result.taskClass, source: result.source },
+      { taskClass: 'default', source: 'default' },
+    )
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(unhandled, undefined)
+  } finally {
+    process.removeListener('unhandledRejection', observeUnhandled)
+  }
+})
+
 test('optional classifier may select only a configured route class', () => {
   const result = classify({
     workRequest,
@@ -253,6 +276,39 @@ test('WorkerRouteDecision v1 binds request id, role, exact state, class, and has
     () => classifyWorkRequest({ workRequest, routingPolicy, trustedTaskSnapshot: { labels: ['ui'] } }),
     /requires an exact subject state version/,
   )
+  for (const conflictingState of [
+    { subjectStateVersion: stateVersion, stateVersion: 'd'.repeat(64) },
+    { subjectStateVersion: stateVersion, subjectState: 'd'.repeat(64) },
+    { stateVersion, subjectState: { stateVersion: 'd'.repeat(64) } },
+    { subjectState: { stateVersion, version: 'd'.repeat(64) } },
+  ]) {
+    assert.throws(
+      () => classifyWorkRequest({
+        workRequest,
+        routingPolicy,
+        trustedTaskSnapshot: { labels: ['ui'] },
+        ...conflictingState,
+      }),
+      /Exact subject state version inputs must agree/,
+    )
+  }
+  assert.equal(classifyWorkRequest({
+    workRequest,
+    routingPolicy,
+    trustedTaskSnapshot: { labels: ['ui'] },
+    subjectStateVersion: stateVersion,
+    stateVersion,
+    subjectState: { stateVersion, version: stateVersion },
+  }).stateVersion, stateVersion)
+  assert.throws(
+    () => createWorkerRouteDecision({
+      workRequest,
+      subjectStateVersion: stateVersion,
+      stateVersion: 'd'.repeat(64),
+      classification,
+    }),
+    /Exact subject state version inputs must agree/,
+  )
 })
 
 test('durable decision serialization and body parsing remain strict', () => {
@@ -268,7 +324,19 @@ test('durable decision serialization and body parsing remain strict', () => {
     () => parseWorkerRouteDecision({ ...decision, taskClass: 'backend' }, { routingPolicy }),
     /not configured by routingPolicy/,
   )
-  assert.throws(() => parseWorkerRouteDecisionBody(`${body}\n${body}`), /one durable/)
+  const [marker, durableJson, trailer] = body.split('\n')
+  for (const invalidBody of [
+    `${durableJson}\n${trailer}`,
+    `${marker}\n${durableJson}`,
+    `${trailer}\n${durableJson}\n${marker}`,
+    `${marker}${body}`,
+    `${body}${trailer}`,
+    `${body}\n${body}`,
+    `prefix${body}`,
+    `${body}suffix`,
+  ]) {
+    assert.throws(() => parseWorkerRouteDecisionBody(invalidBody), /one exact durable v1 record/)
+  }
   const members = Object.entries(decision)
     .map(([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`)
   const conflictingValues = {
