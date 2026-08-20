@@ -26,6 +26,10 @@ Adapters translate the Worker Interface to one runtime:
 
 Adding an Adapter is local: the Automation Domain and target workflows do not change.
 
+Adapters expose a closed failure observation alongside a thrown invocation error. `Adapter failure v1` distinguishes quota, rate-limit, model, provider, authentication, billing, transport, protocol, host, and task reasons; only the four capacity reasons are eligible for a later routed attempt. The observation is bounded and sanitized, and does not include provider responses or credentials. PR3 defines the protocol and pure `CapacityRecord v1` transitions without activating role-level failover or durable registry storage.
+
+`CapacityRecord v1` is a pure policy value with `available`, `cooldown`, `half-open`, and `disabled` states. It tracks configuration and credential generations, permits only one half-open probe, and reopens disabled identity records only after a relevant generation changes. Only authoritative authentication and billing evidence disables a record; inferred evidence creates at most a short cooldown, and every reported retry time is bounded by reason and confidence. Capacity state is not a `FaultRecord` and does not consume ordinary recovery budgets.
+
 ### Repository Gateway
 
 Controller scripts validate and publish GitHub state using the host controller identity or the job-scoped Actions identity. Workers do not require individual GitHub accounts. Current change-role prompts may use the shared host transport to commit and publish; this is an Implementation detail of the trusted local change environment, not part of the Worker Interface.

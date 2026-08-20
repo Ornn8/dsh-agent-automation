@@ -1,3 +1,5 @@
+import { annotateAdapterFailure } from './capacity-failure.mjs'
+
 const TERMINAL_OUTCOMES = new Set([
   'completed', 'blocked', 'superseded', 'timed-out', 'failed',
 ])
@@ -51,6 +53,7 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
   const invoke = typeof adapter === 'function' ? adapter : adapter.run
   if (typeof invoke !== 'function') throw new Error(`Adapter ${adapterName} cannot run work`)
 
+  let sessionStarted = false
   const normalizedInvocation = {
     taskId: requiredText(invocation?.taskId, 'invocation.taskId'),
     cwd: requiredText(invocation?.cwd, 'invocation.cwd'),
@@ -64,7 +67,10 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
       : requiredText(invocation.requiredSkill, 'invocation.requiredSkill'),
     timeoutMs: invocation?.timeoutMs,
     signal: invocation?.signal,
-    onStarted: typeof invocation?.onStarted === 'function' ? invocation.onStarted : async () => undefined,
+    onStarted: async value => {
+      sessionStarted = true
+      return typeof invocation?.onStarted === 'function' ? invocation.onStarted(value) : undefined
+    },
   }
   if (!Number.isSafeInteger(normalizedInvocation.timeoutMs) || normalizedInvocation.timeoutMs < 1) {
     throw new Error('invocation.timeoutMs must be a positive integer')
@@ -79,18 +85,25 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
     throw new Error(`Agent worker ${id} does not implement required Skill ${normalizedInvocation.requiredSkill}`)
   }
 
-  const value = await invoke({ workerId: id, worker, invocation: normalizedInvocation })
-  const sessionId = requiredText(value?.sessionId, 'worker receipt sessionId')
-  const outcome = requiredText(value?.outcome, 'worker receipt outcome')
-  if (!TERMINAL_OUTCOMES.has(outcome)) throw new Error(`Unknown worker receipt outcome ${outcome}`)
-  return {
-    workerId: id,
-    worker: attribution,
-    sessionId,
-    outcome,
-    detail: typeof value.detail === 'string' ? value.detail : '',
-    output: value.output,
-    ...(value.automationResult === undefined ? {} : { automationResult: value.automationResult }),
+  try {
+    const value = await invoke({ workerId: id, worker, invocation: normalizedInvocation })
+    const sessionId = requiredText(value?.sessionId, 'worker receipt sessionId')
+    const outcome = requiredText(value?.outcome, 'worker receipt outcome')
+    if (!TERMINAL_OUTCOMES.has(outcome)) throw new Error(`Unknown worker receipt outcome ${outcome}`)
+    return {
+      workerId: id,
+      worker: attribution,
+      sessionId,
+      outcome,
+      detail: typeof value.detail === 'string' ? value.detail : '',
+      output: value.output,
+      ...(value.automationResult === undefined ? {} : { automationResult: value.automationResult }),
+    }
+  } catch (error) {
+    throw annotateAdapterFailure(error, {
+      phase: sessionStarted ? 'session' : 'pre-session',
+      scope: 'worker',
+    })
   }
 }
 
