@@ -1,0 +1,238 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  classifyAndCreateWorkerRouteDecision,
+  classifyWorkRequest,
+  createWorkerRouteDecision,
+  parseWorkerRouteDecision,
+  parseWorkerRouteDecisionBody,
+  serializeWorkerRouteDecision,
+  workerRouteDecisionBody,
+} from '../src/worker-routing.mjs'
+
+const stateVersion = 'c'.repeat(64)
+const workRequest = {
+  version: 2,
+  requestId: 'agent-work-example',
+  role: 'change',
+  profileId: 'example-profile',
+  workflowId: 'default',
+  stageId: 'change',
+  definitionHash: 'a'.repeat(64),
+  repository: 'owner/repository',
+  subject: { type: 'issue', number: 121 },
+  revision: { base: 'b'.repeat(40), head: 'b'.repeat(40) },
+  coordinationKey: 'owner/repository:example-profile:default',
+}
+
+// Worker ids are intentionally absent. The fixture proves route classes without selecting a provider.
+const routingPolicy = {
+  version: 1,
+  default: 'default',
+  classificationOrder: ['frontend'],
+  routes: {
+    frontend: {
+      rules: {
+        any: [
+          { labelsAny: ['ui'] },
+          { pathPrefixes: ['web/'] },
+          { extensions: ['.tsx', '.css'] },
+          { workflowStages: ['frontend'] },
+        ],
+      },
+    },
+    default: { rules: {} },
+  },
+}
+
+const deploymentFixture = {
+  workers: {
+    'antigravity-gemini-flash': { provider: 'antigravity', model: 'gemini-flash-3.7' },
+    'dsh-deepseek-v4-flash': { provider: 'opencode-go', model: 'deepseek-v4-flash' },
+  },
+  routes: {
+    frontend: {
+      selectors: [{ worker: 'antigravity-gemini-flash' }],
+      rules: { labelsAny: ['ui'] },
+    },
+    default: {
+      selectors: [{ worker: 'dsh-deepseek-v4-flash' }],
+      rules: {},
+    },
+  },
+}
+
+test('trusted route class wins before bounded deterministic rules', () => {
+  const result = classifyWorkRequest({
+    workRequest,
+    routingPolicy,
+    trustedTaskSnapshot: { routeClass: 'frontend', labels: ['backend'] },
+  })
+  assert.equal(result.taskClass, 'frontend')
+  assert.equal(result.source, 'trusted-route')
+  assert.match(result.policyHash, /^[0-9a-f]{64}$/)
+  assert.match(result.evidenceHash, /^[0-9a-f]{64}$/)
+})
+
+test('deterministic rules classify bounded trusted labels, paths, and stages', () => {
+  for (const snapshot of [
+    { labels: [{ name: 'ui' }] },
+    { changedPaths: ['web/components/Button.tsx'] },
+    { stageId: 'frontend' },
+  ]) {
+    const result = classifyWorkRequest({ workRequest, routingPolicy, trustedTaskSnapshot: snapshot })
+    assert.deepEqual(
+      { taskClass: result.taskClass, source: result.source },
+      { taskClass: 'frontend', source: 'deterministic-rules' },
+    )
+  }
+})
+
+test('unknown, malformed, asynchronous, and low-confidence classifiers use deterministic default', () => {
+  const cases = [
+    () => 'unknown-route',
+    () => Promise.resolve('frontend'),
+    () => ({ taskClass: 'frontend', confidence: 0.2 }),
+    () => { throw new Error('classifier unavailable') },
+  ]
+  for (const classifier of cases) {
+    const result = classifyWorkRequest({
+      workRequest,
+      routingPolicy: { ...routingPolicy, classifier },
+      trustedTaskSnapshot: { labels: ['unrelated'] },
+    })
+    assert.deepEqual(
+      { taskClass: result.taskClass, source: result.source },
+      { taskClass: 'default', source: 'default' },
+    )
+  }
+})
+
+test('optional classifier may select only a configured route class', () => {
+  const result = classifyWorkRequest({
+    workRequest,
+    routingPolicy: {
+      ...routingPolicy,
+      classifierMinimumConfidence: 0.7,
+      classifier: () => ({ taskClass: 'frontend', confidence: 0.9 }),
+    },
+    trustedTaskSnapshot: { labels: ['unrelated'] },
+  })
+  assert.equal(result.taskClass, 'frontend')
+  assert.equal(result.source, 'optional-classifier')
+})
+
+test('classification policy bounds recursive rule depth', () => {
+  let rule = { labelsAny: ['ui'] }
+  for (let depth = 0; depth < 6; depth += 1) rule = { any: [rule] }
+  assert.throws(
+    () => classifyWorkRequest({ workRequest, routingPolicy: { routes: { frontend: { rules: rule }, default: {} } } }),
+    /maximum rule depth/,
+  )
+})
+
+test('classification hashes are stable and change when trusted evidence changes', () => {
+  const first = classifyWorkRequest({ workRequest, routingPolicy, trustedTaskSnapshot: { labels: ['ui'] } })
+  const reordered = classifyWorkRequest({ workRequest, routingPolicy, trustedTaskSnapshot: { labels: ['ui'], paths: [] } })
+  const changed = classifyWorkRequest({ workRequest, routingPolicy, trustedTaskSnapshot: { labels: ['backend'] } })
+  assert.equal(first.policyHash, reordered.policyHash)
+  assert.equal(first.evidenceHash, reordered.evidenceHash)
+  assert.notEqual(first.evidenceHash, changed.evidenceHash)
+})
+
+test('classification accepts the PR1 role routing object without importing Worker identity', () => {
+  const result = classifyWorkRequest({
+    workRequest,
+    routingPolicy: { change: { maxCandidates: 8, routes: { default: { selectors: [{ worker: 'machine-local-id' }] } } } },
+    trustedTaskSnapshot: { labels: ['unrelated'] },
+  })
+  assert.deepEqual({ taskClass: result.taskClass, source: result.source }, { taskClass: 'default', source: 'default' })
+})
+
+test('deployment fixture maps frontend and default workers outside the WorkRequest', () => {
+  const frontend = classifyWorkRequest({
+    workRequest,
+    routingPolicy: { routes: deploymentFixture.routes, classificationOrder: ['frontend'] },
+    trustedTaskSnapshot: { labels: ['ui'] },
+  })
+  const fallback = classifyWorkRequest({
+    workRequest,
+    routingPolicy: { routes: deploymentFixture.routes, classificationOrder: ['frontend'] },
+    trustedTaskSnapshot: { labels: ['backend'] },
+  })
+  assert.equal(frontend.taskClass, 'frontend')
+  assert.equal(fallback.taskClass, 'default')
+  assert.equal(workRequest.workerId, undefined)
+  assert.equal(frontend.workerId, undefined)
+  assert.equal(frontend.provider, undefined)
+  assert.equal(frontend.model, undefined)
+})
+
+test('WorkerRouteDecision v1 binds request id, role, exact state, class, and hashes', () => {
+  const decision = classifyAndCreateWorkerRouteDecision({
+    workRequest,
+    subjectStateVersion: stateVersion,
+    routingPolicy,
+    trustedTaskSnapshot: { labels: ['ui'] },
+  })
+  assert.deepEqual(Object.keys(decision).sort(), [
+    'evidenceHash', 'policyHash', 'role', 'stateVersion', 'taskClass', 'version', 'workRequestId',
+  ])
+  assert.equal(decision.workRequestId, workRequest.requestId)
+  assert.equal(decision.role, workRequest.role)
+  assert.equal(decision.stateVersion, stateVersion)
+  assert.equal(decision.taskClass, 'frontend')
+  assert.equal(parseWorkerRouteDecision(decision, { workRequest, stateVersion }).workRequestId, workRequest.requestId)
+  assert.throws(
+    () => parseWorkerRouteDecision(decision, { workRequest: { ...workRequest, requestId: 'other-request' } }),
+    /does not match the WorkRequest/,
+  )
+  assert.throws(
+    () => parseWorkerRouteDecision(decision, { stateVersion: 'd'.repeat(64) }),
+    /does not match the subject/,
+  )
+  const classification = classifyWorkRequest({ workRequest, routingPolicy, trustedTaskSnapshot: { labels: ['ui'] } })
+  assert.equal(
+    createWorkerRouteDecision({
+      workRequest,
+      subjectState: { stateVersion },
+      classification,
+    }).stateVersion,
+    stateVersion,
+  )
+})
+
+test('durable decision serialization and body parsing remain strict', () => {
+  const classification = classifyWorkRequest({ workRequest, routingPolicy, trustedTaskSnapshot: { labels: ['ui'] } })
+  const decision = createWorkerRouteDecision({ workRequest, stateVersion, classification, routingPolicy })
+  const serialized = serializeWorkerRouteDecision(decision)
+  assert.equal(serialized, serializeWorkerRouteDecision(JSON.parse(serialized)))
+  const body = workerRouteDecisionBody(decision)
+  assert.deepEqual(parseWorkerRouteDecisionBody(body, { workRequest, stateVersion }), decision)
+  assert.deepEqual(parseWorkerRouteDecision(decision, { routingPolicy }), decision)
+  assert.throws(() => parseWorkerRouteDecision({ ...decision, concreteWorker: 'worker-a' }), /unknown field/)
+  assert.throws(
+    () => parseWorkerRouteDecision({ ...decision, taskClass: 'backend' }, { routingPolicy }),
+    /not configured by routingPolicy/,
+  )
+  assert.throws(() => parseWorkerRouteDecisionBody(`${body}\n${body}`), /one durable/)
+  assert.throws(() => createWorkerRouteDecision({
+    workRequest,
+    stateVersion,
+    classification,
+    routingPolicy: { ...routingPolicy, classifierMinimumConfidence: 0.9 },
+  }), /policyHash does not match/)
+})
+
+test('classification and decision never add a concrete Worker to the WorkRequest', () => {
+  const decision = classifyAndCreateWorkerRouteDecision({
+    workRequest,
+    stateVersion,
+    routingPolicy,
+    trustedTaskSnapshot: { labels: ['ui'] },
+  })
+  assert.equal(workRequest.workerId, undefined)
+  assert.equal(decision.workerId, undefined)
+  assert.equal(decision.provider, undefined)
+  assert.equal(decision.model, undefined)
+})
