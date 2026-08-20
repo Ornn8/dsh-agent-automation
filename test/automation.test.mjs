@@ -1147,6 +1147,13 @@ test('landing uses the exact-head REST merge endpoint without GraphQL pull reque
   assert.match(caller, /AGENT_AUTOMATION_CONTROLLER_LOGIN/)
 })
 
+test('CI repair grants the reusable Worker permission to write PR issue comments', async () => {
+  const reusable = await readFile(new URL('../.github/workflows/dsh-repair.yml', import.meta.url), 'utf8')
+  const caller = await readFile(new URL('../templates/target/.github/workflows/agent-pr-ci-repair.yml', import.meta.url), 'utf8')
+  assert.match(reusable, /^      pull-requests: write$/m)
+  assert.match(caller, /^  pull-requests: write$/m)
+})
+
 test('WorkRequest repository dispatch uses one extensible payload envelope', async () => {
   const reconcileSource = await readFile(new URL('../src/reconcile-reviews.mjs', import.meta.url), 'utf8')
   const issueCaller = await readFile(new URL('../templates/target/.github/workflows/agent-issues.yml', import.meta.url), 'utf8')
