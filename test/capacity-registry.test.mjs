@@ -187,6 +187,35 @@ test('trusted Worker projection retains the complete OpenCode provider/model tup
   }), /provider does not match/)
 })
 
+test('worker-scope keys rotate with the complete trusted provider/model identity', () => {
+  const first = capacityRecordKey({
+    capacityGroup: 'provider-account-1',
+    scope: 'worker',
+    identity: { provider: 'provider-1', model: 'model-1', worker: 'worker-1' },
+  })
+  const rotatedProvider = capacityRecordKey({
+    capacityGroup: 'provider-account-1',
+    scope: 'worker',
+    identity: { provider: 'provider-2', model: 'model-1', worker: 'worker-1' },
+  })
+  const rotatedModel = capacityRecordKey({
+    capacityGroup: 'provider-account-1',
+    scope: 'worker',
+    identity: { provider: 'provider-1', model: 'model-2', worker: 'worker-1' },
+  })
+  assert.notEqual(first, rotatedProvider)
+  assert.notEqual(first, rotatedModel)
+  assert.equal(capacityRecordKey({
+    capacityGroup: 'provider-account-1',
+    scope: 'capacity-group',
+    identity: { provider: 'provider-1', model: 'model-1', worker: 'worker-1' },
+  }), capacityRecordKey({
+    capacityGroup: 'provider-account-1',
+    scope: 'capacity-group',
+    identity: { provider: 'provider-2', model: 'model-2', worker: 'worker-2' },
+  }))
+})
+
 function attempt(overrides = {}) {
   return createCapacityAttempt({
     attemptId: 'attempt-1',
@@ -233,6 +262,30 @@ test('durable registry derives opaque keys from complete identity and persists r
     assert.match(capacityRecordKey({ capacityGroup: 'g'.repeat(128), scope: 'model', provider: 'p'.repeat(32), model: 'm'.repeat(256) }), /^record:[a-f0-9]{64}$/)
     assert.equal((await registry.get(key)).reason, 'model-unavailable')
     assert.ok((await readdir(capacityRegistryPaths(stateRoot).directory)).some(name => name.startsWith('records.')))
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('durable worker records publish a new key after trusted provider and model rotation', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-identity-rotation-'))
+  try {
+    const failure = capacityFailure({ scope: 'worker' })
+    const first = createCapacityRegistry({
+      stateRoot, configurationHash, credentialGeneration, now,
+      workers: { 'worker-1': { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'shared' } },
+    })
+    await first.recordFailure({ capacityGroup: 'shared', sourceWorker: 'worker-1', failure, now })
+    const firstKeys = Object.keys((await readCapacityRegistry(stateRoot)).records)
+    const rotated = createCapacityRegistry({
+      stateRoot, configurationHash, credentialGeneration, now,
+      workers: { 'worker-1': { adapter: 'dsh-web', provider: 'provider-2', model: 'model-2', capacityGroup: 'shared' } },
+    })
+    await rotated.recordFailure({ capacityGroup: 'shared', sourceWorker: 'worker-1', failure, now: now + 1 })
+    const rotatedKeys = Object.keys((await readCapacityRegistry(stateRoot)).records)
+    assert.equal(firstKeys.length, 1)
+    assert.equal(rotatedKeys.length, 2)
+    assert.ok(rotatedKeys.some(key => !firstKeys.includes(key)))
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }

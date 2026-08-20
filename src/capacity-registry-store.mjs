@@ -115,12 +115,15 @@ export function capacityRecordKey(input) {
     model: input.model ?? null,
     worker: input.workerId ?? null,
   }
+  // Keep the sharing semantics of each scope, while binding every identity
+  // field that can distinguish a record at that scope. In particular, a
+  // worker record must rotate when its trusted provider or model changes.
   const tuple = scope === 'provider'
     ? [scope, capacityGroup, identity.provider ?? null]
     : scope === 'model'
       ? [scope, capacityGroup, identity.provider ?? null, identity.model ?? null]
       : scope === 'worker'
-        ? [scope, capacityGroup, identity.worker ?? null]
+        ? [scope, capacityGroup, identity.provider ?? null, identity.model ?? null, identity.worker ?? null]
         : [scope, capacityGroup]
   return `record:${createHash('sha256').update(JSON.stringify(tuple)).digest('hex')}`
 }
@@ -247,6 +250,51 @@ async function readStableSnapshots(directory, prefix) {
   throw new Error(`Capacity ${prefix} snapshots changed during every stable read attempt`)
 }
 
+/**
+ * Read multiple immutable snapshot families against one compaction barrier.
+ * A journal base and its events are only a valid pair when every family has
+ * the same before/after directory enumeration.
+ * @param {string} directory
+ * @param {string[]} prefixes
+ * @returns {Promise<Map<string, Array<{name: string, value: any}>>>}
+ */
+async function readStableSnapshotFamilies(directory, prefixes) {
+  for (let attempt = 0; attempt < READ_RETRIES; attempt += 1) {
+    const first = new Map()
+    for (const prefix of prefixes) {
+      first.set(prefix, await snapshotFiles(directory, prefix))
+    }
+    const values = new Map()
+    let retry = false
+    for (const prefix of prefixes) {
+      const family = []
+      for (const name of first.get(prefix) ?? []) {
+        const value = await readJsonRaceSafe(join(directory, name))
+        if (value === null) {
+          retry = true
+          break
+        }
+        family.push({ name, value })
+      }
+      values.set(prefix, family)
+      if (retry) break
+    }
+    if (!retry) {
+      let stable = true
+      for (const prefix of prefixes) {
+        const second = await snapshotFiles(directory, prefix)
+        if ((first.get(prefix) ?? []).join('\n') !== second.join('\n')) {
+          stable = false
+          break
+        }
+      }
+      if (stable) return values
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 2))
+  }
+  throw new Error(`Capacity snapshot families changed during every stable read attempt`)
+}
+
 /** @param {string} path */
 async function bestEffortRemove(path) {
   try {
@@ -325,7 +373,8 @@ export async function writeCapacityRegistry(stateRoot, document, options = {}) {
 /** @param {string} stateRoot @returns {Promise<{attempts: Record<string, any>[], fence: number}>} */
 async function readAttemptSnapshot(stateRoot) {
   const paths = capacityRegistryPaths(stateRoot)
-  const bases = (await readStableSnapshots(paths.directory, paths.attemptsBasePrefix)).map(({ name, value }) => {
+  const families = await readStableSnapshotFamilies(paths.directory, [paths.attemptsBasePrefix, paths.attemptsEventPrefix])
+  const bases = (families.get(paths.attemptsBasePrefix) ?? []).map(({ name, value }) => {
     const snapshot = parseFencedSnapshot(value, 'Capacity attempt base snapshot')
     const object = exactKeys(snapshot.document, ['version', 'attempts'], 'Capacity attempt journal')
     if (object.version !== 1 || !Array.isArray(object.attempts)) throw new Error('Capacity attempt journal base is invalid')
@@ -335,7 +384,7 @@ async function readAttemptSnapshot(stateRoot) {
   const base = bases.at(-1)
   const attempts = base ? [...base.attempts] : []
   const byId = new Map(attempts.map(item => [item.attemptId, item]))
-  const events = (await readStableSnapshots(paths.directory, paths.attemptsEventPrefix)).map(({ name, value }) => {
+  const events = (families.get(paths.attemptsEventPrefix) ?? []).map(({ name, value }) => {
     const snapshot = parseFencedSnapshot(value, 'Capacity attempt event')
     const object = exactKeys(snapshot.document, ['version', 'attempt'], 'Capacity attempt event')
     if (object.version !== 1) throw new Error('Capacity attempt event is invalid')
@@ -362,13 +411,22 @@ export async function readCapacityAttempts(stateRoot) {
 }
 
 /** @param {string} directory @param {number} fence @returns {Promise<void>} */
-async function compactAttemptStorage(directory, fence) {
+/** @param {string} directory @param {number} fence @param {{assertOwner?: () => Promise<void>}} [options] */
+async function compactAttemptStorage(directory, fence, options = {}) {
   const bases = await readStableSnapshots(directory, 'attempt-base')
   const events = await readStableSnapshots(directory, 'attempt-event')
   const newestBase = bases.map(({ name, value }) => ({ name, ...parseFencedSnapshot(value, 'Capacity attempt base snapshot') }))
     .filter(item => item.fence === fence).sort((left, right) => left.name.localeCompare(right.name)).at(-1)
   if (!newestBase) return
-  await Promise.all(bases.filter(({ name }) => name !== newestBase.name).map(({ name }) => bestEffortRemove(join(directory, name))))
+  // Never remove a snapshot from a newer fencing generation. A stale
+  // compactor may still finish after a new owner publishes its base.
+  await options.assertOwner?.()
+  await Promise.all(bases.map(({ name, value }) => {
+    const snapshot = parseFencedSnapshot(value, 'Capacity attempt base snapshot')
+    return snapshot.fence <= fence && name !== newestBase.name
+      ? bestEffortRemove(join(directory, name))
+      : undefined
+  }).filter(Boolean))
   await Promise.all(events.map(({ name, value }) => {
     const event = parseFencedSnapshot(value, 'Capacity attempt event')
     return event.fence <= fence ? bestEffortRemove(join(directory, name)) : undefined
@@ -395,7 +453,7 @@ async function appendAttemptUnlocked(stateRoot, attempt, options = {}) {
     await writeSnapshot(paths.directory, paths.attemptsBasePrefix, {
       version: 1, fence, revision: 0, document: { version: 1, attempts: [...current.attempts, normalized] },
     }, options)
-    await compactAttemptStorage(paths.directory, fence)
+    await compactAttemptStorage(paths.directory, fence, options)
   }
   return normalized
 }
@@ -469,13 +527,18 @@ async function highestFence(directory, snapshotPrefix, leasePrefix) {
 /** @param {string} directory @param {string} path @param {ReturnType<typeof parseLease>} lease */
 async function createLease(directory, path, lease) {
   await mkdir(directory, { recursive: true })
+  const temporary = `${path}.${randomUUID()}.tmp`
   let handle
   try {
-    handle = await open(path, 'wx')
+    handle = await open(temporary, 'wx')
     await handle.writeFile(`${JSON.stringify(lease)}\n`, 'utf8')
     await handle.sync()
+    await handle.close()
+    handle = undefined
+    await rename(temporary, path)
   } finally {
     await handle?.close()
+    await bestEffortRemove(temporary)
   }
 }
 
