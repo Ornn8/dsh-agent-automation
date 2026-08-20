@@ -30,6 +30,8 @@ Adapters expose a closed failure observation alongside a thrown invocation error
 
 `CapacityRecord v1` is a pure policy value with `available`, `cooldown`, `half-open`, and `disabled` states. It tracks configuration and credential generations, permits only one half-open probe, and reopens disabled identity records only after a relevant generation changes. Only authoritative authentication and billing evidence disables a record; inferred evidence creates at most a short cooldown, and every reported retry time is bounded by reason and confidence. Capacity state is not a `FaultRecord` and does not consume ordinary recovery budgets.
 
+The dependent durable registry projects provider, model, and Worker identity only from trusted Worker snapshots. Its generated record key is an opaque SHA-256 digest over the complete bounded tuple, so a 128-character capacity group and an OpenCode provider/model tuple cannot overflow or collide by string concatenation. Records and attempt events are immutable fenced snapshots. Readers re-enumerate after an identifiable Windows sharing race and choose the stable highest fence/base; they never treat a transiently empty journal as authoritative. Owner-addressed lease files avoid reclaiming a canonical lock from a stale observation; an expired owner can only remove its own lease, and fencing rejects its late snapshot.
+
 ### Repository Gateway
 
 Controller scripts validate and publish GitHub state using the host controller identity or the job-scoped Actions identity. Workers do not require individual GitHub accounts. Current change-role prompts may use the shared host transport to commit and publish; this is an Implementation detail of the trusted local change environment, not part of the Worker Interface.

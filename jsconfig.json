@@ -12,6 +12,7 @@
   "files": [
     "src/capacity-failure.mjs",
     "src/capacity-registry.mjs",
+    "src/capacity-registry-store.mjs",
     "src/controller-mutation-marker.mjs",
     "src/advancement-policy.mjs",
     "src/advancement-runtime.mjs",

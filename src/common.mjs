@@ -429,7 +429,7 @@ export function validateOpenCodeWorkerConfig(config) {
         throw new Error(`workers.${workerId} ${field} must be a non-empty string`)
       }
     }
-    if (!/^[^/\s]+\/[^/\s]+$/.test(worker.model)) {
+    if (!/^[^/\s]+\/[^\s]+$/.test(worker.model)) {
       throw new Error(`workers.${workerId} model must be provider/model`)
     }
     if (!['change', 'review', 'maintenance'].includes(worker.mode)) {

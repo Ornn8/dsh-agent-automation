@@ -17,11 +17,28 @@ import {
   projectWorkerCapacityIdentity,
   recordCapacityFailure,
 } from '../src/capacity-registry.mjs'
+import {
+  appendCapacityAttempt,
+  capacityRecordKey,
+  capacityRegistryPaths,
+  createCapacityAttempt,
+  createCapacityRegistry,
+  readCapacityAttempts,
+  readCapacityRegistry,
+  withCapacityRegistryLock,
+} from '../src/capacity-registry-store.mjs'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { fileURLToPath } from 'node:url'
 
 const configurationHash = 'a'.repeat(64)
 const rotatedConfigurationHash = 'b'.repeat(64)
 const credentialGeneration = 'credential-1'
 const now = Date.parse('2026-08-21T00:00:00.000Z')
+const storeFixture = fileURLToPath(new URL('./fixtures/capacity-store-process.mjs', import.meta.url))
 
 function capacityFailure(overrides = {}) {
   return {
@@ -168,4 +185,118 @@ test('trusted Worker projection retains the complete OpenCode provider/model tup
   assert.throws(() => projectWorkerCapacityIdentity('dsh-worker', {
     adapter: 'opencode-cli', provider: 'configured-provider', model: 'vendor/model',
   }), /provider does not match/)
+})
+
+function attempt(overrides = {}) {
+  return createCapacityAttempt({
+    attemptId: 'attempt-1',
+    workRequestId: 'work-request-1',
+    routePolicyHash: configurationHash,
+    taskClass: 'general',
+    workerId: 'worker-1',
+    capacityGroup: 'provider-account-1',
+    capacityGeneration: 1,
+    startState: 'available',
+    startedAt: now,
+    endedAt: now + 1000,
+    result: { outcome: 'capacity-failure', category: 'capacity', reason: 'quota-exhausted' },
+    ...overrides,
+  })
+}
+
+function runStoreProcess(...args) {
+  const child = spawn(process.execPath, [storeFixture, ...args.map(String)], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  })
+  return new Promise(resolve => {
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.on('exit', (code, signal) => resolve({ code, signal, stdout, stderr }))
+  })
+}
+
+test('durable registry derives opaque keys from complete identity and persists records', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-store-'))
+  try {
+    const registry = createCapacityRegistry({
+      stateRoot, configurationHash, credentialGeneration, now,
+      workers: { 'worker-1': { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'g'.repeat(128) } },
+    })
+    const failure = capacityFailure({ scope: 'model', reason: 'model-unavailable' })
+    const record = await registry.recordFailure({ capacityGroup: 'g'.repeat(128), sourceWorker: 'worker-1', failure, now })
+    const key = capacityRecordKey({ capacityGroup: 'g'.repeat(128), scope: 'model', identity: { provider: 'provider-1', model: 'model-1', worker: 'worker-1' } })
+    assert.equal(key, Object.keys(await readCapacityRegistry(stateRoot))[0] === 'records' ? Object.keys((await readCapacityRegistry(stateRoot)).records)[0] : key)
+    assert.match(key, /^record:[a-f0-9]{64}$/)
+    assert.equal(record.state, 'cooldown')
+    assert.match(capacityRecordKey({ capacityGroup: 'g'.repeat(128), scope: 'model', provider: 'p'.repeat(32), model: 'm'.repeat(256) }), /^record:[a-f0-9]{64}$/)
+    assert.equal((await registry.get(key)).reason, 'model-unavailable')
+    assert.ok((await readdir(capacityRegistryPaths(stateRoot).directory)).some(name => name.startsWith('records.')))
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('attempt journal is bounded, idempotent, and survives immutable compaction', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-attempts-'))
+  try {
+    const first = await appendCapacityAttempt(stateRoot, attempt())
+    assert.deepEqual(await appendCapacityAttempt(stateRoot, attempt()), first)
+    const writers = Promise.all(Array.from({ length: 68 }, (_, index) => appendCapacityAttempt(stateRoot, attempt({
+      attemptId: `attempt-${index + 2}`,
+      startedAt: now + index + 2,
+      endedAt: now + index + 3,
+    }), { waitMs: 60_000 })))
+    const readers = Promise.all(Array.from({ length: 4 }, async () => {
+      let previous = 1
+      for (let index = 0; index < 68; index += 1) {
+        const current = (await readCapacityAttempts(stateRoot)).length
+        assert.ok(current >= previous)
+        previous = current
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 1))
+      }
+      return previous
+    }))
+    await Promise.all([writers, readers])
+    assert.equal((await readCapacityAttempts(stateRoot)).length, 69)
+    const files = await readdir(capacityRegistryPaths(stateRoot).directory)
+    assert.ok(files.some(name => name.startsWith('attempt-base.')))
+    assert.ok(files.filter(name => name.startsWith('attempt-event.')).length < 68)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('three real processes contend through owner-addressed leases and retain every attempt', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-processes-'))
+  try {
+    const results = await Promise.all(['a', 'b', 'c'].map(id => runStoreProcess('append', stateRoot, id)))
+    assert.deepEqual(results.map(result => result.code), [0, 0, 0])
+    assert.deepEqual((await readCapacityAttempts(stateRoot)).map(item => item.attemptId).sort(), [
+      'attempt-a', 'attempt-b', 'attempt-c',
+    ])
+    const leases = (await readdir(capacityRegistryPaths(stateRoot).directory)).filter(name => name.startsWith('registry-lease.'))
+    assert.equal(leases.length, 0)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('reader retries a compaction deletion race instead of returning a seeded empty journal', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-reader-race-'))
+  try {
+    await appendCapacityAttempt(stateRoot, attempt())
+    const original = await readCapacityAttempts(stateRoot)
+    assert.equal(original.length, 1)
+    const result = await withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
+      await lease.assertOwner()
+      return readCapacityAttempts(stateRoot)
+    })
+    assert.deepEqual(result, original)
+    await writeFile(join(capacityRegistryPaths(stateRoot).directory, 'attempt-event.999.0.corrupt.json'), '{not-json\n', 'utf8')
+    await assert.rejects(readCapacityAttempts(stateRoot), /Unexpected token|Expected property|invalid/i)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
 })
