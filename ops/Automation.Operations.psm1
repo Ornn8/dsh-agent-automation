@@ -258,11 +258,115 @@ function Get-EffectiveConfigurationHash {
 function Get-RoleWorkerIds {
   param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][ValidateSet('change', 'review', 'maintenance')][string]$Role)
   $workers = @($Config.operations.roles.$Role.workers)
-  $maximum = if ($Role -eq 'maintenance') { 8 } else { 1 }
+  $maximum = 8
   if (-not $workers.Count -or $workers.Count -gt $maximum -or @($workers | Select-Object -Unique).Count -ne $workers.Count -or @($workers | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count) {
-    throw "operations.roles.$Role.workers must contain $(if ($Role -eq 'maintenance') { '1 through 8' } else { 'exactly one' }) unique Worker id"
+    throw "operations.roles.$Role.workers must contain 1 through 8 unique Worker ids"
   }
   return $workers
+}
+
+function Assert-RoutingIdentifier {
+  param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$Name)
+  if ($Value -isnot [string] -or $Value -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "$Name must be a non-empty routing identifier" }
+  return [string]$Value
+}
+
+function Get-WorkerRouteCandidates {
+  param(
+    [Parameter(Mandatory)]$Config,
+    [Parameter(Mandatory)][ValidateSet('change', 'review')][string]$Role,
+    [Parameter(Mandatory)][string]$RouteName,
+    [string[]]$Visiting = @()
+  )
+  $routes = $Config.operations.routing.$Role.routes
+  $route = $routes.$RouteName
+  if (-not $route) { throw "Unknown $Role route $RouteName" }
+  if ($Visiting -contains $RouteName) { throw "operations.routing.$Role.routes contains a cycle: $(@($Visiting + $RouteName) -join ' -> ')" }
+  $result = @()
+  foreach ($selector in @($route.selectors)) {
+    if ($selector.PSObject.Properties['worker']) {
+      $result += [string]$selector.worker
+    } elseif ($selector.PSObject.Properties['allTags']) {
+      $matches = @()
+      foreach ($workerId in @(Get-RoleWorkerIds -Config $Config -Role $Role)) {
+        $tags = @($Config.workers.$workerId.routingTags)
+        $allMatch = $true
+        foreach ($tag in @($selector.allTags)) { if ($tag -notin $tags) { $allMatch = $false; break } }
+        if ($allMatch) { $matches += $workerId }
+      }
+      $result += @($matches | Sort-Object)
+    } elseif ($selector.PSObject.Properties['route']) {
+      $result += @(Get-WorkerRouteCandidates -Config $Config -Role $Role -RouteName ([string]$selector.route) -Visiting @($Visiting + $RouteName))
+    }
+  }
+  return @($result | Select-Object -Unique)
+}
+
+function Assert-WorkerRoutingConfiguration {
+  param([Parameter(Mandatory)]$Config)
+  if (-not $Config.operations.PSObject.Properties['routing']) { $Config.operations | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{}) }
+  $routing = $Config.operations.routing
+  $unknownRoles = @($routing.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -notin @('change', 'review') })
+  if ($unknownRoles.Count) { throw "operations.routing contains unsupported role(s): $($unknownRoles -join ', ')" }
+  foreach ($role in @('change', 'review')) {
+    if (-not $routing.PSObject.Properties[$role]) {
+      $routing | Add-Member -NotePropertyName $role -NotePropertyValue ([pscustomobject]@{ routes = [pscustomobject]@{ default = [pscustomobject]@{ selectors = @([pscustomobject]@{ worker = @(Get-RoleWorkerIds -Config $Config -Role $role)[0] }) } } })
+    }
+    $roleRouting = $routing.$role
+    if (-not $roleRouting -or $roleRouting -is [Array] -or -not $roleRouting.PSObject.Properties['routes']) { throw "operations.routing.$role.routes must be an object" }
+    $unknownRoleFields = @($roleRouting.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -notin @('maxCandidates', 'routes') })
+    if ($unknownRoleFields.Count) { throw "operations.routing.$role contains unsupported field(s): $($unknownRoleFields -join ', ')" }
+    if (-not $roleRouting.PSObject.Properties['maxCandidates']) { $roleRouting | Add-Member -NotePropertyName maxCandidates -NotePropertyValue 8 }
+    if (($roleRouting.maxCandidates -isnot [int] -and $roleRouting.maxCandidates -isnot [long]) -or [int]$roleRouting.maxCandidates -lt 1 -or [int]$roleRouting.maxCandidates -gt 8) { throw "operations.routing.$role.maxCandidates must be an integer from 1 through 8" }
+    $roleRouting.maxCandidates = [int]$roleRouting.maxCandidates
+    $routes = $roleRouting.routes
+    if (-not $routes -or $routes -is [Array]) { throw "operations.routing.$role.routes must be an object" }
+    $routeNames = @($routes.PSObject.Properties | ForEach-Object { $_.Name })
+    if (-not $routeNames.Count -or $routeNames.Count -gt 32 -or 'default' -notin $routeNames) { throw "operations.routing.$role.routes must contain default and at most 32 routes" }
+    foreach ($routeName in $routeNames) {
+      Assert-RoutingIdentifier -Value $routeName -Name "operations.routing.$role.routes name" | Out-Null
+      $route = $routes.$routeName
+      if (-not $route -or $route -is [Array] -or -not $route.PSObject.Properties['selectors']) { throw "operations.routing.$role.routes.$routeName must declare selectors" }
+      $unknownRouteFields = @($route.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -ne 'selectors' })
+      if ($unknownRouteFields.Count) { throw "operations.routing.$role.routes.$routeName contains unsupported field(s): $($unknownRouteFields -join ', ')" }
+      $selectors = @($route.selectors)
+      if (-not $selectors.Count -or $selectors.Count -gt 16) { throw "operations.routing.$role.routes.$routeName.selectors must contain 1 through 16 selectors" }
+      foreach ($selector in $selectors) {
+        $unknownSelectorFields = @($selector.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -notin @('worker', 'allTags', 'route') })
+        if ($unknownSelectorFields.Count) { throw "operations.routing.$role.routes.$routeName selectors contain unsupported field(s): $($unknownSelectorFields -join ', ')" }
+        $kinds = @($selector.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -in @('worker', 'allTags', 'route') })
+        if ($kinds.Count -ne 1) { throw "operations.routing.$role.routes.$routeName selectors must choose one selector kind" }
+        if ($kinds[0] -eq 'worker') {
+          Assert-RoutingIdentifier -Value $selector.worker -Name "operations.routing.$role.routes.$routeName.worker" | Out-Null
+          if ($selector.worker -notin @(Get-RoleWorkerIds -Config $Config -Role $role)) { throw "Worker $($selector.worker) is not admitted to the $role role" }
+        } elseif ($kinds[0] -eq 'route') {
+          Assert-RoutingIdentifier -Value $selector.route -Name "operations.routing.$role.routes.$routeName.route" | Out-Null
+          if ($selector.route -notin $routeNames) { throw "Unknown $role route $($selector.route)" }
+        } else {
+          $tags = @($selector.allTags)
+          if ($selector.allTags -isnot [Array] -or -not $tags.Count -or $tags.Count -gt 16 -or @($tags | Select-Object -Unique).Count -ne $tags.Count -or @($tags | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }).Count) {
+            throw "operations.routing.$role.routes.$routeName.allTags must contain 1 through 16 unique tags"
+          }
+        }
+      }
+      $candidates = @(Get-WorkerRouteCandidates -Config $Config -Role $role -RouteName $routeName)
+      if (-not $candidates.Count) { throw "operations.routing.$role.routes.$routeName resolves to no admitted Worker" }
+      $admitted = @(Get-RoleWorkerIds -Config $Config -Role $role)
+      if (@($candidates | Where-Object { $_ -notin $admitted }).Count) { throw "operations.routing.$role.routes.$routeName resolves outside the $role role pool" }
+      if ($role -eq 'review' -and @($candidates | Where-Object { -not [bool]$Config.workers.$_.capabilities.hardReadOnlyReview }).Count) { throw "operations.routing.review.routes.$routeName includes a Worker without hard read-only isolation" }
+    }
+  }
+}
+
+function Resolve-WorkerCandidates {
+  param(
+    [Parameter(Mandatory)]$Config,
+    [Parameter(Mandatory)][ValidateSet('change', 'review')][string]$Role,
+    [string]$Route = 'default'
+  )
+  Assert-RoutingIdentifier -Value $Route -Name 'route' | Out-Null
+  $candidates = @(Get-WorkerRouteCandidates -Config $Config -Role $Role -RouteName $Route)
+  return @($candidates | Select-Object -Unique | Select-Object -First ([int]$Config.operations.routing.$Role.maxCandidates))
 }
 
 function Get-DerivedWorkerCapabilities {
@@ -708,10 +812,17 @@ function Read-OperationsConfig {
         if (-not $worker.PSObject.Properties['credentialIsolationDir']) { $worker | Add-Member -NotePropertyName credentialIsolationDir -NotePropertyValue (Join-Path $ops.stateRoot (Join-Path 'credentials' $workerId)) }
         $worker | Add-Member -NotePropertyName githubLogin -NotePropertyValue $config.github.login -Force
       }
+      if (-not $worker.PSObject.Properties['capacityGroup']) { $worker | Add-Member -NotePropertyName capacityGroup -NotePropertyValue $workerId }
+      if ($worker.capacityGroup -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "workers.$workerId.capacityGroup must be a non-empty routing identifier" }
+      if (-not $worker.PSObject.Properties['routingTags']) { $worker | Add-Member -NotePropertyName routingTags -NotePropertyValue @() }
+      $routingTags = @($worker.routingTags)
+      if ($routingTags.Count -gt 16 -or @($routingTags | Select-Object -Unique).Count -ne $routingTags.Count -or @($routingTags | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }).Count) { throw "workers.$workerId.routingTags must contain at most 16 unique tags" }
+      $worker.routingTags = @($routingTags)
     }
   }
   $unassignedWorkers = @($config.workers.PSObject.Properties.Name | Where-Object { -not $assignedWorkers.ContainsKey($_) })
   if ($unassignedWorkers.Count) { throw "Every Worker must have exactly one role binding: $($unassignedWorkers -join ', ')" }
+  Assert-WorkerRoutingConfiguration -Config $config
   Assert-AgentWorkerConfiguration -Workers $config.workers
   $maintenanceWorkers = @(Get-RoleWorkerIds -Config $config -Role maintenance)
   $maintenanceReviewWorker = @(Get-RoleWorkerIds -Config $config -Role review)[0]
@@ -737,17 +848,20 @@ function Read-OperationsConfig {
       }
     }
     if (@($mapping.requiredChecks | Where-Object { $_ -in @($script:ReviewRequiredCheckName, $script:LegacyReviewRequiredCheckName) }).Count) { throw 'repositoryMappings.requiredChecks must not contain a controller review authority' }
-    $changeWorker = $config.workers.(@(Get-RoleWorkerIds -Config $config -Role change)[0])
-    $reviewWorker = $config.workers.(@(Get-RoleWorkerIds -Config $config -Role review)[0])
-    foreach ($skill in @('github-issue-work', 'github-pr-repair')) {
-      if ($skill -notin @($changeWorker.capabilities.skills)) { throw "change role Worker lacks $skill" }
+    foreach ($workerId in @(Get-RoleWorkerIds -Config $config -Role change)) {
+      $changeWorker = $config.workers.$workerId
+      foreach ($skill in @('github-issue-work', 'github-pr-repair')) {
+        if ($skill -notin @($changeWorker.capabilities.skills)) { throw "change role Worker $workerId lacks $skill" }
+      }
+      if ('agent-readiness-canary' -notin @($changeWorker.capabilities.skills)) { throw "change role Worker $workerId lacks agent-readiness-canary" }
     }
-    foreach ($skill in @('github-pr-review', 'github-repository-supervision')) {
-      if ($skill -notin @($reviewWorker.capabilities.skills)) { throw "review role Worker lacks $skill" }
-    }
-    if (-not [bool]$reviewWorker.capabilities.hardReadOnlyReview) { throw 'review role Worker lacks hard read-only isolation' }
-    foreach ($worker in @($changeWorker, $reviewWorker)) {
-      if ('agent-readiness-canary' -notin @($worker.capabilities.skills)) { throw 'role Worker lacks agent-readiness-canary' }
+    foreach ($workerId in @(Get-RoleWorkerIds -Config $config -Role review)) {
+      $reviewWorker = $config.workers.$workerId
+      foreach ($skill in @('github-pr-review', 'github-repository-supervision')) {
+        if ($skill -notin @($reviewWorker.capabilities.skills)) { throw "review role Worker $workerId lacks $skill" }
+      }
+      if (-not [bool]$reviewWorker.capabilities.hardReadOnlyReview) { throw "review role Worker $workerId lacks hard read-only isolation" }
+      if ('agent-readiness-canary' -notin @($reviewWorker.capabilities.skills)) { throw "review role Worker $workerId lacks agent-readiness-canary" }
     }
   }
 
@@ -2409,5 +2523,5 @@ Export-ModuleMember -Function @(
   'Test-ScheduledTaskRuntimePath',
   'ConvertTo-ManifestEntry', 'Get-InstallManifestPath', 'New-InstallManifest', 'Read-InstallManifest',
   'Write-InstallManifest', 'Set-ManifestEntry', 'Remove-ManifestEntry', 'Get-ManagedArtifactState',
-  'Get-DshWebWorkerRoutes', 'Test-DshWebHost', 'Invoke-OperationsSelfTest'
+  'Get-DshWebWorkerRoutes', 'Test-DshWebHost', 'Resolve-WorkerCandidates', 'Invoke-OperationsSelfTest'
 )

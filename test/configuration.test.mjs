@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { resolveMachineConfig, roleWorkerIds } from '../src/machine-config.mjs'
+import { resolveMachineConfig, resolveWorkerCandidates, roleWorkerIds } from '../src/machine-config.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const readJson = async relative => JSON.parse(await readFile(new URL(`../${relative}`, import.meta.url), 'utf8'))
@@ -21,9 +21,55 @@ test('minimal configuration stays short and resolves the complete role topology'
   assert.deepEqual(roleWorkerIds(config, 'review'), ['review'])
   assert.deepEqual(roleWorkerIds(config, 'maintenance'), ['maintenance'])
   assert.equal(config.workers.change.mode, 'change')
+  assert.equal(config.workers.change.capacityGroup, 'change')
+  assert.deepEqual(config.workers.change.routingTags, [])
   assert.equal(config.workers.review.capabilities.hardReadOnlyReview, true)
   assert.equal(config.workers.maintenance.githubLogin, input.github.login)
   assert.match(config.configurationHash, /^[a-f0-9]{64}$/)
+})
+
+test('bounded change and review pools resolve through deterministic default and tag routes', async () => {
+  const [defaults, input] = await Promise.all([
+    readJson('ops/config.defaults.json'), readJson('config.minimal.json'),
+  ])
+  const pooled = structuredClone(input)
+  pooled.workers.reviewSecondary = { ...pooled.workers.review, routingTags: ['fast', 'ui'] }
+  pooled.operations.roles.review.workers = ['review', 'reviewSecondary']
+  pooled.operations.routing = {
+    review: {
+      routes: {
+        default: { selectors: [{ worker: 'review' }] },
+        frontend: { selectors: [{ allTags: ['ui'] }, { route: 'default' }] },
+      },
+    },
+  }
+  const config = resolveMachineConfig({ defaults, input: pooled, configurationPath: `${root}/config.minimal.json` })
+  assert.deepEqual(roleWorkerIds(config, 'review'), ['review', 'reviewSecondary'])
+  assert.deepEqual(resolveWorkerCandidates({ config, role: 'review' }), ['review'])
+  assert.deepEqual(resolveWorkerCandidates({ config, role: 'review', routeDecision: { route: 'frontend' } }), ['reviewSecondary', 'review'])
+})
+
+test('routing configuration rejects route cycles and empty non-default routes', async () => {
+  const [defaults, input] = await Promise.all([
+    readJson('ops/config.defaults.json'), readJson('config.minimal.json'),
+  ])
+  const cyclic = structuredClone(input)
+  cyclic.operations.routing = {
+    change: { routes: { default: { selectors: [{ route: 'loop' }] }, loop: { selectors: [{ route: 'default' }] } } },
+  }
+  assert.throws(
+    () => resolveMachineConfig({ defaults, input: cyclic, configurationPath: `${root}/config.minimal.json` }),
+    /contains a cycle/,
+  )
+
+  const empty = structuredClone(input)
+  empty.operations.routing = {
+    change: { routes: { default: { selectors: [{ worker: 'change' }] }, frontend: { selectors: [{ allTags: ['missing'] }] } } },
+  }
+  assert.throws(
+    () => resolveMachineConfig({ defaults, input: empty, configurationPath: `${root}/config.minimal.json` }),
+    /resolves to no admitted Worker/,
+  )
 })
 
 test('configuration identity excludes credential generation but includes operational changes', async () => {

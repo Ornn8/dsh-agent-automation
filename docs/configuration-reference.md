@@ -22,15 +22,15 @@ The public file contains intent. [`ops/config.defaults.json`](../ops/config.defa
 
 ## Worker fields
 
-Every Worker requires `adapter`. The Adapter determines the remaining fields. Role-owned values are not accepted in the Worker object: `mode`, capabilities, review isolation, and maintenance `githubLogin` are derived from `operations.roles` and the Adapter implementation.
+Every Worker requires `adapter`. The Adapter determines the remaining fields. Role-owned values are not accepted in the Worker object: `mode`, capabilities, review isolation, and maintenance `githubLogin` are derived from `operations.roles` and the Adapter implementation. `capacityGroup` defaults to the Worker id and identifies a machine-local capacity boundary for later capacity handling; it does not activate failover. `routingTags` defaults to an empty list and is only metadata for the bounded route selectors.
 
 | Adapter | Required fields | Optional fields |
 | --- | --- | --- |
-| `dsh-web` | `baseUrl`, `agentPreset`, `permissionPreset`, `provider`, `model`, `reasoningEffort` | None |
-| `codex-app` | `node`, `script`, `home`, `model`, `effort`, `keep` | None |
-| `opencode-cli` | `model`, `variant` | `executable`, `agent`, `credentialIsolationDir`, `healthArgs` |
-| `claude-code-cli` | `model`, `effort` | `executable`, `credentialIsolationDir`, `healthArgs` |
-| `command-json` | `executable` | `args`, `healthArgs`, `credentialIsolationDir` |
+| `dsh-web` | `baseUrl`, `agentPreset`, `permissionPreset`, `provider`, `model`, `reasoningEffort` | `capacityGroup`, `routingTags` |
+| `codex-app` | `node`, `script`, `home`, `model`, `effort`, `keep` | `capacityGroup`, `routingTags` |
+| `opencode-cli` | `model`, `variant` | `executable`, `agent`, `credentialIsolationDir`, `healthArgs`, `capacityGroup`, `routingTags` |
+| `claude-code-cli` | `model`, `effort` | `executable`, `credentialIsolationDir`, `healthArgs`, `capacityGroup`, `routingTags` |
+| `command-json` | `executable` | `args`, `healthArgs`, `credentialIsolationDir`, `capacityGroup`, `routingTags` |
 
 `executable` defaults to `opencode` for OpenCode and `claude` for Claude Code. Windows deployments must override it with a native executable when the discovered command is a `.cmd`, `.bat`, or `.ps1` shim because Agent processes start without a command shell. A review Worker also derives `gitExecutable`. A maintenance Worker derives `credentialIsolationDir` under `operations.stateRoot` unless it is explicitly configured. `args` are the command-json invocation arguments; `healthArgs` replace normal arguments for a keyless readiness check. `agent` selects an OpenCode Agent. Review workspace paths are not configurable: installation derives one fixed slot and lease from `operations.stateRoot` and each exact review replica id. `keep` limits retained Codex review tasks. `effort` and `reasoningEffort` are Adapter-specific reasoning controls.
 
@@ -47,7 +47,8 @@ Every Worker requires `adapter`. The Adapter determines the remaining fields. Ro
 | `runner.version` | Yes | None | Pinned Actions runner version, at least 2.334.0. |
 | `runner.artifacts` | Yes | None | Platform-keyed official runner archives. |
 | `repositoryMappings` | Yes | None | Target repositories and their declared CI projection. |
-| `roles` | Yes | None | The single role-to-Worker routing table and runner topology. |
+| `roles` | Yes | None | The role admission pools and runner topology. Change and review pools are bounded to eight Workers. |
+| `routing` | No | Default route per change/review role | Ordered, bounded route selectors for change and review. The generated default route selects the first admitted Worker, preserving the existing single-Worker behavior. |
 | `dshWebHost` | No | Disabled | Optional supervised local DSH Web Host. |
 
 ### Runner artifacts
@@ -60,9 +61,13 @@ Each item requires `repository`, `ciWorkflows`, and `requiredChecks`. `repositor
 
 ### Roles
 
-`roles` has exactly `change`, `review`, and `maintenance`. Each role requires `workers`; change and review accept exactly one Worker, while maintenance accepts an ordered list of one through eight Workers for finite failover. A Worker cannot appear in two roles.
+`roles` has exactly `change`, `review`, and `maintenance`. Each role requires `workers`; every role accepts one through eight Workers. A Worker cannot appear in two roles. The change and review pools are admission allowlists; PR1 does not activate runtime failover.
 
 Each role may set `runnerNamePrefix`, `replicas`, and `labels`. Defaults are `agent-change`/`agent-change`, `agent-review`/`agent-reviewer`, and `agent-maint`/`agent-maintenance`; every role defaults to one replica. The maintenance role is fixed to one replica. Required role labels cannot be removed.
+
+### Routing
+
+`routing.change.routes` and `routing.review.routes` are bounded named route maps. Each role routing object may set `maxCandidates` from 1 through 8 (default 8). The `routes` map contains named route objects, and every route has one through sixteen ordered `selectors`; a selector is exactly one of `{ "worker": "id" }`, `{ "allTags": ["tag"] }`, or `{ "route": "other-route" }`. Worker selectors must name an admitted Worker, tag selectors order matching Workers by id, and route references must be acyclic. Every non-default route must resolve to at least one admitted Worker, and review routes may contain only Workers with hard read-only isolation. When routing is omitted, the loader derives a `default` route selecting the first role Worker. Candidate resolution is deterministic and only provides selection metadata; PR1 does not perform failover or capacity selection.
 
 ### DSH Web Host
 

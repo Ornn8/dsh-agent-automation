@@ -227,6 +227,53 @@ Describe 'Installer and uninstaller fail-closed guards' {
   }
 }
 
+Describe 'Worker routing foundation' {
+  It 'accepts bounded review pools and resolves deterministic tag candidates' {
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
+    $secondary = $config.workers.review | ConvertTo-Json -Depth 32 | ConvertFrom-Json -Depth 32
+    $secondary | Add-Member -NotePropertyName routingTags -NotePropertyValue @('fast')
+    $config.workers | Add-Member -NotePropertyName reviewSecondary -NotePropertyValue $secondary
+    $config.operations.roles.review.workers = @('review', 'reviewSecondary')
+    $config.operations | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{
+        review = [pscustomobject]@{ routes = [pscustomobject]@{
+            default = [pscustomobject]@{ selectors = @([pscustomobject]@{ worker = 'review' }) }
+            fast = [pscustomobject]@{ selectors = @([pscustomobject]@{ allTags = @('fast') }, [pscustomobject]@{ route = 'default' }) }
+        } }
+      })
+    $fixtureRoot = Join-Path $script:RepositoryRoot '.test-worker-routing'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue (Join-Path $fixtureRoot 'runtime') -Force
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue (Join-Path $fixtureRoot 'state') -Force
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $fixtureRoot 'state/logs') -Force
+    $path = Join-Path $TestDrive 'worker-routing.json'
+    [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+
+    $loaded = Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders
+    @($loaded.Config.operations.roles.review.workers) | Should -BeExactly @('review', 'reviewSecondary')
+    $loaded.Config.workers.review.capacityGroup | Should -BeExactly 'review'
+    @((Resolve-WorkerCandidates -Config $loaded.Config -Role review -Route fast)) | Should -BeExactly @('reviewSecondary', 'review')
+    if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
+  }
+
+  It 'rejects cyclic routes before installation planning' {
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
+    $config.operations | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{
+        change = [pscustomobject]@{ routes = [pscustomobject]@{
+            default = [pscustomobject]@{ selectors = @([pscustomobject]@{ route = 'loop' }) }
+            loop = [pscustomobject]@{ selectors = @([pscustomobject]@{ route = 'default' }) }
+        } }
+      })
+    $fixtureRoot = Join-Path $script:RepositoryRoot '.test-worker-routing-cycle'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue (Join-Path $fixtureRoot 'runtime') -Force
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue (Join-Path $fixtureRoot 'state') -Force
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $fixtureRoot 'state/logs') -Force
+    $path = Join-Path $TestDrive 'worker-routing-cycle.json'
+    [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+
+    { Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders } | Should -Throw '*contains a cycle*'
+    if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
+  }
+}
+
 Describe 'Effective configuration explanation' {
   It 'resolves maintenance workers from the role binding used by online doctor' {
     $doctor = Get-Content -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\doctor.ps1') -Raw

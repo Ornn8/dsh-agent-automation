@@ -3,7 +3,7 @@ import { rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { normalizeWorkerConfig } from './agent-worker.mjs'
 import { dshModelSelection, dshSessionPresets } from './dsh-web-session.mjs'
-import { readMachineConfig, roleWorkerIds } from './machine-config.mjs'
+import { readMachineConfig, resolveWorkerCandidates, roleWorkerIds } from './machine-config.mjs'
 
 /** Run a process without a command shell and return its captured output. */
 export function run(command, args, options = {}) {
@@ -249,25 +249,26 @@ export function validateWorkerCapabilities(config) {
     if (productWorkers.has(workerId)) throw new Error(`Maintenance worker ${workerId} cannot also serve a product role`)
   }
   for (const repository of config?.repositories || []) {
-    const changeWorkerId = resolveRepositoryWorker(config, repository, 'change')
-    const reviewWorkerId = resolveRepositoryWorker(config, repository, 'review')
-    const changeSkills = new Set(config.workers[changeWorkerId].capabilities.skills)
-    const reviewCapabilities = config.workers[reviewWorkerId].capabilities
-    if (config.workers[changeWorkerId].capabilities.trustDomain !== 'change'
-      || reviewCapabilities.trustDomain !== 'review') {
-      throw new Error(`Repository ${repository} workers must use distinct change and review trust domains`)
+    const changeWorkers = resolveRoleWorkers(config, 'change', repository)
+    const reviewWorkers = resolveRoleWorkers(config, 'review', repository)
+    for (const workerId of changeWorkers) {
+      const capabilities = config.workers[workerId].capabilities
+      const changeSkills = new Set(capabilities.skills)
+      if (capabilities.trustDomain !== 'change') throw new Error(`Repository ${repository} change Workers must use the change trust domain`)
+      for (const skill of CHANGE_SKILLS) {
+        if (!changeSkills.has(skill)) throw new Error(`Repository ${repository} change Worker ${workerId} lacks ${skill}`)
+      }
+      if (!changeSkills.has(READINESS_SKILL)) throw new Error(`Repository ${repository} change Worker ${workerId} lacks ${READINESS_SKILL}`)
     }
-    for (const skill of CHANGE_SKILLS) {
-      if (!changeSkills.has(skill)) throw new Error(`Repository ${repository} change worker lacks ${skill}`)
-    }
-    for (const skill of REVIEW_SKILLS) {
-      if (!reviewCapabilities.skills.includes(skill)) throw new Error(`Repository ${repository} review worker lacks ${skill}`)
-    }
-    if (!changeSkills.has(READINESS_SKILL) || !reviewCapabilities.skills.includes(READINESS_SKILL)) {
-      throw new Error(`Repository ${repository} workers must implement ${READINESS_SKILL}`)
-    }
-    if (!reviewCapabilities.hardReadOnlyReview) {
-      throw new Error(`Repository ${repository} review worker lacks hard read-only isolation`)
+    for (const workerId of reviewWorkers) {
+      const capabilities = config.workers[workerId].capabilities
+      if (capabilities.trustDomain !== 'review') throw new Error(`Repository ${repository} review Workers must use the review trust domain`)
+      for (const skill of REVIEW_SKILLS) {
+        if (!capabilities.skills.includes(skill)) throw new Error(`Repository ${repository} review Worker ${workerId} lacks ${skill}`)
+      }
+      if (!capabilities.skills.includes(READINESS_SKILL) || !capabilities.hardReadOnlyReview) {
+        throw new Error(`Repository ${repository} review Worker ${workerId} lacks hard read-only isolation or ${READINESS_SKILL}`)
+      }
     }
   }
 }
@@ -303,7 +304,13 @@ export function validateCodexWorkerConfig(config) {
 /** Resolve a worker from the one local mapping permitted for a repository role. */
 export function resolveRepositoryWorker(config, repository, role) {
   if (!['change', 'review'].includes(role)) throw new Error(`Unknown agent role ${role}`)
-  const [workerId] = resolveRoleWorkers(config, role, repository)
+  resolveRoleWorkers(config, role, repository)
+  const [workerId] = resolveWorkerCandidates({
+    config,
+    role,
+    routeDecision: { route: 'default' },
+  })
+  if (!workerId) throw new Error(`Repository ${repository} has no Worker in its default ${role} route`)
   return workerId
 }
 
