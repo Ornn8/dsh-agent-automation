@@ -227,6 +227,88 @@ Describe 'Installer and uninstaller fail-closed guards' {
   }
 }
 
+Describe 'Worker routing foundation' {
+  It 'preserves legacy Worker ids and matches the shared ordinal routing fixture' {
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
+    $fixture = Get-Content (Join-Path $script:RepositoryRoot 'test\fixtures\worker-routing.json') -Raw | ConvertFrom-Json -Depth 32
+    foreach ($workerId in @($fixture.workerIds)) {
+      $worker = $config.workers.review | ConvertTo-Json -Depth 32 | ConvertFrom-Json -Depth 32
+      $worker | Add-Member -NotePropertyName routingTags -NotePropertyValue @($fixture.routingTags.$workerId)
+      $config.workers | Add-Member -NotePropertyName $workerId -NotePropertyValue $worker
+    }
+    $config.workers.PSObject.Properties.Remove('review')
+    $config.operations.roles.review.workers = @($fixture.workerIds)
+    $fixtureRoot = Join-Path $script:RepositoryRoot '.test-worker-routing'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue (Join-Path $fixtureRoot 'runtime') -Force
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue (Join-Path $fixtureRoot 'state') -Force
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $fixtureRoot 'state/logs') -Force
+    $path = Join-Path $TestDrive 'worker-routing.json'
+    [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+
+    $legacy = Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders
+    @($legacy.Config.operations.roles.review.workers) | Should -BeExactly @($fixture.workerIds)
+    @((Resolve-WorkerCandidates -Config $legacy.Config -Role review -Route default)) | Should -BeExactly @($fixture.workerIds[0])
+    foreach ($workerId in @($fixture.workerIds)) {
+      $legacy.Config.workers.$workerId.capacityGroup | Should -BeExactly $fixture.expected.capacityGroups.$workerId
+    }
+
+    $config.operations | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{
+        review = [pscustomobject]@{ routes = $fixture.routes }
+      })
+    [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+    $routed = Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders
+    @((Resolve-WorkerCandidates -Config $routed.Config -Role review -Route default)) | Should -BeExactly @($fixture.expected.default)
+    @((Resolve-WorkerCandidates -Config $routed.Config -Role review -Route frontend)) | Should -BeExactly @($fixture.expected.frontend)
+    @((Resolve-WorkerCandidates -Config $routed.Config -Role review -Route caseExact)) | Should -BeExactly @($fixture.expected.caseExact)
+    $fixture.workerIds[0] | Should -Not -BeExactly $fixture.expected.default[0]
+    if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
+  }
+
+  It 'compiles the maximum bounded shared-subgraph route DAG' {
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
+    $routes = [pscustomobject]@{ default = [pscustomobject]@{ selectors = @([pscustomobject]@{ worker = 'change' }) } }
+    $previous = 'default'
+    foreach ($index in 1..31) {
+      $routeName = "route-$index"
+      $selectors = @(1..16 | ForEach-Object { [pscustomobject]@{ route = $previous } })
+      $routes | Add-Member -NotePropertyName $routeName -NotePropertyValue ([pscustomobject]@{ selectors = $selectors })
+      $previous = $routeName
+    }
+    $config.operations | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{
+        change = [pscustomobject]@{ routes = $routes }
+      })
+    $fixtureRoot = Join-Path $script:RepositoryRoot '.test-worker-routing-dag'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue (Join-Path $fixtureRoot 'runtime') -Force
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue (Join-Path $fixtureRoot 'state') -Force
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $fixtureRoot 'state/logs') -Force
+    $path = Join-Path $TestDrive 'worker-routing-dag.json'
+    [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+
+    $loaded = Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders
+    @((Resolve-WorkerCandidates -Config $loaded.Config -Role change -Route $previous)) | Should -BeExactly @('change')
+    if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
+  }
+
+  It 'rejects cyclic routes before installation planning' {
+    $config = Get-Content (Join-Path $script:RepositoryRoot 'config.minimal.json') -Raw | ConvertFrom-Json -Depth 32
+    $config.operations | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{
+        change = [pscustomobject]@{ routes = [pscustomobject]@{
+            default = [pscustomobject]@{ selectors = @([pscustomobject]@{ route = 'loop' }) }
+            loop = [pscustomobject]@{ selectors = @([pscustomobject]@{ route = 'default' }) }
+        } }
+      })
+    $fixtureRoot = Join-Path $script:RepositoryRoot '.test-worker-routing-cycle'
+    $config.operations | Add-Member -NotePropertyName installRoot -NotePropertyValue (Join-Path $fixtureRoot 'runtime') -Force
+    $config.operations | Add-Member -NotePropertyName stateRoot -NotePropertyValue (Join-Path $fixtureRoot 'state') -Force
+    $config.operations | Add-Member -NotePropertyName logsRoot -NotePropertyValue (Join-Path $fixtureRoot 'state/logs') -Force
+    $path = Join-Path $TestDrive 'worker-routing-cycle.json'
+    [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 32), [Text.UTF8Encoding]::new($false))
+
+    { Read-OperationsConfig -Configuration $path -AllowExamplePlaceholders } | Should -Throw '*contains a cycle*'
+    if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
+  }
+}
+
 Describe 'Effective configuration explanation' {
   It 'resolves maintenance workers from the role binding used by online doctor' {
     $doctor = Get-Content -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\doctor.ps1') -Raw

@@ -1,0 +1,27 @@
+{
+  "workerIds": ["review/beta", "review alpha"],
+  "routingTags": {
+    "review/beta": ["ui"],
+    "review alpha": ["ui", "UI"]
+  },
+  "routes": {
+    "default": {
+      "selectors": [{ "worker": "review alpha" }]
+    },
+    "frontend": {
+      "selectors": [{ "allTags": ["ui"] }, { "route": "default" }]
+    },
+    "caseExact": {
+      "selectors": [{ "allTags": ["ui", "UI"] }]
+    }
+  },
+  "expected": {
+    "capacityGroups": {
+      "review/beta": "worker-74c798bf0b978643a3061c4d8016cd182f9d633a69b5c9509459d5843505a791",
+      "review alpha": "worker-3413a3fee3732adfbcaad2d69ac969b5b11e1573152b710b56094445afdbf97a"
+    },
+    "default": ["review alpha"],
+    "frontend": ["review alpha", "review/beta"],
+    "caseExact": ["review alpha"]
+  }
+}

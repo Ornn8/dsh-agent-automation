@@ -6,6 +6,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROLE_NAMES = ['change', 'review', 'maintenance']
+const ROUTING_ROLE_NAMES = ['change', 'review']
+const MAX_ROUTING_ROUTES = 32
+const MAX_ROUTE_SELECTORS = 16
+const MAX_ROUTING_TAGS = 16
 const DEFAULTS_PATH = fileURLToPath(new URL('../ops/config.defaults.json', import.meta.url))
 const REMOVED_FIELDS = [
   'schemaVersion', 'configRevision', 'credentialRevision', 'repositories',
@@ -67,13 +71,179 @@ function canonicalRepository(value, field) {
 export function roleWorkerIds(config, role) {
   if (!ROLE_NAMES.includes(role)) throw new Error(`Unknown agent role ${role}`)
   const workers = config?.operations?.roles?.[role]?.workers
-  const maximum = role === 'maintenance' ? 8 : 1
+  const maximum = 8
   if (!Array.isArray(workers) || workers.length < 1 || workers.length > maximum
     || workers.some(workerId => typeof workerId !== 'string' || !workerId.trim())
     || new Set(workers).size !== workers.length) {
-    throw new Error(`operations.roles.${role}.workers must contain ${role === 'maintenance' ? '1 through 8' : 'exactly one'} unique Worker id`)
+    throw new Error(`operations.roles.${role}.workers must contain 1 through 8 unique Worker ids`)
   }
   return [...workers]
+}
+
+/** Validate a bounded routing identifier. */
+/** @param {unknown} value @param {string} field @returns {string} */
+function routingIdentifier(value, field) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
+    throw new Error(`${field} must be a non-empty routing identifier`)
+  }
+  return value
+}
+
+/** Return a route name from the optional PR1 route decision input. */
+/** @param {unknown} routeDecision @returns {string} */
+function routeNameFromDecision(routeDecision) {
+  if (routeDecision === undefined || routeDecision === null) return 'default'
+  if (typeof routeDecision === 'string') return routingIdentifier(routeDecision, 'route')
+  if (typeof routeDecision !== 'object' || Array.isArray(routeDecision)) throw new Error('routeDecision must be an object or route name')
+  const decision = /** @type {Record<string, any>} */ (routeDecision)
+  const route = decision.route ?? decision.taskClass ?? 'default'
+  return routingIdentifier(route, 'routeDecision.route')
+}
+
+/** Normalize bounded Worker-local routing metadata. */
+/** @param {MachineConfig} worker @param {string} workerId */
+function normalizeWorkerRoutingMetadata(worker, workerId) {
+  const defaultCapacityGroup = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workerId)
+    ? workerId
+    : `worker-${createHash('sha256').update(workerId).digest('hex')}`
+  const capacityGroup = worker.capacityGroup ?? defaultCapacityGroup
+  worker.capacityGroup = routingIdentifier(capacityGroup, `workers.${workerId}.capacityGroup`)
+  const tags = worker.routingTags ?? []
+  if (!Array.isArray(tags) || tags.length > MAX_ROUTING_TAGS || new Set(tags).size !== tags.length
+    || tags.some(tag => typeof tag !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(tag))) {
+    throw new Error(`workers.${workerId}.routingTags must contain at most ${MAX_ROUTING_TAGS} unique tags`)
+  }
+  worker.routingTags = [...tags]
+}
+
+/** Compare routing identifiers by ordinal UTF-16 code units. */
+/** @param {string} left @param {string} right @returns {number} */
+function compareOrdinal(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+/** Compile one validated route DAG to memoized deterministic candidates. */
+/** @param {MachineConfig} config @param {string} role @returns {Map<string, string[]>} */
+function compileWorkerRoutes(config, role) {
+  const routes = config?.operations?.routing?.[role]?.routes
+  const roleWorkers = roleWorkerIds(config, role)
+  const memo = new Map()
+  /** @param {string} routeName @param {string[]} visiting @returns {string[]} */
+  const visit = (routeName, visiting = []) => {
+    const cached = memo.get(routeName)
+    if (cached) return cached
+    const route = routes?.[routeName]
+    if (!route) throw new Error(`Unknown ${role} route ${routeName}`)
+    if (visiting.includes(routeName)) throw new Error(`operations.routing.${role}.routes contains a cycle: ${[...visiting, routeName].join(' -> ')}`)
+    const result = []
+    for (const selector of route.selectors) {
+      if (selector.worker !== undefined) result.push(selector.worker)
+      else if (selector.allTags !== undefined) {
+        const matching = roleWorkers
+          .filter(workerId => selector.allTags.every(/** @param {any} tag */ tag => config.workers[workerId].routingTags.includes(tag)))
+          .sort(compareOrdinal)
+        result.push(...matching)
+      } else if (selector.route !== undefined) {
+        result.push(...visit(selector.route, [...visiting, routeName]))
+      }
+    }
+    const candidates = [...new Set(result)]
+    memo.set(routeName, candidates)
+    return candidates
+  }
+  for (const routeName of Object.keys(routes || {})) visit(routeName)
+  return memo
+}
+
+/** Validate and compile PR1 role routing configuration. */
+/** @param {MachineConfig} config @returns {Map<string, Map<string, string[]>>} */
+function compileRoutingConfig(config) {
+  const routing = config.operations.routing
+  if (!routing || typeof routing !== 'object' || Array.isArray(routing)) throw new Error('operations.routing must be an object')
+  const unknownRoles = Object.keys(routing).filter(role => !ROUTING_ROLE_NAMES.includes(role))
+  if (unknownRoles.length) throw new Error(`operations.routing contains unsupported role(s): ${unknownRoles.join(', ')}`)
+  const compiled = new Map()
+  for (const role of ROUTING_ROLE_NAMES) {
+    const roleRouting = routing[role]
+    if (!roleRouting || typeof roleRouting !== 'object' || Array.isArray(roleRouting)) throw new Error(`operations.routing.${role} must be an object`)
+    const unknownRoleFields = Object.keys(roleRouting).filter(field => !['maxCandidates', 'routes'].includes(field))
+    if (unknownRoleFields.length) throw new Error(`operations.routing.${role} contains unsupported field(s): ${unknownRoleFields.join(', ')}`)
+    const maxCandidates = roleRouting.maxCandidates ?? 8
+    if (!Number.isSafeInteger(maxCandidates) || maxCandidates < 1 || maxCandidates > 8) {
+      throw new Error(`operations.routing.${role}.maxCandidates must be an integer from 1 through 8`)
+    }
+    roleRouting.maxCandidates = maxCandidates
+    const routes = roleRouting.routes
+    if (!routes || typeof routes !== 'object' || Array.isArray(routes)) throw new Error(`operations.routing.${role}.routes must be an object`)
+    const routeNames = Object.keys(routes)
+    if (!routeNames.length || routeNames.length > MAX_ROUTING_ROUTES || !routeNames.includes('default')) {
+      throw new Error(`operations.routing.${role}.routes must contain default and at most ${MAX_ROUTING_ROUTES} routes`)
+    }
+    for (const routeName of routeNames) {
+      routingIdentifier(routeName, `operations.routing.${role}.routes name`)
+      const route = routes[routeName]
+      if (!route || typeof route !== 'object' || Array.isArray(route)) throw new Error(`operations.routing.${role}.routes.${routeName} must be an object`)
+      const unknownRouteFields = Object.keys(route).filter(field => field !== 'selectors')
+      if (unknownRouteFields.length) throw new Error(`operations.routing.${role}.routes.${routeName} contains unsupported field(s): ${unknownRouteFields.join(', ')}`)
+      if (!Array.isArray(route.selectors) || !route.selectors.length || route.selectors.length > MAX_ROUTE_SELECTORS) {
+        throw new Error(`operations.routing.${role}.routes.${routeName}.selectors must contain 1 through ${MAX_ROUTE_SELECTORS} selectors`)
+      }
+      for (const [index, selector] of route.selectors.entries()) {
+        if (!selector || typeof selector !== 'object' || Array.isArray(selector)) throw new Error(`operations.routing.${role}.routes.${routeName}.selectors[${index}] must be an object`)
+        const unknownSelectorFields = Object.keys(selector).filter(field => !['worker', 'allTags', 'route'].includes(field))
+        if (unknownSelectorFields.length) throw new Error(`operations.routing.${role}.routes.${routeName}.selectors[${index}] contains unsupported field(s): ${unknownSelectorFields.join(', ')}`)
+        const kinds = ['worker', 'allTags', 'route'].filter(kind => selector[kind] !== undefined)
+        if (kinds.length !== 1) throw new Error(`operations.routing.${role}.routes.${routeName}.selectors[${index}] must choose one selector kind`)
+        const kind = kinds[0]
+        if (kind === 'worker') {
+          if (typeof selector.worker !== 'string' || !selector.worker.trim()) {
+            throw new Error(`operations.routing.${role}.routes.${routeName}.selectors[${index}].worker must be a non-empty Worker id`)
+          }
+          if (!roleWorkerIds(config, role).includes(selector.worker)) throw new Error(`Worker ${selector.worker} is not admitted to the ${role} role`)
+        } else if (kind === 'route') {
+          routingIdentifier(selector.route, `operations.routing.${role}.routes.${routeName}.selectors[${index}].route`)
+          if (!routeNames.includes(selector.route)) throw new Error(`Unknown ${role} route ${selector.route}`)
+        } else {
+          if (!Array.isArray(selector.allTags) || !selector.allTags.length || selector.allTags.length > MAX_ROUTING_TAGS
+            || new Set(selector.allTags).size !== selector.allTags.length
+            || selector.allTags.some(/** @param {any} tag */ tag => typeof tag !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(tag))) {
+            throw new Error(`operations.routing.${role}.routes.${routeName}.selectors[${index}].allTags must contain 1 through ${MAX_ROUTING_TAGS} unique tags`)
+          }
+        }
+      }
+    }
+    const roleCandidates = compileWorkerRoutes(config, role)
+    for (const routeName of routeNames) {
+      const candidates = roleCandidates.get(routeName) || []
+      if (!candidates.length) throw new Error(`operations.routing.${role}.routes.${routeName} resolves to no admitted Worker`)
+      const allowed = new Set(roleWorkerIds(config, role))
+      if (candidates.some(workerId => !allowed.has(workerId))) throw new Error(`operations.routing.${role}.routes.${routeName} resolves outside the ${role} role pool`)
+      if (role === 'review' && candidates.some(workerId => !config.workers[workerId].capabilities?.hardReadOnlyReview)) {
+        throw new Error(`operations.routing.review.routes.${routeName} includes a Worker without hard read-only isolation`)
+      }
+    }
+    compiled.set(role, roleCandidates)
+  }
+  return compiled
+}
+
+/** Validate and normalize PR1 role routing configuration. */
+/** @param {MachineConfig} config @returns {void} */
+export function validateRoutingConfig(config) {
+  compileRoutingConfig(config)
+}
+
+/** Resolve an admitted, bounded, deterministic Worker candidate list for a route. */
+/** @param {{config: MachineConfig, role: string, routeDecision?: unknown}} options @returns {string[]} */
+export function resolveWorkerCandidates({ config, role, routeDecision }) {
+  if (!ROUTING_ROLE_NAMES.includes(role)) throw new Error(`Worker routing is not available for ${role}`)
+  if (config?.operations?.routing === undefined) return [roleWorkerIds(config, role)[0]]
+  const compiled = compileRoutingConfig(config)
+  const routeName = routeNameFromDecision(routeDecision)
+  const candidates = compiled.get(role)?.get(routeName)
+  if (!candidates) throw new Error(`Unknown ${role} route ${routeName}`)
+  const allowed = new Set(roleWorkerIds(config, role))
+  return candidates.filter(workerId => allowed.has(workerId)).slice(0, config.operations.routing[role].maxCandidates)
 }
 
 /** @param {MachineConfig} worker @param {string} role */
@@ -167,10 +337,24 @@ export function resolveMachineConfig({ defaults, input, configurationPath }) {
         if (worker.credentialIsolationDir === undefined) worker.credentialIsolationDir = join(config.operations.stateRoot, 'credentials', workerId)
         worker.githubLogin = config.github?.login
       }
+      normalizeWorkerRoutingMetadata(worker, workerId)
     }
   }
   const unassigned = Object.keys(config.workers || {}).filter(workerId => !assigned.has(workerId))
   if (unassigned.length) throw new Error(`Every Worker must have exactly one role binding: ${unassigned.join(', ')}`)
+  if (config.operations.routing === undefined) config.operations.routing = {}
+  if (typeof config.operations.routing !== 'object' || Array.isArray(config.operations.routing)) throw new Error('operations.routing must be an object')
+  for (const role of ROUTING_ROLE_NAMES) {
+    if (config.operations.routing[role] === undefined) {
+      config.operations.routing[role] = {
+        routes: { default: { selectors: [{ worker: roleWorkerIds(config, role)[0] }] } },
+      }
+    }
+  }
+  for (const role of Object.keys(config.operations.routing)) {
+    if (!ROUTING_ROLE_NAMES.includes(role)) throw new Error(`operations.routing does not support the ${role} role in PR1`)
+  }
+  validateRoutingConfig(config)
   const hashInput = structuredClone(config)
   delete hashInput.$schema
   delete hashInput.credentialGeneration
