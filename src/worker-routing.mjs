@@ -24,6 +24,9 @@ const DECISION_FIELDS = new Set([
 const CLASSIFICATION_SOURCES = new Set([
   'trusted-route', 'deterministic-rules', 'optional-classifier', 'default',
 ])
+const CLASSIFICATION_FIELDS = new Set([
+  'version', 'workRequestId', 'role', 'stateVersion', 'taskClass', 'policyHash', 'evidenceHash', 'source',
+])
 const WORKER_ROUTE_ROLES = new Set(['change', 'review'])
 
 /** @typedef {any} AnyValue Recursive JSON values are bounded and normalized before hashing. */
@@ -36,6 +39,107 @@ function canonicalJson(value) {
     return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
   }
   return JSON.stringify(value)
+}
+
+/** Reject duplicate member names before JSON.parse can collapse them.
+ * @param {string} text
+ * @returns {void}
+ */
+function rejectDuplicateJsonMembers(text) {
+  let index = 0
+
+  function skipWhitespace() {
+    while (index < text.length && /[\u0009\u000a\u000d\u0020]/.test(text[index])) index += 1
+  }
+
+  /** @returns {string|undefined} */
+  function scanString() {
+    const start = index
+    index += 1
+    while (index < text.length) {
+      const character = text[index]
+      index += 1
+      if (character === '\\') {
+        if (index < text.length) index += 1
+        continue
+      }
+      if (character === '"') {
+        try {
+          return JSON.parse(text.slice(start, index))
+        } catch {
+          return undefined
+        }
+      }
+    }
+    return undefined
+  }
+
+  function scanValue() {
+    skipWhitespace()
+    if (text[index] === '{') {
+      scanObject()
+      return
+    }
+    if (text[index] === '[') {
+      scanArray()
+      return
+    }
+    if (text[index] === '"') {
+      scanString()
+      return
+    }
+    while (index < text.length && !/[,\]}\u0009\u000a\u000d\u0020]/.test(text[index])) index += 1
+  }
+
+  function scanObject() {
+    index += 1
+    const members = new Set()
+    skipWhitespace()
+    if (text[index] === '}') {
+      index += 1
+      return
+    }
+    while (index < text.length) {
+      skipWhitespace()
+      if (text[index] !== '"') return
+      const member = scanString()
+      if (member === undefined) return
+      if (members.has(member)) throw new Error(`WorkerRouteDecision body has duplicate JSON member ${member}`)
+      members.add(member)
+      skipWhitespace()
+      if (text[index] !== ':') return
+      index += 1
+      scanValue()
+      skipWhitespace()
+      if (text[index] === '}') {
+        index += 1
+        return
+      }
+      if (text[index] !== ',') return
+      index += 1
+    }
+  }
+
+  function scanArray() {
+    index += 1
+    skipWhitespace()
+    if (text[index] === ']') {
+      index += 1
+      return
+    }
+    while (index < text.length) {
+      scanValue()
+      skipWhitespace()
+      if (text[index] === ']') {
+        index += 1
+        return
+      }
+      if (text[index] !== ',') return
+      index += 1
+    }
+  }
+
+  scanValue()
 }
 
 /** @param {AnyValue} value @returns {string} */
@@ -258,7 +362,7 @@ function matchRule(rule, evidence) {
   if (rule.pathContains) matches.push(evidence.paths.some(/** @param {string} path */ path => rule.pathContains.some(/** @param {string} part */ part => path.includes(part))))
   if (rule.extensions) matches.push(evidence.paths.some(/** @param {string} path */ path => rule.extensions.some(/** @param {string} extension */ extension => path.endsWith(extension))))
   if (rule.workflowStages) matches.push(rule.workflowStages.includes(evidence.workflowStage))
-  if (rule.failureClasses) matches.push(rule.failureClasses.includes(evidence.failure.class))
+  if (rule.failureClasses) matches.push(rule.failureClasses.includes(evidence.failure?.class ?? ''))
   if (rule.titleIncludes) matches.push(rule.titleIncludes.some(/** @param {string} part */ part => evidence.title.toLowerCase().includes(part.toLowerCase())))
   if (rule.bodyIncludes) matches.push(rule.bodyIncludes.some(/** @param {string} part */ part => evidence.body.toLowerCase().includes(part.toLowerCase())))
   if (rule.any) matches.push(rule.any.some(/** @param {AnyObject} child */ child => matchRule(child, evidence)))
@@ -284,8 +388,10 @@ function classifierResult(value, routes, minimumConfidence) {
  * @param {AnyObject} options
  * @returns {AnyObject}
  */
-export function classifyWorkRequest({ workRequest, trustedTaskSnapshot, routingPolicy } = {}) {
-  workRequestIdentity(workRequest)
+export function classifyWorkRequest({ workRequest, subjectState, subjectStateVersion, stateVersion, trustedTaskSnapshot, routingPolicy } = {}) {
+  const identity = workRequestIdentity(workRequest)
+  const exactVersion = exactStateVersion({ subjectState, subjectStateVersion, stateVersion })
+  if (!SHA256.test(exactVersion || '')) throw new Error('Worker classification requires an exact subject state version')
   const rolePolicy = roleRoutingPolicy(routingPolicy, workRequest.role)
   const policy = normalizeRoutingPolicy(rolePolicy)
   let evidence
@@ -297,13 +403,14 @@ export function classifyWorkRequest({ workRequest, trustedTaskSnapshot, routingP
   const evidenceHash = digest(evidence)
   const hash = policyHash(policy)
   const routes = Object.keys(policy.routes)
+  const binding = { workRequestId: identity.requestId, role: identity.role, stateVersion: exactVersion }
   const explicit = evidence.explicitRoute
   if (explicit && routes.includes(explicit)) {
-    return { version: 1, taskClass: explicit, policyHash: hash, evidenceHash, source: 'trusted-route' }
+    return { version: 1, ...binding, taskClass: explicit, policyHash: hash, evidenceHash, source: 'trusted-route' }
   }
   for (const routeName of policy.classificationOrder) {
     if (policy.routes[routeName].rules && matchRule(policy.routes[routeName].rules, evidence)) {
-      return { version: 1, taskClass: routeName, policyHash: hash, evidenceHash, source: 'deterministic-rules' }
+      return { version: 1, ...binding, taskClass: routeName, policyHash: hash, evidenceHash, source: 'deterministic-rules' }
     }
   }
   const classifier = rolePolicy?.classifier
@@ -313,29 +420,40 @@ export function classifyWorkRequest({ workRequest, trustedTaskSnapshot, routingP
       const selected = result && typeof result.then === 'function'
         ? null
         : classifierResult(result, routes, policy.classifierMinimumConfidence ?? 0.8)
-      if (selected) return { version: 1, taskClass: selected, policyHash: hash, evidenceHash, source: 'optional-classifier' }
+      if (selected) return { version: 1, ...binding, taskClass: selected, policyHash: hash, evidenceHash, source: 'optional-classifier' }
     } catch {
       // Optional classification cannot stop a WorkRequest; use the deterministic default.
     }
   }
-  return { version: 1, taskClass: policy.defaultRoute, policyHash: hash, evidenceHash, source: 'default' }
+  return { version: 1, ...binding, taskClass: policy.defaultRoute, policyHash: hash, evidenceHash, source: 'default' }
 }
 
 /** @param {AnyValue} value @param {AnyObject|undefined} policy @returns {AnyObject} */
 function validateClassification(value, policy) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || value.version !== 1
+    || !SHA256.test(value.stateVersion || '')
     || !ID.test(value.taskClass || '')
     || !SHA256.test(value.policyHash || '')
     || !SHA256.test(value.evidenceHash || '')
     || !CLASSIFICATION_SOURCES.has(value.source)) {
     throw new Error('Worker classification v1 is invalid')
   }
+  for (const key of Object.keys(value)) {
+    if (!CLASSIFICATION_FIELDS.has(key)) throw new Error(`Worker classification has unknown field ${key}`)
+  }
+  for (const key of CLASSIFICATION_FIELDS) {
+    if (!Object.hasOwn(value, key)) throw new Error(`Worker classification is missing required field ${key}`)
+  }
+  const identity = workRequestIdentity({ requestId: value.workRequestId, role: value.role })
   if (policy && !Object.hasOwn(policy.routes, value.taskClass)) {
     throw new Error('Worker classification taskClass is not configured by routingPolicy')
   }
   return {
     version: 1,
+    workRequestId: identity.requestId,
+    role: identity.role,
+    stateVersion: value.stateVersion,
     taskClass: value.taskClass,
     policyHash: value.policyHash,
     evidenceHash: value.evidenceHash,
@@ -373,6 +491,12 @@ export function createWorkerRouteDecision({ workRequest, subjectState, subjectSt
   if (!SHA256.test(version || '')) throw new Error('WorkerRouteDecision stateVersion must be a SHA-256 digest')
   const policy = routingPolicy === undefined ? undefined : normalizeRoutingPolicy(roleRoutingPolicy(routingPolicy, identity.role))
   const normalized = validateClassification(classification, policy)
+  if (normalized.workRequestId !== identity.requestId || normalized.role !== identity.role) {
+    throw new Error('Worker classification does not match the WorkRequest')
+  }
+  if (normalized.stateVersion !== version) {
+    throw new Error('Worker classification does not match the exact subject state')
+  }
   if (policy && normalized.policyHash !== policyHash(policy)) {
     throw new Error('WorkerRouteDecision policyHash does not match routingPolicy')
   }
@@ -442,16 +566,19 @@ export function workerRouteDecisionBody(value) {
 /** Parse one durable decision record and optionally verify its WorkRequest and exact subject state. */
 /** @param {AnyValue} body @param {AnyObject} options @returns {AnyObject} */
 export function parseWorkerRouteDecisionBody(body, options = {}) {
-  if (typeof body !== 'string' || body.indexOf(ROUTE_DECISION_MARKER) !== body.lastIndexOf(ROUTE_DECISION_MARKER)
+  if (typeof body !== 'string'
+    || body.indexOf(ROUTE_DECISION_MARKER) !== body.lastIndexOf(ROUTE_DECISION_MARKER)
     || body.indexOf(ROUTE_DECISION_TRAILER) !== body.lastIndexOf(ROUTE_DECISION_TRAILER)) {
     throw new Error('WorkerRouteDecision body must contain one durable v1 record')
   }
   const start = body.indexOf(ROUTE_DECISION_MARKER) + ROUTE_DECISION_MARKER.length
   const end = body.indexOf(ROUTE_DECISION_TRAILER)
   if (end < start) throw new Error('WorkerRouteDecision body is malformed')
+  const serialized = body.slice(start, end).trim()
+  rejectDuplicateJsonMembers(serialized)
   let value
   try {
-    value = JSON.parse(body.slice(start, end).trim())
+    value = JSON.parse(serialized)
   } catch (error) {
     throw new Error(`WorkerRouteDecision body is not valid JSON: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
   }
