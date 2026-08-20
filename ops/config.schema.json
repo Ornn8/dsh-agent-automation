@@ -184,7 +184,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["worker"],
-          "properties": { "worker": { "$ref": "#/$defs/identifier" } }
+          "properties": { "worker": { "type": "string", "minLength": 1 } }
         },
         {
           "type": "object",

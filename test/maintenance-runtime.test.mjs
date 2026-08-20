@@ -35,6 +35,16 @@ test('maintenance readiness reports the exact failing Worker stage', async () =>
   assert.match(source, /unavailable\.join\('; '\)/)
 })
 
+test('maintenance review selects one Worker from the configured review default route', async () => {
+  const [source, fixture] = await Promise.all([
+    readFile(new URL('../src/maintenance-recovery.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('./fixtures/worker-routing.json', import.meta.url), 'utf8').then(JSON.parse),
+  ])
+  assert.notEqual(fixture.workerIds[0], fixture.expected.default[0])
+  assert.match(source, /const \[reviewWorker\] = resolveWorkerCandidates\(\{ config, role: 'review', routeDecision: \{ route: 'default' \} \}\)/)
+  assert.doesNotMatch(source, /const \[reviewWorker\] = resolveRoleWorkers\(config, 'review'\)/)
+})
+
 test('maintenance Workers have an independent role and GitHub credential store', () => {
   const credentialIsolationDir = join(tmpdir(), 'agent-maintenance-credentials')
   const maintenanceCapabilities = {

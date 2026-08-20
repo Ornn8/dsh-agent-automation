@@ -28,25 +28,53 @@ test('minimal configuration stays short and resolves the complete role topology'
   assert.match(config.configurationHash, /^[a-f0-9]{64}$/)
 })
 
-test('bounded change and review pools resolve through deterministic default and tag routes', async () => {
+test('legacy Worker ids and ordinal tags resolve identically without a routing migration', async () => {
+  const [defaults, input, fixture] = await Promise.all([
+    readJson('ops/config.defaults.json'), readJson('config.minimal.json'), readJson('test/fixtures/worker-routing.json'),
+  ])
+  const pooled = structuredClone(input)
+  for (const workerId of fixture.workerIds) {
+    pooled.workers[workerId] = { ...pooled.workers.review, routingTags: fixture.routingTags[workerId] }
+  }
+  delete pooled.workers.review
+  pooled.operations.roles.review.workers = fixture.workerIds
+
+  const legacy = resolveMachineConfig({ defaults, input: pooled, configurationPath: `${root}/config.minimal.json` })
+  assert.deepEqual(roleWorkerIds(legacy, 'review'), fixture.workerIds)
+  assert.deepEqual(resolveWorkerCandidates({ config: legacy, role: 'review' }), [fixture.workerIds[0]])
+  for (const workerId of fixture.workerIds) {
+    assert.equal(legacy.workers[workerId].capacityGroup, fixture.expected.capacityGroups[workerId])
+  }
+
+  pooled.operations.routing = { review: { routes: fixture.routes } }
+  const routed = resolveMachineConfig({ defaults, input: pooled, configurationPath: `${root}/config.minimal.json` })
+  assert.deepEqual(resolveWorkerCandidates({ config: routed, role: 'review' }), fixture.expected.default)
+  assert.deepEqual(
+    resolveWorkerCandidates({ config: routed, role: 'review', routeDecision: { route: 'frontend' } }),
+    fixture.expected.frontend,
+  )
+  assert.deepEqual(
+    resolveWorkerCandidates({ config: routed, role: 'review', routeDecision: { route: 'caseExact' } }),
+    fixture.expected.caseExact,
+  )
+  assert.notEqual(fixture.workerIds[0], fixture.expected.default[0])
+})
+
+test('route compilation memoizes the maximum bounded shared-subgraph DAG', async () => {
   const [defaults, input] = await Promise.all([
     readJson('ops/config.defaults.json'), readJson('config.minimal.json'),
   ])
-  const pooled = structuredClone(input)
-  pooled.workers.reviewSecondary = { ...pooled.workers.review, routingTags: ['fast', 'ui'] }
-  pooled.operations.roles.review.workers = ['review', 'reviewSecondary']
-  pooled.operations.routing = {
-    review: {
-      routes: {
-        default: { selectors: [{ worker: 'review' }] },
-        frontend: { selectors: [{ allTags: ['ui'] }, { route: 'default' }] },
-      },
-    },
+  const routes = { default: { selectors: [{ worker: 'change' }] } }
+  let previous = 'default'
+  for (let index = 1; index < 32; index += 1) {
+    const routeName = `route-${index}`
+    routes[routeName] = { selectors: Array.from({ length: 16 }, () => ({ route: previous })) }
+    previous = routeName
   }
-  const config = resolveMachineConfig({ defaults, input: pooled, configurationPath: `${root}/config.minimal.json` })
-  assert.deepEqual(roleWorkerIds(config, 'review'), ['review', 'reviewSecondary'])
-  assert.deepEqual(resolveWorkerCandidates({ config, role: 'review' }), ['review'])
-  assert.deepEqual(resolveWorkerCandidates({ config, role: 'review', routeDecision: { route: 'frontend' } }), ['reviewSecondary', 'review'])
+  input.operations.routing = { change: { routes } }
+
+  const config = resolveMachineConfig({ defaults, input, configurationPath: `${root}/config.minimal.json` })
+  assert.deepEqual(resolveWorkerCandidates({ config, role: 'change', routeDecision: { route: previous } }), ['change'])
 })
 
 test('routing configuration rejects route cycles and empty non-default routes', async () => {

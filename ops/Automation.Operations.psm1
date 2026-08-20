@@ -259,10 +259,33 @@ function Get-RoleWorkerIds {
   param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][ValidateSet('change', 'review', 'maintenance')][string]$Role)
   $workers = @($Config.operations.roles.$Role.workers)
   $maximum = 8
-  if (-not $workers.Count -or $workers.Count -gt $maximum -or @($workers | Select-Object -Unique).Count -ne $workers.Count -or @($workers | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count) {
+  if (-not $workers.Count -or $workers.Count -gt $maximum -or -not (Test-OrdinalUniqueStrings -Values $workers) -or @($workers | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count) {
     throw "operations.roles.$Role.workers must contain 1 through 8 unique Worker ids"
   }
   return $workers
+}
+
+function Test-OrdinalUniqueStrings {
+  param([Parameter(Mandatory)]$Values)
+  $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($value in @($Values)) { if ($value -isnot [string] -or -not $seen.Add([string]$value)) { return $false } }
+  return $true
+}
+
+function Get-OrdinalUniqueStrings {
+  param([Parameter(Mandatory)]$Values)
+  $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $result = [Collections.Generic.List[string]]::new()
+  foreach ($value in @($Values)) { if ($seen.Add([string]$value)) { $result.Add([string]$value) } }
+  return @($result.ToArray())
+}
+
+function Get-DefaultCapacityGroup {
+  param([Parameter(Mandatory)][string]$WorkerId)
+  if ($WorkerId -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { return $WorkerId }
+  $bytes = [Text.Encoding]::UTF8.GetBytes($WorkerId)
+  $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+  return "worker-$hash"
 }
 
 function Assert-RoutingIdentifier {
@@ -276,12 +299,15 @@ function Get-WorkerRouteCandidates {
     [Parameter(Mandatory)]$Config,
     [Parameter(Mandatory)][ValidateSet('change', 'review')][string]$Role,
     [Parameter(Mandatory)][string]$RouteName,
-    [string[]]$Visiting = @()
+    [string[]]$Visiting = @(),
+    [Collections.Generic.Dictionary[string, string[]]]$Memo
   )
+  if ($null -eq $Memo) { $Memo = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::Ordinal) }
+  if ($Memo.ContainsKey($RouteName)) { return @($Memo[$RouteName]) }
   $routes = $Config.operations.routing.$Role.routes
   $route = $routes.$RouteName
   if (-not $route) { throw "Unknown $Role route $RouteName" }
-  if ($Visiting -contains $RouteName) { throw "operations.routing.$Role.routes contains a cycle: $(@($Visiting + $RouteName) -join ' -> ')" }
+  if (@($Visiting | Where-Object { $_ -ceq $RouteName }).Count) { throw "operations.routing.$Role.routes contains a cycle: $(@($Visiting + $RouteName) -join ' -> ')" }
   $result = @()
   foreach ($selector in @($route.selectors)) {
     if ($selector.PSObject.Properties['worker']) {
@@ -291,22 +317,25 @@ function Get-WorkerRouteCandidates {
       foreach ($workerId in @(Get-RoleWorkerIds -Config $Config -Role $Role)) {
         $tags = @($Config.workers.$workerId.routingTags)
         $allMatch = $true
-        foreach ($tag in @($selector.allTags)) { if ($tag -notin $tags) { $allMatch = $false; break } }
+        foreach ($tag in @($selector.allTags)) { if ($tags -cnotcontains $tag) { $allMatch = $false; break } }
         if ($allMatch) { $matches += $workerId }
       }
-      $result += @($matches | Sort-Object)
+      [Array]::Sort($matches, [StringComparer]::Ordinal)
+      $result += $matches
     } elseif ($selector.PSObject.Properties['route']) {
-      $result += @(Get-WorkerRouteCandidates -Config $Config -Role $Role -RouteName ([string]$selector.route) -Visiting @($Visiting + $RouteName))
+      $result += @(Get-WorkerRouteCandidates -Config $Config -Role $Role -RouteName ([string]$selector.route) -Visiting @($Visiting + $RouteName) -Memo $Memo)
     }
   }
-  return @($result | Select-Object -Unique)
+  $candidates = @(Get-OrdinalUniqueStrings -Values $result)
+  $Memo[$RouteName] = [string[]]$candidates
+  return $candidates
 }
 
 function Assert-WorkerRoutingConfiguration {
   param([Parameter(Mandatory)]$Config)
   if (-not $Config.operations.PSObject.Properties['routing']) { $Config.operations | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{}) }
   $routing = $Config.operations.routing
-  $unknownRoles = @($routing.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -notin @('change', 'review') })
+  $unknownRoles = @($routing.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { @('change', 'review') -cnotcontains $_ })
   if ($unknownRoles.Count) { throw "operations.routing contains unsupported role(s): $($unknownRoles -join ', ')" }
   foreach ($role in @('change', 'review')) {
     if (-not $routing.PSObject.Properties[$role]) {
@@ -314,7 +343,7 @@ function Assert-WorkerRoutingConfiguration {
     }
     $roleRouting = $routing.$role
     if (-not $roleRouting -or $roleRouting -is [Array] -or -not $roleRouting.PSObject.Properties['routes']) { throw "operations.routing.$role.routes must be an object" }
-    $unknownRoleFields = @($roleRouting.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -notin @('maxCandidates', 'routes') })
+    $unknownRoleFields = @($roleRouting.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { @('maxCandidates', 'routes') -cnotcontains $_ })
     if ($unknownRoleFields.Count) { throw "operations.routing.$role contains unsupported field(s): $($unknownRoleFields -join ', ')" }
     if (-not $roleRouting.PSObject.Properties['maxCandidates']) { $roleRouting | Add-Member -NotePropertyName maxCandidates -NotePropertyValue 8 }
     if (($roleRouting.maxCandidates -isnot [int] -and $roleRouting.maxCandidates -isnot [long]) -or [int]$roleRouting.maxCandidates -lt 1 -or [int]$roleRouting.maxCandidates -gt 8) { throw "operations.routing.$role.maxCandidates must be an integer from 1 through 8" }
@@ -322,7 +351,7 @@ function Assert-WorkerRoutingConfiguration {
     $routes = $roleRouting.routes
     if (-not $routes -or $routes -is [Array]) { throw "operations.routing.$role.routes must be an object" }
     $routeNames = @($routes.PSObject.Properties | ForEach-Object { $_.Name })
-    if (-not $routeNames.Count -or $routeNames.Count -gt 32 -or 'default' -notin $routeNames) { throw "operations.routing.$role.routes must contain default and at most 32 routes" }
+    if (-not $routeNames.Count -or $routeNames.Count -gt 32 -or $routeNames -cnotcontains 'default') { throw "operations.routing.$role.routes must contain default and at most 32 routes" }
     foreach ($routeName in $routeNames) {
       Assert-RoutingIdentifier -Value $routeName -Name "operations.routing.$role.routes name" | Out-Null
       $route = $routes.$routeName
@@ -332,27 +361,30 @@ function Assert-WorkerRoutingConfiguration {
       $selectors = @($route.selectors)
       if (-not $selectors.Count -or $selectors.Count -gt 16) { throw "operations.routing.$role.routes.$routeName.selectors must contain 1 through 16 selectors" }
       foreach ($selector in $selectors) {
-        $unknownSelectorFields = @($selector.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -notin @('worker', 'allTags', 'route') })
+        $unknownSelectorFields = @($selector.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { @('worker', 'allTags', 'route') -cnotcontains $_ })
         if ($unknownSelectorFields.Count) { throw "operations.routing.$role.routes.$routeName selectors contain unsupported field(s): $($unknownSelectorFields -join ', ')" }
         $kinds = @($selector.PSObject.Properties | ForEach-Object { $_.Name } | Where-Object { $_ -in @('worker', 'allTags', 'route') })
         if ($kinds.Count -ne 1) { throw "operations.routing.$role.routes.$routeName selectors must choose one selector kind" }
         if ($kinds[0] -eq 'worker') {
-          Assert-RoutingIdentifier -Value $selector.worker -Name "operations.routing.$role.routes.$routeName.worker" | Out-Null
-          if ($selector.worker -notin @(Get-RoleWorkerIds -Config $Config -Role $role)) { throw "Worker $($selector.worker) is not admitted to the $role role" }
+          if ($selector.worker -isnot [string] -or [string]::IsNullOrWhiteSpace($selector.worker)) { throw "operations.routing.$role.routes.$routeName.worker must be a non-empty Worker id" }
+          if (@(Get-RoleWorkerIds -Config $Config -Role $role) -cnotcontains $selector.worker) { throw "Worker $($selector.worker) is not admitted to the $role role" }
         } elseif ($kinds[0] -eq 'route') {
           Assert-RoutingIdentifier -Value $selector.route -Name "operations.routing.$role.routes.$routeName.route" | Out-Null
-          if ($selector.route -notin $routeNames) { throw "Unknown $role route $($selector.route)" }
+          if ($routeNames -cnotcontains $selector.route) { throw "Unknown $role route $($selector.route)" }
         } else {
           $tags = @($selector.allTags)
-          if ($selector.allTags -isnot [Array] -or -not $tags.Count -or $tags.Count -gt 16 -or @($tags | Select-Object -Unique).Count -ne $tags.Count -or @($tags | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }).Count) {
+          if ($selector.allTags -isnot [Array] -or -not $tags.Count -or $tags.Count -gt 16 -or -not (Test-OrdinalUniqueStrings -Values $tags) -or @($tags | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }).Count) {
             throw "operations.routing.$role.routes.$routeName.allTags must contain 1 through 16 unique tags"
           }
         }
       }
-      $candidates = @(Get-WorkerRouteCandidates -Config $Config -Role $role -RouteName $routeName)
+    }
+    $routeMemo = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::Ordinal)
+    foreach ($routeName in $routeNames) {
+      $candidates = @(Get-WorkerRouteCandidates -Config $Config -Role $role -RouteName $routeName -Memo $routeMemo)
       if (-not $candidates.Count) { throw "operations.routing.$role.routes.$routeName resolves to no admitted Worker" }
       $admitted = @(Get-RoleWorkerIds -Config $Config -Role $role)
-      if (@($candidates | Where-Object { $_ -notin $admitted }).Count) { throw "operations.routing.$role.routes.$routeName resolves outside the $role role pool" }
+      if (@($candidates | Where-Object { $admitted -cnotcontains $_ }).Count) { throw "operations.routing.$role.routes.$routeName resolves outside the $role role pool" }
       if ($role -eq 'review' -and @($candidates | Where-Object { -not [bool]$Config.workers.$_.capabilities.hardReadOnlyReview }).Count) { throw "operations.routing.review.routes.$routeName includes a Worker without hard read-only isolation" }
     }
   }
@@ -366,7 +398,7 @@ function Resolve-WorkerCandidates {
   )
   Assert-RoutingIdentifier -Value $Route -Name 'route' | Out-Null
   $candidates = @(Get-WorkerRouteCandidates -Config $Config -Role $Role -RouteName $Route)
-  return @($candidates | Select-Object -Unique | Select-Object -First ([int]$Config.operations.routing.$Role.maxCandidates))
+  return @(Get-OrdinalUniqueStrings -Values $candidates | Select-Object -First ([int]$Config.operations.routing.$Role.maxCandidates))
 }
 
 function Get-DerivedWorkerCapabilities {
@@ -812,11 +844,11 @@ function Read-OperationsConfig {
         if (-not $worker.PSObject.Properties['credentialIsolationDir']) { $worker | Add-Member -NotePropertyName credentialIsolationDir -NotePropertyValue (Join-Path $ops.stateRoot (Join-Path 'credentials' $workerId)) }
         $worker | Add-Member -NotePropertyName githubLogin -NotePropertyValue $config.github.login -Force
       }
-      if (-not $worker.PSObject.Properties['capacityGroup']) { $worker | Add-Member -NotePropertyName capacityGroup -NotePropertyValue $workerId }
+      if (-not $worker.PSObject.Properties['capacityGroup']) { $worker | Add-Member -NotePropertyName capacityGroup -NotePropertyValue (Get-DefaultCapacityGroup -WorkerId $workerId) }
       if ($worker.capacityGroup -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw "workers.$workerId.capacityGroup must be a non-empty routing identifier" }
       if (-not $worker.PSObject.Properties['routingTags']) { $worker | Add-Member -NotePropertyName routingTags -NotePropertyValue @() }
       $routingTags = @($worker.routingTags)
-      if ($routingTags.Count -gt 16 -or @($routingTags | Select-Object -Unique).Count -ne $routingTags.Count -or @($routingTags | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }).Count) { throw "workers.$workerId.routingTags must contain at most 16 unique tags" }
+      if ($routingTags.Count -gt 16 -or -not (Test-OrdinalUniqueStrings -Values $routingTags) -or @($routingTags | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }).Count) { throw "workers.$workerId.routingTags must contain at most 16 unique tags" }
       $worker.routingTags = @($routingTags)
     }
   }
@@ -825,8 +857,8 @@ function Read-OperationsConfig {
   Assert-WorkerRoutingConfiguration -Config $config
   Assert-AgentWorkerConfiguration -Workers $config.workers
   $maintenanceWorkers = @(Get-RoleWorkerIds -Config $config -Role maintenance)
-  $maintenanceReviewWorker = @(Get-RoleWorkerIds -Config $config -Role review)[0]
-  if ($maintenanceReviewWorker -in $maintenanceWorkers) { throw 'The review Worker must be independent from maintenance Workers' }
+  $maintenanceReviewWorker = @(Resolve-WorkerCandidates -Config $config -Role review -Route default)[0]
+  if ($maintenanceWorkers -ccontains $maintenanceReviewWorker) { throw 'The review Worker must be independent from maintenance Workers' }
   foreach ($workerId in $maintenanceWorkers) {
     $worker = $config.workers.$workerId
     if ([string]::IsNullOrWhiteSpace($worker.credentialIsolationDir) -or -not [IO.Path]::IsPathRooted($worker.credentialIsolationDir)) { throw "maintenance Worker $workerId requires an absolute credentialIsolationDir" }

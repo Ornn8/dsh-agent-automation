@@ -11,6 +11,7 @@ import {
   run,
   verifyGithubIdentity,
 } from './common.mjs'
+import { resolveWorkerCandidates } from './machine-config.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import { AGENT_MAINTENANCE_SKILL, AGENT_REVIEW_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
@@ -42,7 +43,7 @@ const profile = parseMaintenanceProfile(JSON.parse(await readFile(
   join(controllerCheckout, '.github', 'agent-automation', 'profiles', 'controller-maintenance.json'), 'utf8',
 )))
 const maintenanceWorkers = resolveRoleWorkers(config, 'maintenance')
-const [reviewWorker] = resolveRoleWorkers(config, 'review')
+const [reviewWorker] = resolveWorkerCandidates({ config, role: 'review', routeDecision: { route: 'default' } })
 const adapters = createAgentAdapters()
 
 if (config.operations.controller.repository !== controllerRepository) throw new Error('Maintenance workflow repository differs from local Controller configuration')

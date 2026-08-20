@@ -22,7 +22,7 @@ The public file contains intent. [`ops/config.defaults.json`](../ops/config.defa
 
 ## Worker fields
 
-Every Worker requires `adapter`. The Adapter determines the remaining fields. Role-owned values are not accepted in the Worker object: `mode`, capabilities, review isolation, and maintenance `githubLogin` are derived from `operations.roles` and the Adapter implementation. `capacityGroup` defaults to the Worker id and identifies a machine-local capacity boundary for later capacity handling; it does not activate failover. `routingTags` defaults to an empty list and is only metadata for the bounded route selectors.
+Every Worker requires `adapter`. The Adapter determines the remaining fields. Role-owned values are not accepted in the Worker object: `mode`, capabilities, review isolation, and maintenance `githubLogin` are derived from `operations.roles` and the Adapter implementation. `capacityGroup` defaults to the Worker id when it is a routing identifier; legacy Worker ids containing other characters receive a stable `worker-<sha256>` default and require no configuration migration. A capacity group identifies a machine-local capacity boundary for later capacity handling; it does not activate failover. `routingTags` defaults to an empty list and is only metadata for the bounded route selectors.
 
 | Adapter | Required fields | Optional fields |
 | --- | --- | --- |
@@ -67,7 +67,7 @@ Each role may set `runnerNamePrefix`, `replicas`, and `labels`. Defaults are `ag
 
 ### Routing
 
-`routing.change.routes` and `routing.review.routes` are bounded named route maps. Each role routing object may set `maxCandidates` from 1 through 8 (default 8). The `routes` map contains named route objects, and every route has one through sixteen ordered `selectors`; a selector is exactly one of `{ "worker": "id" }`, `{ "allTags": ["tag"] }`, or `{ "route": "other-route" }`. Worker selectors must name an admitted Worker, tag selectors order matching Workers by id, and route references must be acyclic. Every non-default route must resolve to at least one admitted Worker, and review routes may contain only Workers with hard read-only isolation. When routing is omitted, the loader derives a `default` route selecting the first role Worker. Candidate resolution is deterministic and only provides selection metadata; PR1 does not perform failover or capacity selection.
+`routing.change.routes` and `routing.review.routes` are bounded named route maps. Each role routing object may set `maxCandidates` from 1 through 8 (default 8). The `routes` map contains named route objects, and every route has one through sixteen ordered `selectors`; a selector is exactly one of `{ "worker": "id" }`, `{ "allTags": ["tag"] }`, or `{ "route": "other-route" }`. Worker selectors name an admitted Worker id exactly, including ids accepted before routing existed. Tags are unique and matched with ordinal, case-sensitive equality; tag selectors order matching Worker ids by ordinal code-unit order. Route references must be acyclic and are compiled once per resolution with shared subgraphs memoized. Every non-default route must resolve to at least one admitted Worker, and review routes may contain only Workers with hard read-only isolation. When routing is omitted, the loader derives a `default` route selecting the first role Worker. Maintenance review executes only the first candidate from the review `default` route. Candidate resolution is deterministic and only provides selection metadata; PR1 does not perform failover or capacity selection.
 
 ### DSH Web Host
 
