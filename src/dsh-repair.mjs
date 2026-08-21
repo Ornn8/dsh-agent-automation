@@ -98,24 +98,29 @@ const marker = requestId
   ? `<!-- dsh-review-repair:${controllerSha}:${expectedHead}:${requestId} -->`
   : `<!-- dsh-review-repair:${controllerSha}:${expectedHead} -->`
 const ciRequest = ciRepairRequest(requestId)
-const mergeRequest = repairCause === 'merge-conflict'
-if (repairCause && !mergeRequest) throw new Error(`Unsupported repair cause ${repairCause}`)
-const reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
+const recoveryRequest = /^recovery-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}$/.test(requestId)
+  || /^ci-run-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}\.recovery-[1-9][0-9]{0,19}$/.test(requestId)
+let mergeRequest = repairCause === 'merge-conflict'
+if (!recoveryRequest && repairCause && !mergeRequest) throw new Error(`Unsupported repair cause ${repairCause}`)
+let reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
   ? transportedRequest.requestId.slice(`review-repair-${expectedHead}-`.length)
   : null
-const explicitRequest = Boolean(ciRequest)
+let explicitRequest = Boolean(ciRequest)
   || reviewObservationId?.startsWith('comment-') === true
   || (!isReviewRepairRequestId(requestId, expectedHead)
     && requestId.startsWith('comment-'))
-const recoveryRequest = /^recovery-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}$/.test(requestId)
-  || /^ci-run-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}\.recovery-[1-9][0-9]{0,19}$/.test(requestId)
-const repairClass = ciRequest
+let repairClass = ciRequest
   ? 'automatic-ci'
   : mergeRequest
     ? 'automatic-merge'
   : explicitRequest
     ? 'explicit-human'
     : 'automatic-review'
+let effectiveRepairCause = ciRequest ? ciWorkflowName : mergeRequest ? 'merge-conflict' : 'review-repair'
+let effectiveRepairCode = ciRequest ? ciWorkflowName : mergeRequest ? 'merge-conflict' : 'review-repair'
+let effectiveCiWorkflowName = ciWorkflowName
+let effectiveWorkflowStage = transportedRequest?.stageId || 'repair'
+let effectiveOriginalRequestId = null
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (transportedRequest && (transportedRequest.repository !== repository
   || transportedRequest.subject.type !== 'pull-request'
@@ -217,7 +222,9 @@ async function upsertStatus(status, branch, detail, failureClass) {
     ] : []),
     `- Controller SHA: \`${controllerSha}\``,
     `- Repair class: \`${repairClass}\``,
-    ...(ciRequest ? [`- CI workflow: \`${ciWorkflowName}\``] : []),
+    `- Stage: \`${effectiveWorkflowStage}\``,
+    ...(recoveryRequest && effectiveOriginalRequestId ? [`- Original request: \`${effectiveOriginalRequestId}\``] : []),
+    ...(repairClass === 'automatic-ci' ? [`- CI workflow: \`${effectiveCiWorkflowName}\``] : []),
     `- Reviewed head: \`${expectedHead}\``,
     `- Branch: \`${branch}\``,
     `- Run: ${runUrl}`,
@@ -357,32 +364,6 @@ if (pullRequest.head.sha !== expectedHead) {
   process.stdout.write(`Recovered the completed repair for pull request #${pullRequestNumber} at ${pullRequest.head.sha}.\n`)
   process.exit(0)
 }
-let ciRun
-if (ciRequest) {
-  if (!ciWorkflowName) throw new Error('CI_WORKFLOW_NAME is required for a CI repair request')
-  ciRun = await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run')
-  if (ciRun.run_attempt !== ciRequest.attempt) throw new Error('CI workflow run attempt changed')
-  if (!trustedCiFailure({
-    run: ciRun, pullRequestNumber, expectedHead, workflowName: ciWorkflowName,
-  })) {
-    throw new Error('Workflow run is not trusted failed CI evidence for this pull request head')
-  }
-} else if (explicitRequest) {
-  const commentRequestId = reviewObservationId?.startsWith('comment-') ? reviewObservationId : requestId
-  const feedbackId = Number.parseInt(commentRequestId.slice('comment-'.length), 10)
-  if (!Number.isSafeInteger(feedbackId) || feedbackId < 1) throw new Error('Invalid explicit repair request id')
-  const comment = await ghJson(['api', `repos/${repository}/issues/comments/${feedbackId}`], 'rework comment')
-  if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
-    throw new Error('Rework comment does not belong to this pull request')
-  }
-  if (!trustedAssociation(comment.author_association)) {
-    throw new Error(`Untrusted rework comment association ${comment.author_association}`)
-  }
-  if (!explicitReworkCommand(comment.body)) throw new Error('Comment is not an explicit DSH rework command')
-}
-if (!explicitRequest && !mergeRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
-  throw new Error('The pull request no longer has the automation/review-blocked label')
-}
 const changedPaths = await pullRequestChangedPaths()
 
 const priorComments = (await ghJson([
@@ -397,9 +378,20 @@ const recoveryIdentity = recoveryRequest
     markerAuthor,
     repository,
   })
-  : { requestId, originalRequestId: requestId, sourceRunId: null, sourceStatus: null }
+  : {
+    requestId,
+    originalRequestId: requestId,
+    sourceRunId: null,
+    sourceStatus: null,
+    repairClass: null,
+    repairCause: null,
+    repairCode: null,
+    workflowStage: null,
+    ciWorkflow: null,
+  }
 const executionRequestId = transportedRequest?.requestId || recoveryIdentity.originalRequestId
   || requestId || `repair-${pullRequestNumber}-${expectedHead}`
+effectiveOriginalRequestId = recoveryRequest ? executionRequestId : null
 async function trustedSourceRepairRun(sourceRunId) {
   const runId = Number.parseInt(sourceRunId, 10)
   if (!Number.isSafeInteger(runId) || runId < 1) throw new Error('Repair recovery source run is invalid')
@@ -418,6 +410,53 @@ async function trustedSourceRepairRun(sourceRunId) {
 const sourceRepairRun = recoveryIdentity.sourceRunId
   ? await trustedSourceRepairRun(recoveryIdentity.sourceRunId)
   : null
+if (recoveryRequest) {
+  if (!recoveryIdentity.repairClass || Boolean(ciRequest) !== (recoveryIdentity.repairClass === 'automatic-ci')) {
+    throw new Error('Repair recovery source class does not match the recovery request')
+  }
+  if (ciWorkflowName && ciWorkflowName !== recoveryIdentity.ciWorkflow) {
+    throw new Error('Repair recovery CI workflow does not match the source repair evidence')
+  }
+  if (repairCause && repairCause !== recoveryIdentity.repairCause) {
+    throw new Error('Repair recovery cause does not match the source repair evidence')
+  }
+  repairClass = recoveryIdentity.repairClass
+  effectiveRepairCause = recoveryIdentity.repairCause
+  effectiveRepairCode = recoveryIdentity.repairCode
+  effectiveCiWorkflowName = recoveryIdentity.ciWorkflow || ''
+  effectiveWorkflowStage = recoveryIdentity.workflowStage || 'repair'
+  mergeRequest = effectiveRepairCause === 'merge-conflict'
+  explicitRequest = repairClass === 'explicit-human'
+  reviewObservationId = isReviewRepairRequestId(executionRequestId, expectedHead)
+    ? executionRequestId.slice(`review-repair-${expectedHead}-`.length)
+    : null
+}
+let ciRun
+if (ciRequest) {
+  if (!effectiveCiWorkflowName) throw new Error('CI_WORKFLOW_NAME is required for a CI repair request')
+  ciRun = await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run')
+  if (ciRun.run_attempt !== ciRequest.attempt) throw new Error('CI workflow run attempt changed')
+  if (!trustedCiFailure({
+    run: ciRun, pullRequestNumber, expectedHead, workflowName: effectiveCiWorkflowName,
+  })) {
+    throw new Error('Workflow run is not trusted failed CI evidence for this pull request head')
+  }
+} else if (explicitRequest && !recoveryRequest) {
+  const commentRequestId = reviewObservationId?.startsWith('comment-') ? reviewObservationId : requestId
+  const feedbackId = Number.parseInt(commentRequestId.slice('comment-'.length), 10)
+  if (!Number.isSafeInteger(feedbackId) || feedbackId < 1) throw new Error('Invalid explicit repair request id')
+  const comment = await ghJson(['api', `repos/${repository}/issues/comments/${feedbackId}`], 'rework comment')
+  if (!comment.issue_url?.endsWith(`/issues/${pullRequestNumber}`)) {
+    throw new Error('Rework comment does not belong to this pull request')
+  }
+  if (!trustedAssociation(comment.author_association)) {
+    throw new Error(`Untrusted rework comment association ${comment.author_association}`)
+  }
+  if (!explicitReworkCommand(comment.body)) throw new Error('Comment is not an explicit DSH rework command')
+}
+if (!explicitRequest && !mergeRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
+  throw new Error('The pull request no longer has the automation/review-blocked label')
+}
 const governorRecords = await trustedGovernorRecords({
   comments: priorComments,
   trust: governorTrust,
@@ -428,14 +467,14 @@ const governorStateVersion = subjectStateVersion(governorSubject)
 if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
   throw new Error(`Pull request #${pullRequestNumber} is paused and requires an authorized resume`)
 }
-const governedTransition = ciRequest
+const governedTransition = repairClass === 'automatic-ci'
   ? ciRepairTransition(ciRequest.runId)
   : mergeRequest
     ? mergeRepairTransition(reviewObservationId || (requestId.match(/^[0-9a-f]{64}$/) ? `advance-${requestId}` : requestId))
   : reviewObservationId
     ? reviewRepairTransition(reviewObservationId)
     : 'review-repair'
-const budgetTransition = ciRequest ? 'ci-repair' : mergeRequest ? 'merge-repair' : 'review-repair'
+const budgetTransition = repairClass === 'automatic-ci' ? 'ci-repair' : mergeRequest ? 'merge-repair' : 'review-repair'
 let governorStartedRecord = null
 if (ciRequest && !recoveryRequest) {
   const admission = governorDecision({
@@ -485,15 +524,16 @@ if (ciRequest && !recoveryRequest) {
 } else if (ciRequest && recoveryRequest) {
   if (!sourceRepairRun) throw new Error('CI repair recovery has no trusted source run')
   const sourceObservationId = `${sourceRepairRun.id}:${sourceRepairRun.run_attempt}`
-  const matchingRecord = (status, transition) => governorRecords.find(record => record.status === status
+  const matchingRecord = (status, transition, observationId = null) => governorRecords.find(record => record.status === status
     && record.transition === transition
     && record.subject.type === 'pull-request'
     && record.subject.number === pullRequestNumber
     && record.stateVersion === governorStateVersion
-    && record.observationId === sourceObservationId)
+    && (!observationId || record.observationId === observationId))
   const existingStarted = matchingRecord('started', governedTransition)
   if (!existingStarted) {
-    let admittedRecord = matchingRecord('admitted', governedTransition)
+    let admittedRecord = matchingRecord('admitted', governedTransition, sourceObservationId)
+      || matchingRecord('admitted', governedTransition)
     if (!admittedRecord) {
       const admission = governorDecision({
         transition: governedTransition,
@@ -507,7 +547,8 @@ if (ciRequest && !recoveryRequest) {
       }
       admittedRecord = admission.record
     }
-    let attemptRecord = matchingRecord('attempt', budgetTransition)
+    let attemptRecord = matchingRecord('attempt', budgetTransition, sourceObservationId)
+      || matchingRecord('attempt', budgetTransition)
     if (!attemptRecord) {
       const budget = governorBudgetDecision({
         transition: budgetTransition,
@@ -559,10 +600,10 @@ const executionClaim = createWorkerExecutionClaim({
   subjectStateVersion: governorStateVersion,
   trustedTaskSnapshot: repairRoutingEvidence({
     paths: changedPaths,
-    workflowStage: transportedRequest?.stageId || 'repair',
+    workflowStage: effectiveWorkflowStage,
     failureEvidence: {
       class: repairClass,
-      code: ciWorkflowName || repairCause || 'review-repair',
+      code: effectiveRepairCode,
     },
   }),
   routingPolicy: config.operations.routing.change,
@@ -582,7 +623,7 @@ await setRepairLabels({
       ? ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed']
       : ['automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed'],
 })
-const priorReviewCheckIds = ciRequest || mergeRequest ? null : await reviewCheckIds()
+const priorReviewCheckIds = repairClass === 'automatic-ci' || mergeRequest ? null : await reviewCheckIds()
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-repair-${pullRequestNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
@@ -609,9 +650,9 @@ try {
     defaultBranch,
     branch,
     expectedHead,
-    requestKind: ciRequest ? 'ci' : mergeRequest ? 'merge-conflict' : explicitRequest ? 'explicit' : 'review',
-    requestId: requestId || `review-${expectedHead}`,
-    ...(ciRequest ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
+    requestKind: repairClass === 'automatic-ci' ? 'ci' : mergeRequest ? 'merge-conflict' : explicitRequest ? 'explicit' : 'review',
+    requestId: executionRequestId || `review-${expectedHead}`,
+    ...(repairClass === 'automatic-ci' ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
   })
 
   const workerReceipt = await runRoleWorker({
@@ -620,7 +661,7 @@ try {
       onExecutionCommitted: async () => writeGovernorRecord(governorStartedRecord),
     } : {}),
     invocation: {
-      taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
+      taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${executionRequestId}`,
       cwd: checkoutPath,
       title: `修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
       prompt,
@@ -641,7 +682,7 @@ try {
     ? { ...workerReceipt, outcome: 'completed' }
     : workerReceipt
 
-  const baselineReference = ciRequest
+  const baselineReference = repairClass === 'automatic-ci'
     ? ciBaselineIssueFromReceipt({ receipt: effectiveReceipt, repository })
     : null
   if (effectiveReceipt.outcome === 'capacity-deferred') {
@@ -659,7 +700,7 @@ try {
       repository,
       reference: baselineReference,
       trustedAssociation,
-      workflowName: ciWorkflowName,
+      workflowName: effectiveCiWorkflowName,
       branch,
       pullRequestBody: pullRequest.body,
     })
@@ -683,7 +724,7 @@ try {
       process.stdout.write(`DSH ended repair for pull request #${pullRequestNumber} with ${blocked.reason}; no retry was scheduled.\n`)
     } else {
       const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
-      const currentCiRun = ciRequest
+      const currentCiRun = repairClass === 'automatic-ci'
         ? await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run after repair')
         : null
       if (current.head.sha !== expectedHead) {
@@ -696,7 +737,7 @@ try {
         currentRun: currentCiRun,
         pullRequestNumber,
         expectedHead,
-        workflowName: ciWorkflowName,
+        workflowName: effectiveCiWorkflowName,
       })) {
         await setRepairLabels({ remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)

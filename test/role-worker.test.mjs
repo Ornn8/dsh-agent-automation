@@ -579,6 +579,8 @@ test('recovery source identity reaches the original terminal journal and fills i
       `<!-- dsh-review-repair:${'e'.repeat(40)}:${head}:ci-run-81-2 -->`,
       '- Status: **failed**',
       `- Controller SHA: \`${'e'.repeat(40)}\``,
+      '- Repair class: `automatic-ci`',
+      '- CI workflow: `CI`',
       `- Reviewed head: \`${head}\``,
       `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${sourceRun}`,
     ].join('\n'),

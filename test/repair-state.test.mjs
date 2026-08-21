@@ -12,7 +12,7 @@ import { classifyAndCreateWorkerRouteDecision } from '../src/worker-routing.mjs'
 
 const controllerSha = 'a'.repeat(40)
 
-function repairStatus({ marker = 'request', sha = controllerSha, repairClass = 'automatic-review', status = 'failed', runId = null } = {}) {
+function repairStatus({ marker = 'request', sha = controllerSha, repairClass = 'automatic-review', status = 'failed', runId = null, stageId = null, ciWorkflow = null } = {}) {
   return [
     `<!-- dsh-review-repair:${sha}:${'c'.repeat(40)}:${marker} -->`,
     '### DSH repair',
@@ -21,6 +21,8 @@ function repairStatus({ marker = 'request', sha = controllerSha, repairClass = '
     ...(runId ? [`- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${runId}`] : []),
     `- Controller SHA: \`${sha}\``,
     `- Repair class: \`${repairClass}\``,
+    ...(stageId ? [`- Stage: \`${stageId}\``] : []),
+    ...(ciWorkflow ? [`- CI workflow: \`${ciWorkflow}\``] : []),
   ].join('\n')
 }
 
@@ -44,7 +46,151 @@ test('repair status exposes controller provenance only as audit metadata', () =>
     repairClass: 'automatic-ci',
     status: 'dead-letter',
     runId: null,
+    workflowStage: null,
+    ciWorkflow: null,
+    originalRequestId: null,
   })
+})
+
+test('recovery identity restores immutable repair routing evidence and rejects contradictory source lines', () => {
+  const sourceRun = 31775196648
+  const head = 'c'.repeat(40)
+  const source = (repairClass, extra = {}) => [
+    `<!-- dsh-review-repair:${controllerSha}:${head}:review-repair-${head}-comment-7 -->`,
+    '- Status: **failed**',
+    `- Controller SHA: \`${controllerSha}\``,
+    `- Repair class: \`${repairClass}\``,
+    `- Reviewed head: \`${head}\``,
+    `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${sourceRun}`,
+    ...(extra.stageId ? [`- Stage: \`${extra.stageId}\``] : []),
+    ...(extra.ciWorkflow ? [`- CI workflow: \`${extra.ciWorkflow}\``] : []),
+  ].join('\n')
+
+  assert.deepEqual(recoverableRepairIdentity({
+    requestId: `recovery-${sourceRun}-1`,
+    comments: [{ user: { login: 'controller' }, body: source('automatic-merge', { stageId: 'change' }) }],
+    controllerSha,
+    expectedHead: head,
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }), {
+    requestId: `recovery-${sourceRun}-1`,
+    originalRequestId: `review-repair-${head}-comment-7`,
+    sourceRunId: String(sourceRun),
+    sourceStatus: 'failed',
+    repairClass: 'automatic-merge',
+    repairCause: 'merge-conflict',
+    repairCode: 'merge-conflict',
+    workflowStage: 'change',
+    ciWorkflow: null,
+  })
+
+  assert.deepEqual(recoverableRepairIdentity({
+    requestId: `recovery-${sourceRun}-1`,
+    comments: [{ user: { login: 'controller' }, body: source('explicit-human') }],
+    controllerSha,
+    expectedHead: head,
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }).workflowStage, 'repair')
+
+  assert.deepEqual(recoverableRepairIdentity({
+    requestId: `recovery-${sourceRun}-1`,
+    comments: [{ user: { login: 'controller' }, body: source('automatic-ci', { ciWorkflow: 'CI' }) }],
+    controllerSha,
+    expectedHead: head,
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }).repairCode, 'CI')
+
+  for (const body of [
+    source('automatic-review', { ciWorkflow: 'CI' }),
+    source('automatic-ci'),
+    source('automatic-review', { stageId: 'bad stage' }),
+    source('automatic-review').replace('- Repair class: `automatic-review`', '- Repair class: `automatic-review`\n- Repair class: `automatic-merge`'),
+  ]) {
+    assert.throws(() => recoverableRepairIdentity({
+      requestId: `recovery-${sourceRun}-1`,
+      comments: [{ user: { login: 'controller' }, body }],
+      controllerSha,
+      expectedHead: head,
+      markerAuthor: 'controller',
+      repository: 'Ornn8/deepseek-harness',
+    }), /trusted repair source comment/)
+  }
+})
+
+test('recovery-of-recovery follows only a strict original request marker', () => {
+  const sourceRun = 31775196649
+  const head = 'c'.repeat(40)
+  const originalRequestId = `review-repair-${head}-run-7`
+  const recoveryBody = [
+    `<!-- dsh-review-repair:${controllerSha}:${head}:recovery-31775196648-1 -->`,
+    '- Status: **failed**',
+    `- Controller SHA: \`${controllerSha}\``,
+    '- Repair class: `explicit-human`',
+    '- Stage: `change`',
+    `- Original request: \`${originalRequestId}\``,
+    `- Reviewed head: \`${head}\``,
+    `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${sourceRun}`,
+  ].join('\n')
+  const identity = recoverableRepairIdentity({
+    requestId: `recovery-${sourceRun}-2`,
+    comments: [{ user: { login: 'controller' }, body: recoveryBody }],
+    controllerSha,
+    expectedHead: head,
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  })
+  assert.equal(identity.originalRequestId, originalRequestId)
+  assert.equal(identity.workflowStage, 'change')
+
+  for (const body of [
+    recoveryBody.replace(`- Original request: \`${originalRequestId}\`\n`, ''),
+    recoveryBody.replace(originalRequestId, 'recovery-31775196648-1'),
+    recoveryBody.replace(`- Original request: \`${originalRequestId}\``, `- Original request: \`${originalRequestId}\`\n- Original request: \`${originalRequestId}\``),
+  ]) {
+    assert.throws(() => recoverableRepairIdentity({
+      requestId: `recovery-${sourceRun}-2`,
+      comments: [{ user: { login: 'controller' }, body }],
+      controllerSha,
+      expectedHead: head,
+      markerAuthor: 'controller',
+      repository: 'Ornn8/deepseek-harness',
+    }), /trusted repair source comment/)
+  }
+})
+
+test('CI recovery keeps the original source comment when recovery comments share its request id', () => {
+  const originalRun = 31775196648
+  const recoveryRun = 31775196649
+  const head = 'c'.repeat(40)
+  const originalRequestId = 'ci-run-81-2'
+  const comment = (markerRequestId, runId, originalRequest = null) => [
+    `<!-- dsh-review-repair:${controllerSha}:${head}:${markerRequestId} -->`,
+    '- Status: **failed**',
+    `- Controller SHA: \`${controllerSha}\``,
+    '- Repair class: `automatic-ci`',
+    '- Stage: `repair`',
+    '- CI workflow: `CI`',
+    ...(originalRequest ? [`- Original request: \`${originalRequest}\``] : []),
+    `- Reviewed head: \`${head}\``,
+    `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${runId}`,
+  ].join('\n')
+
+  const identity = recoverableRepairIdentity({
+    requestId: `${originalRequestId}.recovery-2`,
+    comments: [
+      { user: { login: 'controller' }, body: comment(originalRequestId, originalRun) },
+      { user: { login: 'controller' }, body: comment('recovery-31775196648-1', recoveryRun, originalRequestId) },
+    ],
+    controllerSha,
+    expectedHead: head,
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  })
+  assert.equal(identity.originalRequestId, originalRequestId)
+  assert.equal(identity.sourceRunId, String(originalRun))
 })
 
 test('repair route evidence excludes mutable metadata while exact paths and generations remain decisive', () => {
@@ -122,6 +268,8 @@ test('recovery identity restores the exact source WorkRequest and rejects untrus
     `<!-- dsh-review-repair:${controllerSha}:${'c'.repeat(40)}:ci-run-81-2 -->`,
     '- Status: **failed**',
     `- Controller SHA: \`${controllerSha}\``,
+    '- Repair class: `automatic-ci`',
+    '- CI workflow: `CI`',
     '- Reviewed head: `' + 'c'.repeat(40) + '`',
     `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${sourceRun}`,
   ].join('\n')
@@ -139,6 +287,11 @@ test('recovery identity restores the exact source WorkRequest and rejects untrus
     originalRequestId: 'ci-run-81-2',
     sourceRunId: String(sourceRun),
     sourceStatus: 'failed',
+    repairClass: 'automatic-ci',
+    repairCause: 'CI',
+    repairCode: 'CI',
+    workflowStage: 'repair',
+    ciWorkflow: 'CI',
   })
   assert.deepEqual(recoverableRepairIdentity({
     requestId: `recovery-${sourceRun}-1`,
