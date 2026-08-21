@@ -27,7 +27,7 @@ import {
   readCapacityRegistry,
   withCapacityRegistryLock,
 } from '../src/capacity-registry-store.mjs'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -234,9 +234,16 @@ function attempt(overrides = {}) {
 }
 
 function runStoreProcess(...args) {
-  const child = spawn(process.execPath, [storeFixture, ...args.map(String)], {
+  return waitStoreProcess(startStoreProcess(...args))
+}
+
+function startStoreProcess(...args) {
+  return spawn(process.execPath, [storeFixture, ...args.map(String)], {
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   })
+}
+
+function waitStoreProcess(child) {
   return new Promise(resolve => {
     let stdout = ''
     let stderr = ''
@@ -244,6 +251,31 @@ function runStoreProcess(...args) {
     child.stderr.on('data', chunk => { stderr += chunk })
     child.on('exit', (code, signal) => resolve({ code, signal, stdout, stderr }))
   })
+}
+
+async function assertReleasedGate(paths) {
+  const files = await readdir(paths.directory)
+  assert.equal(files.filter(name => name === 'registry.lock.reclaim' || name === 'registry.lock.quarantine').length, 0)
+  try {
+    assert.ok((await stat(paths.lockPath)).isDirectory())
+    assert.deepEqual(await readdir(paths.lockPath), [])
+  } catch (error) {
+    assert.equal(error?.code, 'ENOENT')
+  }
+}
+
+async function waitForFile(path, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      await readFile(path, 'utf8')
+      return
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+  }
+  throw new Error(`Timed out waiting for ${path}`)
 }
 
 test('durable registry derives opaque keys from complete identity and persists records', async () => {
@@ -330,8 +362,69 @@ test('24 real processes have one canonical owner and one callback each', { timeo
     assert.equal(state.maxActive, 1)
     assert.equal(Object.keys(state.calls).length, 24)
     assert.ok(Object.values(state.calls).every(count => count === 1))
-    const files = await readdir(capacityRegistryPaths(stateRoot).directory)
-    assert.equal(files.filter(name => name === 'registry.lock' || name === 'registry.lock.reclaim' || name === 'registry.lock.quarantine').length, 0)
+    await assertReleasedGate(capacityRegistryPaths(stateRoot))
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('a live callback remains exclusive after its lease duration', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-overlease-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    const first = startStoreProcess('overlease', stateRoot, 'first')
+    await waitForFile(`${paths.directory}/lock-observations.json.first.ready`)
+    await new Promise(resolve => setTimeout(resolve, 140))
+    const second = startStoreProcess('overlease', stateRoot, 'second')
+    const results = await Promise.all([waitStoreProcess(first), waitStoreProcess(second)])
+    assert.ok(results.every(result => result.code === 0), results.map(result => result.stderr).join('\n'))
+    const state = JSON.parse(await readFile(join(paths.directory, 'lock-observations.json'), 'utf8'))
+    assert.equal(state.maxActive, 1)
+    assert.deepEqual(Object.values(state.calls).sort(), [1, 1])
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('owner-addressed release leaves a replacement gate intact', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-release-race-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    const owner = startStoreProcess('release-race', stateRoot, 'owner')
+    await waitForFile(`${paths.directory}/release-race.ready`)
+    const ownerName = (await readdir(paths.lockPath)).find(name => name.startsWith('registry-owner.') && name.endsWith('.json'))
+    assert.ok(ownerName)
+    const oldLease = JSON.parse(await readFile(join(paths.lockPath, ownerName), 'utf8'))
+    await rename(paths.lockPath, paths.quarantinePath)
+    await mkdir(paths.lockPath)
+    const replacement = {
+      ...oldLease,
+      ownerToken: 'replacement-owner',
+      fence: oldLease.fence + 1,
+      pid: process.pid,
+      acquiredAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }
+    await writeFile(join(paths.lockPath, 'registry-owner.replacement-owner.json'), `${JSON.stringify(replacement)}\n`, 'utf8')
+    await writeFile(join(paths.directory, 'release-race.go'), 'go\n', 'utf8')
+    const result = await waitStoreProcess(owner)
+    assert.notEqual(result.code, 0)
+    const surviving = JSON.parse(await readFile(join(paths.lockPath, 'registry-owner.replacement-owner.json'), 'utf8'))
+    assert.equal(surviving.ownerToken, 'replacement-owner')
+    assert.equal(surviving.fence, oldLease.fence + 1)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('a crash during canonical gate acquisition is recoverable', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-acquire-crash-'))
+  try {
+    const crashed = await runStoreProcess('partial', stateRoot, 'partial')
+    assert.equal(crashed.code, 17)
+    const recovered = await runStoreProcess('append', stateRoot, 'recovered')
+    assert.equal(recovered.code, 0, recovered.stderr)
+    assert.deepEqual((await readCapacityAttempts(stateRoot)).map(item => item.attemptId), ['attempt-recovered'])
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
@@ -345,8 +438,7 @@ test('a crashed owner is reclaimed once without deleting the replacement owner',
     await new Promise(resolve => setTimeout(resolve, 150))
     const replacement = await runStoreProcess('lock', stateRoot, 'replacement')
     assert.equal(replacement.code, 0, replacement.stderr)
-    const files = await readdir(capacityRegistryPaths(stateRoot).directory)
-    assert.deepEqual(files.filter(name => name.startsWith('registry.lock')), [])
+    await assertReleasedGate(capacityRegistryPaths(stateRoot))
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
@@ -405,7 +497,7 @@ test('stale reclaim markers are recovered through one fixed quarantine path', { 
     assert.ok(results.every(result => result.code === 0), results.map(result => result.stderr).join('\n'))
     const files = await readdir(paths.directory)
     assert.ok(files.length < 20)
-    assert.equal(files.filter(name => name === 'registry.lock' || name === 'registry.lock.reclaim' || name === 'registry.lock.quarantine').length, 0)
+    await assertReleasedGate(paths)
     assert.deepEqual((await readCapacityAttempts(stateRoot)).map(item => item.attemptId).sort(), ['attempt-a', 'attempt-b', 'attempt-c'])
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })

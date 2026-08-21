@@ -1,13 +1,13 @@
 import { appendCapacityAttempt, createCapacityAttempt, withCapacityRegistryLock, capacityRegistryPaths } from '../../src/capacity-registry-store.mjs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 
 const [, , mode, stateRoot, id] = process.argv
 const hash = 'a'.repeat(64)
 const now = Date.parse('2026-08-21T00:00:00.000Z')
 
-if (!stateRoot || !id) throw new Error('usage: append|lock <stateRoot> <id>')
+if (!stateRoot || !id) throw new Error('usage: append|lock|overlease|release-race|partial|crash|expire <stateRoot> <id>')
 
-if (mode === 'lock') {
+if (mode === 'lock' || mode === 'overlease') {
   const statePath = `${capacityRegistryPaths(stateRoot).directory}/lock-observations.json`
   await withCapacityRegistryLock(stateRoot, async () => {
     let state
@@ -19,12 +19,38 @@ if (mode === 'lock') {
     state.maxActive = Math.max(state.maxActive, state.active)
     state.calls[id] = (state.calls[id] ?? 0) + 1
     await writeFile(statePath, `${JSON.stringify(state)}\n`, 'utf8')
-    await new Promise(resolve => setTimeout(resolve, 25))
+    if (mode === 'overlease') await writeFile(`${statePath}.${id}.ready`, 'ready\n', 'utf8')
+    await new Promise(resolve => setTimeout(resolve, mode === 'overlease' ? 250 : 25))
     state.active -= 1
     await writeFile(statePath, `${JSON.stringify(state)}\n`, 'utf8')
-  }, { waitMs: 60_000, leaseMs: 60_000 })
+  }, { waitMs: 60_000, leaseMs: mode === 'overlease' ? 100 : 60_000 })
   process.stdout.write('locked\n')
   process.exit(0)
+}
+
+if (mode === 'release-race') {
+  const paths = capacityRegistryPaths(stateRoot)
+  await withCapacityRegistryLock(stateRoot, async () => {
+    await writeFile(`${paths.directory}/release-race.ready`, 'ready\n', 'utf8')
+    while (true) {
+      try {
+        await readFile(`${paths.directory}/release-race.go`, 'utf8')
+        break
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+    }
+  }, { waitMs: 5_000, leaseMs: 5_000 })
+  process.stdout.write('released\n')
+  process.exit(0)
+}
+
+if (mode === 'partial') {
+  const paths = capacityRegistryPaths(stateRoot)
+  await mkdir(paths.directory, { recursive: true })
+  await mkdir(paths.lockPath)
+  process.exit(17)
 }
 
 if (mode === 'crash') {
@@ -48,7 +74,7 @@ if (mode === 'expire') {
   }, { waitMs: 5_000, leaseMs: 100 })
 }
 
-if (mode !== 'append') throw new Error('usage: append|lock|crash|expire <stateRoot> <id>')
+if (mode !== 'append') throw new Error('usage: append|lock|overlease|release-race|partial|crash|expire <stateRoot> <id>')
 
 await appendCapacityAttempt(stateRoot, createCapacityAttempt({
   attemptId: `attempt-${id}`,
