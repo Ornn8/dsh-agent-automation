@@ -7,6 +7,7 @@ import test from 'node:test'
 import { createWorkerExecutionClaim, runRoleWorker } from '../src/role-worker.mjs'
 import { classifyAndCreateWorkerRouteDecision, createLocalWorkerRoutingExecution } from '../src/worker-routing.mjs'
 import { capacityRecordKey, createCapacityRegistry } from '../src/capacity-registry-store.mjs'
+import { createGovernorStartRecorder } from '../src/governor-policy.mjs'
 
 const stateVersion = 'a'.repeat(64)
 
@@ -169,14 +170,14 @@ test('local routing rejects a wrong or stale WorkerRouteDecision', async () => {
   }), /provider-owned/)
 })
 
-test('local routing reuses a durable route decision across changed task evidence', () => {
+test('local routing binds repair evidence to exact paths without a durable caller bypass', () => {
   const workRequest = { requestId: 'request-durable-route', role: 'change' }
   const routingPolicy = {
     version: 1,
     default: 'default',
     classificationOrder: ['frontend'],
     routes: {
-      frontend: { rules: { titleIncludes: ['frontend'] } },
+      frontend: { rules: { pathPrefixes: ['web/'] } },
       default: { rules: {} },
     },
   }
@@ -184,15 +185,14 @@ test('local routing reuses a durable route decision across changed task evidence
     workRequest,
     subjectStateVersion: stateVersion,
     routingPolicy,
-    trustedTaskSnapshot: { title: 'frontend repair', labels: ['automation/ci-failed'] },
+    trustedTaskSnapshot: { paths: ['web/Button.tsx'], workflowStage: 'repair' },
   })
   const execution = createLocalWorkerRoutingExecution({
     workRequest,
     subjectStateVersion: stateVersion,
     routingPolicy,
-    trustedTaskSnapshot: { title: 'ordinary repair', labels: ['automation/repairing'] },
+    trustedTaskSnapshot: { paths: ['web/Button.tsx'], workflowStage: 'repair' },
     routeDecision,
-    durableRouteDecision: true,
   })
 
   assert.deepEqual(execution.routeDecision, routeDecision)
@@ -200,6 +200,7 @@ test('local routing reuses a durable route decision across changed task evidence
 
 function attemptProvider({ available = true, generation = 1, replayOutcome = null } = {}) {
   let currentGeneration = generation
+  let currentAvailability = available
   const claims = new Map()
   const records = []
   const failures = []
@@ -210,8 +211,11 @@ function attemptProvider({ available = true, generation = 1, replayOutcome = nul
     setGeneration(value) {
       currentGeneration = value
     },
+    setAvailable(value) {
+      currentAvailability = value
+    },
     async inspect({ capacityGroup }) {
-      return { eligible: available, state: available ? 'available' : 'disabled', generation: currentGeneration, capacityGroup }
+      return { eligible: currentAvailability, state: currentAvailability ? 'available' : 'disabled', generation: currentGeneration, capacityGroup }
     },
     async recordFailure(input) {
       failures.push(input)
@@ -561,6 +565,67 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(calls, 0)
   assert.equal(provider.claims.size, 3)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
+})
+
+test('capacity deferral leaves Governor start records untouched until same-claim reentry starts a Worker', async () => {
+  const provider = attemptProvider({ available: false, generation: 3 })
+  const writes = []
+  const recordGovernorStart = createGovernorStartRecorder({
+    records: [
+      { version: 1, status: 'attempt', transition: 'ci-repair' },
+      { version: 1, status: 'applied', transition: 'ci-repair' },
+    ],
+    writeRecord: async record => writes.push(record),
+  })
+  let calls = 0
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-deferred-reentry', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: { ...invocation(), onStarted: recordGovernorStart },
+    adapters: { fake: async ({ invocation }) => {
+      calls += 1
+      await invocation.onStarted({ sessionId: 'reentry-session' })
+      return { sessionId: 'reentry-session', outcome: 'completed' }
+    } },
+  }
+
+  const deferred = await runRoleWorker(input)
+  assert.equal(deferred.outcome, 'capacity-deferred')
+  assert.deepEqual(writes, [])
+  assert.equal(calls, 0)
+
+  provider.setAvailable(true)
+  provider.setGeneration(4)
+  const resumed = await runRoleWorker(input)
+  assert.equal(resumed.outcome, 'completed')
+  assert.deepEqual(writes.map(record => record.status), ['attempt', 'applied'])
+  assert.equal(calls, 1)
+})
+
+test('Governor start record failure stops the prompt and does not fail over', async () => {
+  const provider = attemptProvider()
+  const calls = []
+  await assert.rejects(runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-start-write-failure', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: {
+      ...invocation(),
+      onStarted: async () => { throw new Error('Governor record write failed') },
+    },
+    adapters: {
+      fake: async ({ workerId, invocation }) => {
+        calls.push(`${workerId}:session`)
+        await invocation.onStarted({ sessionId: `${workerId}-session` })
+        calls.push(`${workerId}:prompt`)
+        return { sessionId: `${workerId}-session`, outcome: 'completed' }
+      },
+    },
+  }), /Governor record write failed/)
+  assert.deepEqual(calls, ['first:session'])
 })
 
 test('completed Worker output is durably available to a replay', async () => {

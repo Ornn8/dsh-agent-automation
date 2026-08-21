@@ -16,8 +16,6 @@ const MAX_RULE_VALUES = 32
 const MAX_LABELS = 100
 const MAX_PATHS = 100
 const MAX_TEXT = 4096
-const ROUTE_DECISION_MARKER = '<!-- worker-route-decision:v1 -->'
-const ROUTE_DECISION_TRAILER = '<!-- /worker-route-decision:v1 -->'
 const DECISION_FIELDS = new Set([
   'version', 'workRequestId', 'role', 'stateVersion', 'taskClass', 'policyHash', 'evidenceHash',
 ])
@@ -39,107 +37,6 @@ function canonicalJson(value) {
     return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
   }
   return JSON.stringify(value)
-}
-
-/** Reject duplicate member names before JSON.parse can collapse them.
- * @param {string} text
- * @returns {void}
- */
-function rejectDuplicateJsonMembers(text) {
-  let index = 0
-
-  function skipWhitespace() {
-    while (index < text.length && /[\u0009\u000a\u000d\u0020]/.test(text[index])) index += 1
-  }
-
-  /** @returns {string|undefined} */
-  function scanString() {
-    const start = index
-    index += 1
-    while (index < text.length) {
-      const character = text[index]
-      index += 1
-      if (character === '\\') {
-        if (index < text.length) index += 1
-        continue
-      }
-      if (character === '"') {
-        try {
-          return JSON.parse(text.slice(start, index))
-        } catch {
-          return undefined
-        }
-      }
-    }
-    return undefined
-  }
-
-  function scanValue() {
-    skipWhitespace()
-    if (text[index] === '{') {
-      scanObject()
-      return
-    }
-    if (text[index] === '[') {
-      scanArray()
-      return
-    }
-    if (text[index] === '"') {
-      scanString()
-      return
-    }
-    while (index < text.length && !/[,\]}\u0009\u000a\u000d\u0020]/.test(text[index])) index += 1
-  }
-
-  function scanObject() {
-    index += 1
-    const members = new Set()
-    skipWhitespace()
-    if (text[index] === '}') {
-      index += 1
-      return
-    }
-    while (index < text.length) {
-      skipWhitespace()
-      if (text[index] !== '"') return
-      const member = scanString()
-      if (member === undefined) return
-      if (members.has(member)) throw new Error(`WorkerRouteDecision body has duplicate JSON member ${member}`)
-      members.add(member)
-      skipWhitespace()
-      if (text[index] !== ':') return
-      index += 1
-      scanValue()
-      skipWhitespace()
-      if (text[index] === '}') {
-        index += 1
-        return
-      }
-      if (text[index] !== ',') return
-      index += 1
-    }
-  }
-
-  function scanArray() {
-    index += 1
-    skipWhitespace()
-    if (text[index] === ']') {
-      index += 1
-      return
-    }
-    while (index < text.length) {
-      scanValue()
-      skipWhitespace()
-      if (text[index] === ']') {
-        index += 1
-        return
-      }
-      if (text[index] !== ',') return
-      index += 1
-    }
-  }
-
-  scanValue()
 }
 
 /** @param {AnyValue} value @returns {string} */
@@ -565,38 +462,6 @@ export function serializeWorkerRouteDecision(value) {
   return canonicalJson(parseWorkerRouteDecision(value))
 }
 
-/** Render a controller-owned durable decision record for a comment or file. */
-/** @param {AnyValue} value @returns {string} */
-export function workerRouteDecisionBody(value) {
-  return `${ROUTE_DECISION_MARKER}\n${serializeWorkerRouteDecision(value)}\n${ROUTE_DECISION_TRAILER}`
-}
-
-/** Parse one durable decision record and optionally verify its WorkRequest and exact subject state. */
-/** @param {AnyValue} body @param {AnyObject} options @returns {AnyObject} */
-export function parseWorkerRouteDecisionBody(body, options = {}) {
-  if (typeof body !== 'string') throw new Error('WorkerRouteDecision body must be text')
-  const markerIndex = body.indexOf(ROUTE_DECISION_MARKER)
-  const trailerIndex = body.indexOf(ROUTE_DECISION_TRAILER)
-  if (markerIndex !== 0
-    || markerIndex !== body.lastIndexOf(ROUTE_DECISION_MARKER)
-    || trailerIndex <= markerIndex
-    || trailerIndex !== body.lastIndexOf(ROUTE_DECISION_TRAILER)
-    || trailerIndex + ROUTE_DECISION_TRAILER.length !== body.length) {
-    throw new Error('WorkerRouteDecision body must contain one exact durable v1 record with no surrounding content')
-  }
-  const start = markerIndex + ROUTE_DECISION_MARKER.length
-  const end = trailerIndex
-  const serialized = body.slice(start, end).trim()
-  rejectDuplicateJsonMembers(serialized)
-  let value
-  try {
-    value = JSON.parse(serialized)
-  } catch (error) {
-    throw new Error(`WorkerRouteDecision body is not valid JSON: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
-  }
-  return parseWorkerRouteDecision(value, options)
-}
-
 /** Classify and bind one exact WorkRequest state in one deterministic operation. */
 /** @param {AnyObject} options @returns {AnyObject} */
 export function classifyAndCreateWorkerRouteDecision(options = {}) {
@@ -606,23 +471,24 @@ export function classifyAndCreateWorkerRouteDecision(options = {}) {
 
 /**
  * Derive the Worker-owned routing execution identity from trusted local input.
- * A persisted WorkerRouteDecision is accepted when the caller has already
- * authenticated its durable source; otherwise it must match fresh local
- * classification. The returned identity contains no concrete Worker,
- * provider, or model.
+ * A supplied decision must match fresh local classification. The returned
+ * identity contains no concrete Worker, provider, or model.
  * @param {AnyObject} options
  * @returns {AnyObject}
  */
-export function createLocalWorkerRoutingExecution({ routeDecision, durableRouteDecision = false, ...options } = {}) {
+export function createLocalWorkerRoutingExecution({ routeDecision, ...options } = {}) {
   if (Object.prototype.hasOwnProperty.call(options, 'generation')) {
     throw new Error('local routing generation is provider-owned')
   }
-  const localDecision = durableRouteDecision ? null : classifyAndCreateWorkerRouteDecision(options)
+  const accepted = new Set(['workRequest', 'subjectState', 'subjectStateVersion', 'stateVersion', 'trustedTaskSnapshot', 'routingPolicy'])
+  for (const key of Object.keys(options)) {
+    if (!accepted.has(key)) throw new Error(`local routing option ${key} is not recognized`)
+  }
+  const localDecision = classifyAndCreateWorkerRouteDecision(options)
   const decision = routeDecision === undefined
-    ? localDecision || classifyAndCreateWorkerRouteDecision(options)
+    ? localDecision
     : parseWorkerRouteDecision(routeDecision, options)
-  if (routeDecision !== undefined && !durableRouteDecision
-    && JSON.stringify(decision) !== JSON.stringify(localDecision)) {
+  if (routeDecision !== undefined && JSON.stringify(decision) !== JSON.stringify(localDecision)) {
     throw new Error('WorkerRouteDecision does not match the local trusted routing authority')
   }
   const identity = {

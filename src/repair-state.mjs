@@ -1,13 +1,8 @@
-import { parseWorkerRouteDecisionBody } from './worker-routing.mjs'
-
 const STATUS_PATTERN = /^- Status: \*\*(running|capacity-waiting|complete|failed|dead-letter)\*\*$/m
 const RUN_ID_PATTERN = /^- Run: https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/actions\/runs\/(\d+)\s*$/m
 const MARKER_PATTERN = /^<!-- dsh-review-repair:([0-9a-f]{40}):([0-9a-f]{40})(?::[A-Za-z0-9._-]{1,100})? -->$/m
 const CONTROLLER_SHA_PATTERN = /^- Controller SHA: `([0-9a-f]{40})`$/m
 const REPAIR_CLASS_PATTERN = /^- Repair class: `(automatic-review|automatic-ci|explicit-human)`$/m
-const ROUTE_DECISION_MARKER = '<!-- worker-route-decision:v1 -->'
-const ROUTE_DECISION_TRAILER = '<!-- /worker-route-decision:v1 -->'
-
 /** Parse the durable state recorded by one repair status comment. */
 export function recordedRepairState(body) {
   const text = String(body || '')
@@ -26,21 +21,19 @@ export function recordedRepairStatus(body) {
   return { marker, controllerSha, repairClass, ...recordedRepairState(text) }
 }
 
-/** Parse the existing durable WorkerRouteDecision carried by one repair status comment. */
-export function recordedRepairRouteDecision(body, options = {}) {
-  const text = String(body || '')
-  const markerAt = text.indexOf(ROUTE_DECISION_MARKER)
-  if (markerAt < 0) return null
-  const trailerAt = text.indexOf(ROUTE_DECISION_TRAILER, markerAt)
-  if (markerAt !== text.lastIndexOf(ROUTE_DECISION_MARKER)
-    || trailerAt < 0
-    || trailerAt !== text.lastIndexOf(ROUTE_DECISION_TRAILER)) {
-    throw new Error('Repair status must contain one durable WorkerRouteDecision')
+/**
+ * Keep repair routing evidence limited to exact changed paths, trusted Stage, and verified cause.
+ * @param {{paths?: unknown, workflowStage?: unknown, failureEvidence?: unknown}} options
+ * @returns {{paths: unknown[], workflowStage: string, failureEvidence: object}}
+ */
+export function repairRoutingEvidence({ paths, workflowStage, failureEvidence } = {}) {
+  return {
+    paths: Array.isArray(paths) ? paths : [],
+    workflowStage: typeof workflowStage === 'string' ? workflowStage : '',
+    failureEvidence: failureEvidence && typeof failureEvidence === 'object' && !Array.isArray(failureEvidence)
+      ? failureEvidence
+      : {},
   }
-  return parseWorkerRouteDecisionBody(
-    text.slice(markerAt, trailerAt + ROUTE_DECISION_TRAILER.length),
-    options,
-  )
 }
 
 /** Return whether a replacement run may reclaim an interrupted repair request. */

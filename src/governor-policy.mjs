@@ -327,6 +327,24 @@ export function governorBudgetDecision({ transition, subject, workIdentity, obse
   }
 }
 
+/**
+ * Create the one-shot writer for Governor records that become true at Worker start.
+ * @param {{records?: object[], writeRecord: (record: object) => Promise<void>|void}} options
+ * @returns {() => Promise<void>}
+ */
+export function createGovernorStartRecorder({ records = [], writeRecord } = {}) {
+  if (!Array.isArray(records) || records.some(record => !record || typeof record !== 'object')) {
+    throw new Error('Governor start records must be objects')
+  }
+  if (typeof writeRecord !== 'function') throw new Error('Governor start recorder requires a writer')
+  let started = false
+  return async () => {
+    if (started) return
+    for (const record of records) await writeRecord(record)
+    started = true
+  }
+}
+
 /** Return whether a value is one exact Gregorian calendar date in UTC notation. */
 export function isUtcDay(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false

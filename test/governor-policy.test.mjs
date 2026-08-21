@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
+  createGovernorStartRecorder,
   governorBudgetDecision,
   governorDecision,
   governorRecordBody,
@@ -31,6 +32,23 @@ const issue = {
   body: 'Branch: `agent/governor-control-plane`',
   labels: [],
 }
+
+test('governor start records stay deferred until a Worker session starts', async () => {
+  const writes = []
+  const recordStart = createGovernorStartRecorder({
+    records: [
+      { version: 1, status: 'attempt', transition: 'ci-repair' },
+      { version: 1, status: 'applied', transition: 'ci-repair' },
+    ],
+    writeRecord: async record => writes.push(record),
+  })
+
+  assert.deepEqual(writes, [])
+  await recordStart()
+  assert.deepEqual(writes.map(record => record.status), ['attempt', 'applied'])
+  await recordStart()
+  assert.equal(writes.length, 2)
+})
 
 test('Workflow Stage transition identity changes with Profile content or Stage', () => {
   const first = workflowStageTransition({

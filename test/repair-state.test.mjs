@@ -3,11 +3,11 @@ import test from 'node:test'
 
 import {
   interruptedRepairMayRetry,
-  recordedRepairRouteDecision,
+  repairRoutingEvidence,
   recordedRepairStatus,
   recordedRepairState,
 } from '../src/repair-state.mjs'
-import { classifyAndCreateWorkerRouteDecision, workerRouteDecisionBody } from '../src/worker-routing.mjs'
+import { classifyAndCreateWorkerRouteDecision } from '../src/worker-routing.mjs'
 
 const controllerSha = 'a'.repeat(40)
 
@@ -30,7 +30,7 @@ const routingPolicy = {
   default: 'default',
   classificationOrder: ['frontend'],
   routes: {
-    frontend: { rules: { titleIncludes: ['frontend'] } },
+    frontend: { rules: { pathPrefixes: ['web/'] } },
     default: { rules: {} },
   },
 }
@@ -46,39 +46,55 @@ test('repair status exposes controller provenance only as audit metadata', () =>
   })
 })
 
-test('repair status reuses one durable route decision when title and labels change', () => {
+test('repair route evidence excludes mutable metadata while exact paths and generations remain decisive', () => {
+  const firstEvidence = repairRoutingEvidence({
+    paths: ['web/Button.tsx'],
+    workflowStage: 'repair',
+    failureEvidence: { class: 'automatic-review', code: 'review-repair' },
+    title: 'frontend repair',
+    body: 'labels: automation/ci-failed',
+    labels: ['automation/ci-failed'],
+  })
+  const changedMetadataEvidence = repairRoutingEvidence({
+    paths: ['web/Button.tsx'],
+    workflowStage: 'repair',
+    failureEvidence: { class: 'automatic-review', code: 'review-repair' },
+    title: 'ordinary repair',
+    body: 'labels: automation/repairing',
+    labels: ['automation/repairing'],
+  })
   const decision = classifyAndCreateWorkerRouteDecision({
     workRequest,
     stateVersion,
     routingPolicy,
-    trustedTaskSnapshot: { title: 'frontend repair', labels: ['automation/ci-failed'] },
+    trustedTaskSnapshot: firstEvidence,
   })
-  const body = [
-    repairStatus({ status: 'capacity-waiting' }),
-    workerRouteDecisionBody(decision),
-  ].join('\n')
-
-  const resumed = recordedRepairRouteDecision(body, {
+  const resumed = classifyAndCreateWorkerRouteDecision({
     workRequest,
     stateVersion,
     routingPolicy,
+    trustedTaskSnapshot: changedMetadataEvidence,
   })
-  const changedSnapshot = classifyAndCreateWorkerRouteDecision({
+  const changedPaths = classifyAndCreateWorkerRouteDecision({
     workRequest,
     stateVersion,
     routingPolicy,
-    trustedTaskSnapshot: { title: 'ordinary repair', labels: ['automation/repairing'] },
+    trustedTaskSnapshot: repairRoutingEvidence({
+      paths: ['src/api.ts'],
+      workflowStage: 'repair',
+      failureEvidence: { class: 'automatic-review', code: 'review-repair' },
+    }),
   })
   const newGeneration = classifyAndCreateWorkerRouteDecision({
     workRequest,
     stateVersion: 'c'.repeat(64),
     routingPolicy,
-    trustedTaskSnapshot: { title: 'ordinary repair', labels: ['product-label'] },
+    trustedTaskSnapshot: firstEvidence,
   })
 
   assert.equal(resumed.taskClass, 'frontend')
   assert.equal(resumed.evidenceHash, decision.evidenceHash)
-  assert.notEqual(changedSnapshot.taskClass, resumed.taskClass)
+  assert.notEqual(changedPaths.taskClass, resumed.taskClass)
   assert.notEqual(newGeneration.stateVersion, resumed.stateVersion)
 })
 
