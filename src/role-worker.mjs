@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 
 import { canFailoverCapacityFailure, parseAdapterFailure } from './capacity-failure.mjs'
 import { capacityEligibility } from './capacity-registry.mjs'
-import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry } from './capacity-registry-store.mjs'
+import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry, parseCapacityAttempt } from './capacity-registry-store.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import { createLocalWorkerRoutingExecution } from './worker-routing.mjs'
@@ -199,9 +199,33 @@ async function prepareAttempt(state, workerId) {
 async function claimAttempt(state, claim) {
   const prepared = ATTEMPT_CLAIMS.get(claim)
   if (!prepared || prepared.state !== state) throw new Error('Worker execution claim is not locally trusted')
-  const result = await state.provider.claimAttempt(journalEntry(prepared.base, { outcome: 'claimed' }))
+  const expected = journalEntry(prepared.base, { outcome: 'claimed' })
+  const result = await state.provider.claimAttempt(expected)
   if (!result || typeof result.claimed !== 'boolean') throw new Error('Durable claimAttempt returned an invalid result')
-  return { ...result, prepared }
+  let attempt
+  try {
+    attempt = parseCapacityAttempt(result.attempt)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`Durable claimAttempt returned an invalid attempt: ${detail}`, { cause: error })
+  }
+  const identityMatches = [
+    ['workRequestId', expected.workRequestId],
+    ['routePolicyHash', expected.routePolicyHash],
+    ['taskClass', expected.taskClass],
+    ['workerId', expected.workerId],
+    ['capacityGroup', expected.capacityGroup],
+    ['capacityGeneration', expected.capacityGeneration],
+    ['capacityGenerationHash', expected.capacityGenerationHash],
+    ['startState', expected.startState],
+  ].every(([key, value]) => attempt[key] === value)
+  if (attempt.attemptId !== expected.attemptId || !identityMatches) {
+    throw new Error('Durable claimAttempt returned a conflicting attempt')
+  }
+  if (result.claimed && attempt.result.outcome !== 'claimed') {
+    throw new Error('Durable claimAttempt claimed an attempt with a terminal result')
+  }
+  return { ...result, attempt, prepared }
 }
 
 /** @param {AnyObject} state @param {object} claim @param {AnyObject} result @returns {Promise<void>} */
@@ -341,6 +365,11 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
     const prepared = await prepareAttempt(state, workerId)
     const admission = await claimAttempt(state, prepared.claim)
     if (admission.claimed === false) {
+      const priorOutcome = admission.attempt.result.outcome
+      if (priorOutcome === 'capacity-deferred' || priorOutcome === 'capacity-failure') {
+        unavailable.push(workerId)
+        continue
+      }
       return {
         version: 1,
         outcome: 'replayed',
@@ -351,6 +380,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
         taskClass: state.execution.routeDecision.taskClass,
         routingAttemptId: state.execution.routingAttemptId,
         candidates: [...state.candidates],
+        priorOutcome,
         detail: 'This trusted routing claim was already durably claimed; no Worker was started.',
       }
     }

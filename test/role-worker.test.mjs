@@ -169,7 +169,7 @@ test('local routing rejects a wrong or stale WorkerRouteDecision', async () => {
   }), /provider-owned/)
 })
 
-function attemptProvider({ available = true, generation = 1 } = {}) {
+function attemptProvider({ available = true, generation = 1, replayOutcome = null } = {}) {
   let currentGeneration = generation
   const claims = new Map()
   const records = []
@@ -188,6 +188,9 @@ function attemptProvider({ available = true, generation = 1 } = {}) {
       failures.push(input)
     },
     async claimAttempt(input) {
+      if (replayOutcome) {
+        return { claimed: false, attempt: { ...input, result: { outcome: replayOutcome, category: null, reason: null } } }
+      }
       const existing = claims.get(input.attemptId)
       if (existing) return { claimed: false, attempt: existing }
       claims.set(input.attemptId, input)
@@ -195,6 +198,11 @@ function attemptProvider({ available = true, generation = 1 } = {}) {
     },
     async appendAttempt(input) {
       records.push(input)
+      if (input.attemptId.endsWith('-result')) {
+        const baseAttemptId = input.attemptId.slice(0, -'-result'.length)
+        const existing = claims.get(baseAttemptId)
+        if (existing) claims.set(baseAttemptId, { ...existing, endedAt: input.endedAt, result: input.result })
+      }
       return input
     },
   }
@@ -227,6 +235,7 @@ test('same trusted claim replays without executing and a provider generation exe
 
   assert.equal(first.outcome, 'completed')
   assert.equal(replay.outcome, 'replayed')
+  assert.equal(replay.priorOutcome, 'completed')
   assert.equal(nextGeneration.outcome, 'completed')
   assert.deepEqual(calls, ['first', 'first'])
   assert.equal(provider.claims.size, 2)
@@ -256,6 +265,7 @@ test('the local capacity registry durably claims and replays one execution claim
 
     assert.equal(first.outcome, 'completed')
     assert.equal(replay.outcome, 'replayed')
+    assert.equal(replay.priorOutcome, 'completed')
     assert.equal(calls, 1)
   } finally {
     await rm(stateRoot, { recursive: true, force: true })
@@ -392,6 +402,94 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(calls, 0)
   assert.equal(provider.claims.size, 3)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
+})
+
+test('all previously capacity-deferred candidates replay as deferred without starting a Worker', async () => {
+  const provider = attemptProvider({ available: false, generation: 3 })
+  let calls = 0
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-deferred-replay', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => { calls += 1; return { sessionId: 'unexpected', outcome: 'completed' } } },
+  }
+
+  const first = await runRoleWorker(input)
+  const replay = await runRoleWorker(input)
+
+  assert.equal(first.outcome, 'capacity-deferred')
+  assert.equal(replay.outcome, 'capacity-deferred')
+  assert.deepEqual(replay.unavailable, ['first', 'second', 'third'])
+  assert.equal(calls, 0)
+  assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
+})
+
+test('previous capacity-failure candidates are skipped before the next admitted Worker', async () => {
+  const provider = attemptProvider({ replayOutcome: 'capacity-failure' })
+  let calls = 0
+  const result = await runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-capacity-failure-replay', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => { calls += 1; return { sessionId: 'unexpected', outcome: 'completed' } } },
+  })
+
+  assert.equal(result.outcome, 'capacity-deferred')
+  assert.deepEqual(result.unavailable, ['first', 'second', 'third'])
+  assert.equal(calls, 0)
+})
+
+test('completed and claimed attempt replays remain terminal and never become neutral capacity deferrals', async () => {
+  for (const priorOutcome of ['completed', 'claimed']) {
+    const provider = attemptProvider({ replayOutcome: priorOutcome })
+    let calls = 0
+    const result = await runRoleWorker({
+      executionClaim: createWorkerExecutionClaim({
+        config: config(), role: 'review', workRequest: { requestId: `request-${priorOutcome}-replay`, role: 'review' },
+        subjectStateVersion: stateVersion, capacityProvider: provider,
+      }),
+      invocation: invocation(),
+      adapters: { fake: async () => { calls += 1; return { sessionId: 'unexpected', outcome: 'completed' } } },
+    })
+
+    assert.equal(result.outcome, 'replayed')
+    assert.equal(result.priorOutcome, priorOutcome)
+    assert.equal(calls, 0)
+  }
+})
+
+test('claim completion wire is parsed and immutable attempt conflicts are rejected', async () => {
+  const malformed = attemptProvider({ replayOutcome: 'completed' })
+  malformed.claimAttempt = async input => ({
+    claimed: false,
+    attempt: { ...input, result: { outcome: 'completed', category: null, reason: null, extra: true } },
+  })
+  await assert.rejects(runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'review', workRequest: { requestId: 'request-malformed-replay', role: 'review' },
+      subjectStateVersion: stateVersion, capacityProvider: malformed,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => ({ sessionId: 'unexpected', outcome: 'completed' }) },
+  }), /unknown field extra/)
+
+  const conflicting = attemptProvider({ replayOutcome: 'completed' })
+  conflicting.claimAttempt = async input => ({
+    claimed: false,
+    attempt: { ...input, workerId: 'other', result: { outcome: 'completed', category: null, reason: null } },
+  })
+  await assert.rejects(runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'review', workRequest: { requestId: 'request-conflicting-replay', role: 'review' },
+      subjectStateVersion: stateVersion, capacityProvider: conflicting,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => ({ sessionId: 'unexpected', outcome: 'completed' }) },
+  }), /conflicting attempt/)
 })
 
 test('real registry claims two expired scopes atomically and closes both on success', async () => {

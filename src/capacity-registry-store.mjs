@@ -44,6 +44,11 @@ const MAX_LOCK_LEASE_MS = 30 * 60 * 1000
 const PROCESS_IDENTITY_TIMEOUT_MS = 5_000
 const PROCESS_IDENTITY_TERMINATION_GRACE_MS = 2_500
 const ATTEMPT_COMPACTION_THRESHOLD = 64
+const ATTEMPT_RESULT_SUFFIX = '-result'
+const ATTEMPT_IMMUTABLE_FIELDS = [
+  'version', 'attemptId', 'workRequestId', 'routePolicyHash', 'taskClass', 'workerId',
+  'capacityGroup', 'capacityGeneration', 'capacityGenerationHash', 'startState',
+]
 const READ_RETRIES = 8
 const STALE_LEASE_CLEANUP_LIMIT = 64
 const LOCK_RECLAIM_MARKER = 'registry.lock.reclaim'
@@ -488,6 +493,13 @@ async function appendAttemptUnlocked(stateRoot, attempt, options = {}) {
   return normalized
 }
 
+/** @param {Record<string, any>} existing @param {Record<string, any>} candidate @returns {void} */
+function assertAttemptIdentity(existing, candidate) {
+  if (ATTEMPT_IMMUTABLE_FIELDS.some(key => existing[key] !== candidate[key])) {
+    throw new Error(`Capacity attempt ${candidate.attemptId} conflicts with the existing immutable identity`)
+  }
+}
+
 /** Atomically claim one immutable attempt identity before a Worker starts. */
 /** @param {string} stateRoot @param {Record<string, any>} attempt @param {{fence?: number, assertOwner?: () => Promise<void>}} [options] @returns {Promise<{claimed: boolean, attempt: Record<string, any>}>} */
 async function claimAttemptUnlocked(stateRoot, attempt, options = {}) {
@@ -495,14 +507,14 @@ async function claimAttemptUnlocked(stateRoot, attempt, options = {}) {
   const current = await readAttemptSnapshot(stateRoot)
   const existing = current.attempts.find(item => item.attemptId === normalized.attemptId)
   if (existing) {
-    const immutable = [
-      'version', 'attemptId', 'workRequestId', 'routePolicyHash', 'taskClass', 'workerId',
-      'capacityGroup', 'capacityGeneration', 'capacityGenerationHash', 'startState',
-    ]
-    if (immutable.some(key => existing[key] !== normalized[key])) {
-      throw new Error(`Capacity attempt ${normalized.attemptId} conflicts with the existing immutable identity`)
+    assertAttemptIdentity(existing, normalized)
+    const completion = current.attempts.find(item => item.attemptId === `${normalized.attemptId}${ATTEMPT_RESULT_SUFFIX}`)
+    if (!completion) return { claimed: false, attempt: existing }
+    assertAttemptIdentity(existing, { ...completion, attemptId: normalized.attemptId })
+    return {
+      claimed: false,
+      attempt: { ...existing, endedAt: completion.endedAt, result: completion.result },
     }
-    return { claimed: false, attempt: existing }
   }
   return { claimed: true, attempt: await appendAttemptUnlocked(stateRoot, normalized, options) }
 }
