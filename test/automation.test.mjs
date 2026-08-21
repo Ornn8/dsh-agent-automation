@@ -1228,7 +1228,8 @@ test('CI repair recovery dispatch uses verified source routing and a single root
   assert.match(source, /trustedRepairSourceComment/)
   assert.match(source, /const originalRequestId = sourceCandidate\.requestId/)
   assert.match(source, /originalRequestId\.startsWith\('ci-run-'\)/)
-  assert.match(source, /AGENT_AUTOMATION_CONTROLLER_LOGIN/)
+  assert.match(source, /requiredEnv\('TRUSTED_CONTROLLER_LOGIN'\)/)
+  assert.doesNotMatch(source, /actions\/variables\/AGENT_AUTOMATION_CONTROLLER_LOGIN/)
   assert.doesNotMatch(source, /function repairRequestId/)
 })
 

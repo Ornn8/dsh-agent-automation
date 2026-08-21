@@ -20,6 +20,8 @@ const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('RECOVERY_SOURCE_RUN_ID')
 const controllerRepository = requiredEnv('TRUSTED_CONTROLLER_REPOSITORY')
 const controllerSha = requiredEnv('TRUSTED_CONTROLLER_SHA')
+const controllerLogin = requiredEnv('TRUSTED_CONTROLLER_LOGIN')
+if (!/^[A-Za-z0-9-]{1,39}$/.test(controllerLogin)) throw new Error('TRUSTED_CONTROLLER_LOGIN is invalid')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const environment = actionsCredentialEnvironment()
 const governorRunId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
@@ -38,16 +40,6 @@ const governorWriterTrust = {
 async function ghJson(args, description) {
   const result = await run(githubExecutable, args, { env: environment })
   return parseJson(result.stdout, description)
-}
-
-async function trustedControllerLogin() {
-  const variable = await ghJson([
-    'api', `repos/${repository}/actions/variables/AGENT_AUTOMATION_CONTROLLER_LOGIN`,
-  ], 'controller login variable')
-  if (typeof variable?.value !== 'string' || !/^[A-Za-z0-9-]{1,39}$/.test(variable.value)) {
-    throw new Error('Controller login variable is invalid')
-  }
-  return variable.value
 }
 
 function paginatedPath(path, page) {
@@ -312,7 +304,6 @@ if (!role) {
   process.stdout.write(`Recovery ignored untrusted source workflow run ${sourceRunId}.\n`)
   process.exit(0)
 }
-const controllerLogin = role === 'pull-request' ? await trustedControllerLogin() : null
 const sourceJobs = await reviewJobs()
 const failureSignature = workflowFailureSignature(workflowRun, sourceJobs)
 
@@ -371,7 +362,7 @@ for (const current of subjects) {
   const sourceCandidates = role === 'pull-request'
     ? sourceComments.flatMap(comment => {
       const sourceHead = reviewedHead(comment.body)
-      if (!sourceHead || !controllerLogin) return []
+      if (!sourceHead) return []
       const evidence = trustedRepairSourceComment(comment, {
         controllerSha,
         expectedHead: sourceHead,

@@ -25,3 +25,4 @@ jobs:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/recover-backlog.yml@{{CONTROLLER_SHA}}
     with:
       source_run_id: ${{ github.event.workflow_run.id }}
+      controller_login: ${{ vars.AGENT_AUTOMATION_CONTROLLER_LOGIN }}
