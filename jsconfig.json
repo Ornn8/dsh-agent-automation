@@ -19,6 +19,7 @@
     "src/advancement-state.mjs",
     "src/landing-policy.mjs",
     "src/machine-config.mjs",
+    "src/role-worker.mjs",
     "src/worker-routing.mjs",
     "src/review-authority.mjs",
     "src/review-workspace-policy.mjs",
