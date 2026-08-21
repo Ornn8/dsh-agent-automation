@@ -1,6 +1,7 @@
 // @ts-check
 
 import { createHash, randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import { access, lstat, mkdir, open, readFile, readdir, rm, rename, rmdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { run } from './common.mjs'
@@ -686,7 +687,8 @@ async function waitForLock(milliseconds) {
 
 /** @param {unknown} error @param {number} code @returns {boolean} */
 function commandExitedWith(error, code) {
-  return error instanceof Error && new RegExp(`exited with code ${code}(?::|$)`).test(error.message)
+  const numericCode = error && typeof error === 'object' ? /** @type {{code?: unknown}} */ (error).code : undefined
+  return numericCode === code || error instanceof Error && new RegExp(`exited with code ${code}(?::|$)`).test(error.message)
 }
 
 /** @param {string} command @param {string[]} args @param {typeof run} runCommand @returns {Promise<{stdout: string}>} */
@@ -717,6 +719,23 @@ async function runProcessProbe(command, args, runCommand) {
       ])
     }
   }
+}
+
+/** @param {string} command @param {string[]} args @returns {Promise<{stdout: string}>} */
+async function runWindowsProcessProbe(command, args) {
+  return new Promise((resolvePromise, reject) => {
+    execFile(command, args, {
+      windowsHide: true,
+      timeout: PROCESS_IDENTITY_TIMEOUT_MS,
+      maxBuffer: 64 * 1024,
+    }, (error, stdout) => {
+      if (error) {
+        reject(error)
+        return
+      }
+      resolvePromise({ stdout })
+    })
+  })
 }
 
 /** @param {ProcessIdentityVerifier} verifier @param {number} pid @returns {Promise<string|null>} */
@@ -803,7 +822,10 @@ export async function resolveProcessIdentity(pid, options = {}) {
     const executable = options.powershellPath ?? await defaultPowerShellPath()
     let result
     try {
-      result = await runProcessProbe(executable, ['-NoProfile', '-NonInteractive', '-Command', command], runCommand)
+      const args = ['-NoProfile', '-NonInteractive', '-Command', command]
+      result = options.runCommand === undefined
+        ? await runWindowsProcessProbe(executable, args)
+        : await runProcessProbe(executable, args, runCommand)
     } catch (error) {
       if (commandExitedWith(error, 3)) return null
       throw error
