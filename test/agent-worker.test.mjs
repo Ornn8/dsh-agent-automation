@@ -3,10 +3,11 @@ import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { checkAgentWorker, normalizeWorkerConfig, runAgentWorker } from '../src/agent-worker.mjs'
+import { checkAgentWorker, normalizeWorkerConfig, runAgentWorker, runRoleWorker } from '../src/agent-worker.mjs'
 import { createAgentAdapters } from '../src/agent-adapters.mjs'
 import { parseClaudeCodeOutput } from '../src/claude-code-cli.mjs'
 import { parseOpenCodeRunOutput } from '../src/opencode-cli.mjs'
+import { capacityRecordKey, createCapacityRegistry } from '../src/capacity-registry-store.mjs'
 
 test('a controller invokes any configured worker through one interface', async () => {
   const invocations = []
@@ -42,6 +43,197 @@ test('a controller invokes any configured worker through one interface', async (
     detail: '',
     output: 'PASS',
   })
+})
+
+function roleConfig(role = 'change') {
+  return {
+    operations: {
+      roles: {
+        change: { workers: ['primary', 'fallback'] },
+        review: { workers: ['primary', 'fallback'] },
+      },
+      routing: {
+        change: { maxCandidates: 8, routes: { default: { selectors: [{ worker: 'primary' }, { worker: 'fallback' }] } } },
+        review: { maxCandidates: 8, routes: { default: { selectors: [{ worker: 'primary' }, { worker: 'fallback' }] } } },
+      },
+    },
+    workers: {
+      primary: { adapter: 'fake', mode: role, capacityGroup: 'group-primary', capabilities: { hardReadOnlyReview: true } },
+      fallback: { adapter: 'fake', mode: role, capacityGroup: 'group-fallback', capabilities: { hardReadOnlyReview: true } },
+    },
+  }
+}
+
+function roleInvocation(overrides = {}) {
+  return {
+    taskId: 'role-work-1',
+    cwd: 'F:\\checkout',
+    title: 'Role work',
+    prompt: 'Perform the role work.',
+    timeoutMs: 60_000,
+    ...overrides,
+  }
+}
+
+function capacityError(phase = 'pre-session') {
+  const error = new Error('provider quota exhausted')
+  error.adapterFailure = {
+    version: 1,
+    category: 'capacity',
+    reason: 'quota-exhausted',
+    scope: 'capacity-group',
+    phase,
+    code: 'provider.usage-limit',
+    confidence: 'authoritative',
+  }
+  return error
+}
+
+function fakeRegistry({ closed = false, failures = [], attempts = [] } = {}) {
+  return {
+    async get(key) {
+      return closed ? {
+        version: 1,
+        capacityGroup: 'closed',
+        scope: 'capacity-group',
+        state: 'disabled',
+        reason: 'billing-disabled',
+        code: 'billing.disabled',
+        observedAt: '2026-08-21T00:00:00.000Z',
+        retryAtUtc: null,
+        sourceWorker: 'primary',
+        capacityIdentity: { provider: null, model: null, worker: null },
+        configurationHash: 'a'.repeat(64),
+        credentialGeneration: 'generation-1',
+        generation: 2,
+        lease: null,
+      } : null
+    },
+    async recordFailure(input) { failures.push(input); return null },
+    async appendAttempt(input) { attempts.push(input); return input },
+  }
+}
+
+test('runRoleWorker fails over a review capacity error within one exact invocation', async () => {
+  const calls = []
+  const failures = []
+  const attempts = []
+  let first = true
+  const result = await runRoleWorker({
+    config: roleConfig('review'),
+    role: 'review',
+    routeDecision: { route: 'default' },
+    invocation: roleInvocation(),
+    capacityRegistry: fakeRegistry({ failures, attempts }),
+    adapters: {
+      fake: async input => {
+        calls.push(input)
+        if (first) { first = false; throw capacityError('session') }
+        return { sessionId: 'review-fallback', outcome: 'completed', output: 'VERDICT: PASS' }
+      },
+    },
+  })
+
+  assert.equal(result.workerId, 'fallback')
+  assert.equal(result.outcome, 'completed')
+  assert.deepEqual(calls.map(call => call.workerId), ['primary', 'fallback'])
+  assert.equal(calls[0].invocation.cwd, calls[1].invocation.cwd)
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].sourceWorker, 'primary')
+  assert.deepEqual(attempts.map(attempt => attempt.result.outcome), ['capacity-failure', 'completed'])
+})
+
+test('runRoleWorker permits only pre-session change failover', async () => {
+  const calls = []
+  let first = true
+  const result = await runRoleWorker({
+    config: roleConfig('change'), role: 'change', routeDecision: { route: 'default' },
+    invocation: roleInvocation(), capacityRegistry: fakeRegistry(),
+    adapters: {
+      fake: async input => {
+        calls.push(input.workerId)
+        if (first) { first = false; throw capacityError() }
+        return { sessionId: 'change-fallback', outcome: 'completed', output: 'done' }
+      },
+    },
+  })
+  assert.equal(result.workerId, 'fallback')
+  assert.deepEqual(calls, ['primary', 'fallback'])
+
+  first = true
+  await assert.rejects(runRoleWorker({
+    config: roleConfig('change'), role: 'change', routeDecision: { route: 'default' },
+    invocation: roleInvocation(), capacityRegistry: fakeRegistry(),
+    adapters: {
+      fake: async ({ invocation }) => {
+        if (first) {
+          first = false
+          await invocation.onStarted({ sessionId: 'accepted-turn' })
+          throw capacityError('session')
+        }
+        return { sessionId: 'must-not-run', outcome: 'completed', output: 'done' }
+      },
+    },
+  }), error => error.adapterFailure?.phase === 'session')
+})
+
+test('runRoleWorker returns structured capacity-deferred when every candidate is closed', async () => {
+  const result = await runRoleWorker({
+    config: roleConfig('change'), role: 'change', routeDecision: { route: 'default' },
+    invocation: roleInvocation(), capacityRegistry: fakeRegistry({ closed: true }),
+    adapters: { fake: async () => { throw new Error('must not invoke a closed candidate') } },
+  })
+  assert.equal(result.outcome, 'capacity-deferred')
+  assert.equal(result.category, 'capacity')
+  assert.equal(result.reason, 'capacity-deferred')
+  assert.deepEqual(result.candidates, ['primary', 'fallback'])
+})
+
+test('runRoleWorker closes a shared capacity group before considering its next candidate', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'dsh-role-capacity-'))
+  const config = roleConfig('change')
+  config.operations.stateRoot = stateRoot
+  config.configurationHash = 'a'.repeat(64)
+  config.credentialGeneration = 'generation-1'
+  config.workers.primary.capacityGroup = 'shared-group'
+  config.workers.fallback.capacityGroup = 'shared-group'
+  let calls = 0
+  try {
+    const result = await runRoleWorker({
+      config,
+      role: 'change',
+      routeDecision: { route: 'default' },
+      invocation: roleInvocation(),
+      adapters: {
+        fake: async () => {
+          calls += 1
+          throw capacityError()
+        },
+      },
+    })
+    assert.equal(result.outcome, 'capacity-deferred')
+    assert.equal(calls, 1)
+    const registry = createCapacityRegistry({
+      stateRoot,
+      configurationHash: config.configurationHash,
+      credentialGeneration: config.credentialGeneration,
+      workers: config.workers,
+    })
+    const key = capacityRecordKey({ capacityGroup: 'shared-group', scope: 'capacity-group' })
+    assert.equal((await registry.get(key)).reason, 'quota-exhausted')
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('runRoleWorker keeps non-capacity failures on the original recovery path', async () => {
+  const calls = []
+  await assert.rejects(runRoleWorker({
+    config: roleConfig('review'), role: 'review', routeDecision: { route: 'default' },
+    invocation: roleInvocation(), capacityRegistry: fakeRegistry(),
+    adapters: { fake: async ({ workerId }) => { calls.push(workerId); throw new Error('task failed') } },
+  }), /task failed/)
+  assert.deepEqual(calls, ['primary'])
 })
 
 test('worker configuration accepts explicit adapters and rejects removed legacy fields', () => {

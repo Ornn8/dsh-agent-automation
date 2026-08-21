@@ -97,10 +97,10 @@ export async function startReviewCheck({ ghExecutable, repository, head, runUrl,
 /** Complete one controller-created exact-head review CheckRun. */
 export async function completeReviewCheck({ ghExecutable, repository, checkId, runUrl, conclusion, summary, env, execute = run }) {
   if (!Number.isSafeInteger(checkId) || checkId < 1) throw new Error('Invalid review CheckRun id')
-  if (!['success', 'failure'].includes(conclusion)) throw new Error(`Invalid review CheckRun conclusion: ${conclusion}`)
+  if (!['success', 'failure', 'neutral'].includes(conclusion)) throw new Error(`Invalid review CheckRun conclusion: ${conclusion}`)
   await execute(ghExecutable, checkArguments('PATCH', repository, checkId, [
     ['status', 'completed'], ['conclusion', conclusion], ['details_url', runUrl],
-    ['output[title]', `Agent review ${conclusion}`], ['output[summary]', summary],
+    ['output[title]', conclusion === 'neutral' ? 'Agent review deferred' : `Agent review ${conclusion}`], ['output[summary]', summary],
   ]), { env })
 }
 

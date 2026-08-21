@@ -10,7 +10,6 @@ import {
   parseJson,
   processCancellationSignal,
   removeJobDirectory,
-  resolveRepositoryWorker,
   requiredEnv,
   run,
   trustedAssociation,
@@ -25,7 +24,7 @@ import {
 } from './dispatch-policy.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { controllerMutationMarker } from './controller-mutation-marker.mjs'
-import { runAgentWorker } from './agent-worker.mjs'
+import { runRoleWorker } from './agent-worker.mjs'
 import {
   interruptedRepairMayRetry,
   recordedRepairState,
@@ -63,7 +62,10 @@ const ciWorkflowName = process.env.CI_WORKFLOW_NAME?.trim() || ''
 const repairCause = process.env.REPAIR_CAUSE?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const workerId = resolveRepositoryWorker(config, repository, transportedRequest?.role || requiredEnv('AGENT_ROLE'))
+const role = transportedRequest?.role || requiredEnv('AGENT_ROLE')
+const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
+  ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
+  : { route: 'default' }
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
@@ -494,21 +496,30 @@ try {
     ...(ciRequest ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
   })
 
-  const workerReceipt = await runAgentWorker({
+  const workerReceipt = await runRoleWorker({
     config,
-    workerId,
+    role,
+    workRequest: transportedRequest || { requestId: requestId || `repair-${expectedHead}`, role },
+    routeDecision,
     invocation: {
       taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
       cwd: checkoutPath,
-      title: `[Agent: ${workerId}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
+      title: `[Agent ${role}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
       prompt,
       requiredSkill: repairProcedure,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
-      onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible ${workerId} session: ${sessionId}.`),
+      onStarted: ({ sessionId, workerId }) => upsertStatus('running', branch, `Visible ${workerId} session: ${sessionId}.`),
     },
     adapters: createAgentAdapters(),
   })
+
+  if (workerReceipt.outcome === 'capacity-deferred') {
+    await setRepairLabels({ remove: ['automation/repairing'] })
+    await upsertStatus('capacity-deferred', branch, workerReceipt.detail)
+    process.stdout.write(`All routed repair Workers are at capacity for PR #${pullRequestNumber}; the repair remains deferred.\n`)
+    process.exit(0)
+  }
 
   const baselineReference = ciRequest
     ? ciBaselineIssueFromReceipt({ receipt: workerReceipt, repository })
@@ -563,12 +574,12 @@ try {
       })) {
         await setRepairLabels({ remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
-        process.stdout.write(`${workerId} repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
+        process.stdout.write(`${workerReceipt.workerId} repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
       } else if (!ciRequest && !mergeRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
         await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
-        process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
+        process.stdout.write(`${workerReceipt.workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
       } else {
         throw new Error('DSH exited successfully without advancing the head or proving the documented same-head completion')
       }

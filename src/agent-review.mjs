@@ -5,11 +5,10 @@ import {
   loadConfig,
   parseJson,
   requiredEnv,
-  resolveRepositoryWorker,
   run,
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
-import { runAgentWorker } from './agent-worker.mjs'
+import { runRoleWorker } from './agent-worker.mjs'
 import { AGENT_REVIEW_SKILL } from './agent-work-result.mjs'
 import {
   githubReviewBody,
@@ -116,7 +115,9 @@ const reviewStage = requireEligibleWorkflowStage(
 if (reviewStage.procedure !== AGENT_REVIEW_SKILL) {
   throw new Error(`Review workflow cannot execute procedure ${reviewStage.procedure}`)
 }
-const workerId = resolveRepositoryWorker(config, repository, reviewStage.role)
+const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
+  ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
+  : { route: 'default' }
 const expectedBaseRef = pullRequest.baseRefName
 const replicaId = await reviewReplicaIdForRunner({
   stateRoot: config.operations.stateRoot,
@@ -231,9 +232,14 @@ End the final answer with this collapsible automation block. Keep it after the c
 
 For PASS, findings must be an empty array. For BLOCK, include at least one finding.`
 
-const workerReceipt = await runAgentWorker({
+const workerReceipt = await runRoleWorker({
   config,
-  workerId,
+  role: reviewStage.role,
+  workRequest: {
+    requestId: `review-pr-${pullRequestNumber}-${expectedBase}-${expectedHead}`,
+    role: reviewStage.role,
+  },
+  routeDecision,
   invocation: {
     taskId: `review-${expectedBase}-${expectedHead}`,
     cwd: reviewCheckout,
@@ -245,6 +251,20 @@ const workerReceipt = await runAgentWorker({
   },
   adapters: createAgentAdapters(),
 })
+if (workerReceipt.outcome === 'capacity-deferred') {
+  await completeReviewCheck({
+    ghExecutable: config.ghExecutable,
+    repository,
+    checkId: reviewCheckId,
+    runUrl: requiredEnv('RUN_URL'),
+    conclusion: 'neutral',
+    summary: 'No review verdict was produced because every admitted review Worker is at capacity.',
+    env: githubEnvironment,
+  })
+  await writeOutput('deferred', 'true')
+  process.stdout.write(`All routed review Workers are at capacity; no verdict was produced for ${expectedBase}..${expectedHead}.\n`)
+  return
+}
 if (workerReceipt.outcome !== 'completed') {
   throw new Error(`Review worker ended with ${workerReceipt.outcome}: ${workerReceipt.detail}`)
 }

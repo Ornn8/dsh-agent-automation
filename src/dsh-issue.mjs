@@ -9,7 +9,6 @@ import {
   parseJson,
   processCancellationSignal,
   removeJobDirectory,
-  resolveRepositoryWorker,
   requiredEnv,
   run,
   trustedAssociation,
@@ -17,7 +16,7 @@ import {
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { controllerMutationMarker } from './controller-mutation-marker.mjs'
-import { runAgentWorker } from './agent-worker.mjs'
+import { runRoleWorker } from './agent-worker.mjs'
 import { agentWorkPrompt } from './agent-work-result.mjs'
 import { openAgentWorkDependencies, resolveAgentWorkDispatch } from './agent-work.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
@@ -33,6 +32,9 @@ const issueNumber = workRequest.subject.number
 const issueRequestId = workRequest.requestId
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
+const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
+  ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
+  : { route: 'default' }
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
@@ -150,7 +152,6 @@ const stage = resolveWorkflowStage(
 )
 requireEligibleWorkflowStage(profile.definition, workRequest.workflowId, workRequest.stageId, [])
 if (stage.role !== workRequest.role) throw new Error('WorkRequest role does not match the trusted Stage')
-const workerId = resolveRepositoryWorker(config, repository, stage.role)
 const admissionComments = (await ghJson([
   'api', `repos/${repository}/issues/${issueNumber}/comments?per_page=100`, '--paginate', '--slurp',
 ], 'Issue governor records')).flat()
@@ -255,23 +256,29 @@ try {
     ...(agentWork ? { work: agentWork } : {}),
   })
 
-  const workerReceipt = await runAgentWorker({
+  const workerReceipt = await runRoleWorker({
     config,
-    workerId,
+    role: stage.role,
+    workRequest,
+    routeDecision,
     invocation: {
       taskId: `issue-${repository}-${issueNumber}-${issueRequestId}`,
       cwd: checkoutPath,
-      title: `[Agent: ${workerId}] 执行 Issue #${issueNumber}`,
+      title: `[Agent ${stage.role}] 执行 Issue #${issueNumber}`,
       prompt,
       requiredSkill: stage.procedure,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
-      onStarted: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible ${workerId} session: ${sessionId}.`)),
+      onStarted: ({ sessionId, workerId }) => upsertStatus(statusBody('running', branch, `Visible ${workerId} session: ${sessionId}.`)),
     },
     adapters: createAgentAdapters(),
   })
 
-  if (workerReceipt.outcome === 'blocked') {
+  if (workerReceipt.outcome === 'capacity-deferred') {
+    await upsertStatus(statusBody('capacity-deferred', branch, workerReceipt.detail))
+    process.stdout.write(`All routed change Workers are at capacity for Issue #${issueNumber}; the WorkRequest remains deferred.\n`)
+    process.exit(0)
+  } else if (workerReceipt.outcome === 'blocked') {
     await run(config.ghExecutable, [
       'label', 'create', 'agent/dsh-blocked', '--repo', repository,
       '--description', 'DSH reached a valid terminal block without producing a pull request', '--color', 'B60205',
@@ -282,7 +289,7 @@ try {
     ], { env: hostCredentialEnvironment() })
     await upsertStatus(statusBody('blocked', branch,
       `Session ${workerReceipt.sessionId} reached a valid terminal block: ${workerReceipt.detail}`))
-    process.stdout.write(`${workerId} ended Issue #${issueNumber} as blocked; no retry was scheduled.\n`)
+    process.stdout.write(`${workerReceipt.workerId} ended Issue #${issueNumber} as blocked; no retry was scheduled.\n`)
   } else {
     if (workerReceipt.outcome !== 'completed') {
       throw new Error(`DSH worker ended Issue #${issueNumber} with ${workerReceipt.outcome}`)
@@ -306,7 +313,7 @@ try {
     }
 
     await upsertStatus(statusBody('complete', branch, `Session ${workerReceipt.sessionId} produced a pull request for independent review: ${pullRequest.url}`))
-    process.stdout.write(`${workerId} produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
+    process.stdout.write(`${workerReceipt.workerId} produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
   }
 } catch (error) {
   const failureClass = classifyAgentFailure(error)

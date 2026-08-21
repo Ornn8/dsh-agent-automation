@@ -1,4 +1,7 @@
-import { annotateAdapterFailure } from './capacity-failure.mjs'
+import { annotateAdapterFailure, canFailoverCapacityFailure, parseAdapterFailure } from './capacity-failure.mjs'
+import { capacityEligibility, projectWorkerCapacityIdentity } from './capacity-registry.mjs'
+import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry } from './capacity-registry-store.mjs'
+import { resolveWorkerCandidates } from './machine-config.mjs'
 
 const TERMINAL_OUTCOMES = new Set([
   'completed', 'blocked', 'superseded', 'timed-out', 'failed',
@@ -104,6 +107,265 @@ export async function runAgentWorker({ config, workerId, invocation, adapters })
       phase: sessionStarted ? 'session' : 'pre-session',
       scope: 'worker',
     })
+  }
+}
+
+const DIGEST = /^[a-f0-9]{64}$/
+
+/** @param {unknown} value @param {string} fallback @returns {string} */
+function journalIdentifier(value, fallback) {
+  const text = typeof value === 'string' && value.trim() ? value.trim() : fallback
+  const normalized = text.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 120)
+  return /^[A-Za-z0-9]/.test(normalized) ? normalized : `work-${normalized}`
+}
+
+/** @param {Record<string, any>} config @param {object|undefined} provided @returns {object|null} */
+function roleCapacityRegistry(config, provided) {
+  if (provided) return provided
+  const stateRoot = config?.operations?.stateRoot
+  if (typeof stateRoot !== 'string' || !stateRoot.trim()
+    || !DIGEST.test(config?.configurationHash || '')
+    || typeof config?.credentialGeneration !== 'string' || !config.credentialGeneration.trim()) return null
+  return createCapacityRegistry({
+    stateRoot,
+    configurationHash: config.configurationHash,
+    credentialGeneration: config.credentialGeneration,
+    workers: config.workers,
+  })
+}
+
+/** @param {Record<string, any>} worker @param {string} workerId @returns {{capacityGroup: string, identity: Record<string, any>}} */
+function capacityWorkerSnapshot(worker, workerId) {
+  return {
+    capacityGroup: typeof worker.capacityGroup === 'string' && worker.capacityGroup.trim()
+      ? worker.capacityGroup
+      : workerId,
+    identity: projectWorkerCapacityIdentity(workerId, worker),
+  }
+}
+
+/** @param {object|null} registry @param {Record<string, any>} config @param {Record<string, any>} worker @param {string} workerId @param {number} now @param {string} leaseOwner @returns {Promise<Record<string, any>>} */
+async function workerCapacityState(registry, config, worker, workerId, now, leaseOwner) {
+  const snapshot = capacityWorkerSnapshot(worker, workerId)
+  const result = {
+    eligible: true,
+    startState: 'available',
+    capacityGeneration: 0,
+    records: [],
+    probe: null,
+  }
+  if (!registry || typeof registry.get !== 'function') return result
+  const scopes = ['capacity-group', 'provider', 'model', 'worker']
+  for (const scope of scopes) {
+    if (scope === 'provider' && snapshot.identity.provider === null) continue
+    if (scope === 'model' && (snapshot.identity.provider === null || snapshot.identity.model === null)) continue
+    const key = capacityRecordKey({ capacityGroup: snapshot.capacityGroup, scope, identity: snapshot.identity })
+    const record = await registry.get(key)
+    if (!record) continue
+    const eligibility = capacityEligibility(record, {
+      configurationHash: config.configurationHash,
+      credentialGeneration: config.credentialGeneration,
+      now,
+    })
+    result.records.push({ key, record: eligibility.record })
+    result.capacityGeneration = Math.max(result.capacityGeneration, eligibility.record.generation)
+    if (!eligibility.eligible) {
+      result.eligible = false
+      result.startState = eligibility.state
+      continue
+    }
+    if (eligibility.requiresProbe) {
+      if (result.probe) {
+        result.eligible = false
+        result.startState = 'half-open'
+        continue
+      }
+      if (typeof registry.acquireHalfOpenLease !== 'function') {
+        result.eligible = false
+        result.startState = 'cooldown'
+        continue
+      }
+      const leaseId = journalIdentifier(`${leaseOwner}-${workerId}-${scope}`, 'capacity-probe')
+      const acquired = await registry.acquireHalfOpenLease({
+        key,
+        leaseId,
+        owner: journalIdentifier(leaseOwner, 'role-worker'),
+        now,
+      })
+      if (!acquired) {
+        result.eligible = false
+        result.startState = 'half-open'
+        continue
+      }
+      result.startState = 'half-open'
+      result.capacityGeneration = Math.max(result.capacityGeneration, acquired.record?.generation ?? record.generation + 1)
+      result.probe = { key, leaseId, scope }
+    }
+  }
+  if (!result.eligible && result.probe && typeof registry.completeHalfOpenLease === 'function') {
+    await registry.completeHalfOpenLease({
+      key: result.probe.key,
+      leaseId: result.probe.leaseId,
+      outcome: 'success',
+      now,
+    })
+    result.probe = null
+  }
+  return result
+}
+
+/** @param {object|null} registry @param {Record<string, any>} state @param {Record<string, any>|undefined} failure @param {number} now */
+async function completeCapacityProbe(registry, state, failure, now) {
+  if (!state.probe || typeof registry?.completeHalfOpenLease !== 'function') return
+  const sameScope = failure && failure.scope === state.probe.scope
+  if (failure && !sameScope) {
+    await registry.completeHalfOpenLease({
+      key: state.probe.key,
+      leaseId: state.probe.leaseId,
+      outcome: 'success',
+      now,
+    })
+    return
+  }
+  await registry.completeHalfOpenLease({
+    key: state.probe.key,
+    leaseId: state.probe.leaseId,
+    outcome: failure ? 'failure' : 'success',
+    ...(failure ? { failure } : {}),
+    now,
+  })
+}
+
+/** @param {object|null} registry @param {Record<string, any>} input @returns {Promise<void>} */
+async function appendRoleAttempt(registry, input) {
+  if (typeof registry?.appendAttempt !== 'function') return
+  await registry.appendAttempt(createCapacityAttempt(input))
+}
+
+/**
+ * Route one role WorkRequest across the admitted candidates. Capacity failures
+ * are recorded before the next candidate is invoked; task and infrastructure
+ * failures retain the existing single-Worker recovery path.
+ * @param {Record<string, any>} options
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function runRoleWorker({
+  config,
+  role,
+  workRequest,
+  routeDecision,
+  invocation,
+  adapters,
+  capacityRegistry,
+  routingAttemptId,
+} = {}) {
+  if (!['change', 'review', 'maintenance'].includes(role)) throw new Error(`Worker routing is not available for ${String(role)}`)
+  const candidates = resolveWorkerCandidates({ config, role, routeDecision })
+  if (!candidates.length) throw new Error(`Worker route for ${role} has no eligible candidates`)
+  const registry = roleCapacityRegistry(config, capacityRegistry)
+  const taskClass = typeof routeDecision === 'object' && routeDecision !== null
+    ? String(routeDecision.taskClass ?? routeDecision.route ?? 'default')
+    : typeof routeDecision === 'string' ? routeDecision : 'default'
+  const routePolicyHash = typeof routeDecision === 'object' && routeDecision !== null && DIGEST.test(routeDecision.policyHash || '')
+    ? routeDecision.policyHash
+    : DIGEST.test(config?.configurationHash || '') ? config.configurationHash : '0'.repeat(64)
+  const workRequestId = journalIdentifier(workRequest?.requestId ?? invocation?.taskId, 'role-work')
+  const attemptRoot = journalIdentifier(routingAttemptId ?? `${workRequestId}-${role}`, 'routing-attempt')
+  const startedAt = Date.now()
+  const unavailable = []
+  const seen = new Set()
+
+  for (const workerId of candidates) {
+    if (seen.has(workerId)) continue
+    seen.add(workerId)
+    const worker = config?.workers?.[workerId]
+    if (!worker || typeof worker !== 'object' || Array.isArray(worker)) throw new Error(`Unknown agent worker ${workerId}`)
+    const capacity = await workerCapacityState(registry, config, worker, workerId, Date.now(), attemptRoot)
+    if (!capacity.eligible) {
+      unavailable.push(workerId)
+      continue
+    }
+    try {
+      const candidateInvocation = typeof invocation?.onStarted === 'function'
+        ? {
+            ...invocation,
+            onStarted: value => invocation.onStarted({ ...value, workerId }),
+          }
+        : invocation
+      const receipt = await runAgentWorker({ config, workerId, invocation: candidateInvocation, adapters })
+      await completeCapacityProbe(registry, capacity, undefined, Date.now())
+      await appendRoleAttempt(registry, {
+        attemptId: journalIdentifier(`${attemptRoot}-${workerId}`, 'routing-attempt'),
+        workRequestId,
+        routePolicyHash,
+        taskClass,
+        workerId,
+        capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
+        capacityGeneration: capacity.capacityGeneration,
+        startState: capacity.startState,
+        startedAt,
+        endedAt: Date.now(),
+        result: { outcome: receipt.outcome },
+      })
+      return receipt
+    } catch (error) {
+      const failure = parseAdapterFailure(error?.adapterFailure ?? error)
+      const safeCapacityFailover = canFailoverCapacityFailure(failure)
+        && (role === 'review' || failure.phase === 'pre-session')
+      if (!safeCapacityFailover) {
+        await appendRoleAttempt(registry, {
+          attemptId: journalIdentifier(`${attemptRoot}-${workerId}`, 'routing-attempt'),
+          workRequestId,
+          routePolicyHash,
+          taskClass,
+          workerId,
+          capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
+          capacityGeneration: capacity.capacityGeneration,
+          startState: capacity.startState,
+          startedAt,
+          endedAt: Date.now(),
+          result: { outcome: 'failed', category: failure.category, reason: failure.reason },
+        })
+        throw error
+      }
+      const probeOwnsFailure = capacity.probe?.scope === failure.scope
+      if (!probeOwnsFailure && typeof registry?.recordFailure === 'function') {
+        await registry.recordFailure({
+          capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
+          sourceWorker: workerId,
+          failure,
+          scope: failure.scope,
+        })
+      }
+      await completeCapacityProbe(registry, capacity, failure, Date.now())
+      await appendRoleAttempt(registry, {
+        attemptId: journalIdentifier(`${attemptRoot}-${workerId}`, 'routing-attempt'),
+        workRequestId,
+        routePolicyHash,
+        taskClass,
+        workerId,
+        capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
+        capacityGeneration: capacity.capacityGeneration,
+        startState: capacity.startState,
+        startedAt,
+        endedAt: Date.now(),
+        result: { outcome: 'capacity-failure', category: failure.category, reason: failure.reason },
+      })
+    }
+  }
+
+  return {
+    version: 1,
+    outcome: 'capacity-deferred',
+    category: 'capacity',
+    reason: 'capacity-deferred',
+    workRequestId,
+    role,
+    taskClass,
+    routePolicyHash,
+    candidates: [...candidates],
+    unavailable,
+    detail: 'All routed Workers are currently unavailable due to capacity.',
   }
 }
 
