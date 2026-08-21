@@ -51,6 +51,19 @@ test('the controller creates and completes its exact-head review CheckRun', asyn
   ])
 })
 
+test('a real capacity-deferred review publishes one neutral exact-head CheckRun', async () => {
+  const deferred = recorder('{"id":92}')
+  const checkId = await startReviewCheck({ ghExecutable: 'gh', repository, head, runUrl, runAttempt: 2, identity, execute: deferred.execute })
+  await completeReviewCheck({
+    ghExecutable: 'gh', repository, checkId, runUrl, conclusion: 'neutral',
+    summary: 'No review verdict was produced because every admitted review Worker is at capacity.',
+    execute: deferred.execute,
+  })
+  assert.equal(deferred.calls.length, 2)
+  assert.equal(deferred.calls[1][1].includes('conclusion=neutral'), true)
+  assert.equal(deferred.calls[1][1].includes('output[title]=Agent review deferred'), true)
+})
+
 test('review CheckRun identity binds the trusted Profile workflow and rejects malformed metadata', () => {
   const external_id = reviewCheckIdentity(identityWithRun)
   assert.deepEqual(parseReviewCheckIdentity({ external_id }), identityWithRun)

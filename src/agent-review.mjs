@@ -195,6 +195,24 @@ for (const label of [
   ], { env: githubEnvironment }).catch(() => undefined)
 }
 let reviewCheckId = null
+const ensureReviewCheck = async () => {
+  if (reviewCheckId !== null) return reviewCheckId
+  reviewCheckId = await startReviewCheck({
+    ghExecutable: config.ghExecutable,
+    repository,
+    head: expectedHead,
+    runUrl: requiredEnv('RUN_URL'),
+    runAttempt,
+    identity: {
+      workflowId,
+      stageId,
+      definitionHash: profile.definitionHash,
+    },
+    env: githubEnvironment,
+  })
+  await writeOutput('review_check_id', reviewCheckId)
+  return reviewCheckId
+}
 
 const prompt = `Review GitHub PR #${pullRequestNumber} in ${repository} at exact head ${expectedHead} against base ${expectedBase}.
 
@@ -241,23 +259,7 @@ const workerReceipt = await runRoleWorker({
     labels: pullRequest.labels,
     workflowStage: stageId,
   },
-  onCandidateReady: async () => {
-    if (reviewCheckId !== null) return
-    reviewCheckId = await startReviewCheck({
-      ghExecutable: config.ghExecutable,
-      repository,
-      head: expectedHead,
-      runUrl: requiredEnv('RUN_URL'),
-      runAttempt,
-      identity: {
-        workflowId,
-        stageId,
-        definitionHash: profile.definitionHash,
-      },
-      env: githubEnvironment,
-    })
-    await writeOutput('review_check_id', reviewCheckId)
-  },
+  onCandidateReady: ensureReviewCheck,
   invocation: {
     taskId: `review-${expectedBase}-${expectedHead}`,
     cwd: reviewCheckout,
@@ -275,6 +277,7 @@ if (workerReceipt.outcome === 'replayed') {
   return
 }
 if (workerReceipt.outcome === 'capacity-deferred') {
+  await ensureReviewCheck()
   await completeReviewCheck({
     ghExecutable: config.ghExecutable,
     repository,

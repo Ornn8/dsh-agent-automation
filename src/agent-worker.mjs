@@ -304,14 +304,18 @@ async function appendRoleAttempt(registry, input) {
   await registry.appendAttempt(createCapacityAttempt(input))
 }
 
-/** @param {object|null} registry @param {Record<string, any>} input @returns {Promise<boolean>} */
+/** @param {object|null} registry @param {Record<string, any>} input @returns {Promise<{claimed: boolean, duplicate: boolean, attempt?: Record<string, any>}>} */
 async function claimRoleAttempt(registry, input) {
   if (typeof registry?.claimAttempt === 'function') {
     const claimed = await registry.claimAttempt(createCapacityAttempt({
       ...input,
       result: { outcome: 'claimed' },
     }))
-    return { claimed: claimed?.claimed === true, duplicate: claimed?.claimed === false }
+    return {
+      claimed: claimed?.claimed === true,
+      duplicate: claimed?.claimed === false,
+      attempt: claimed?.attempt,
+    }
   }
   if (typeof registry?.appendAttempt !== 'function') return { claimed: true, duplicate: false }
   const claimed = await registry.appendAttempt(createCapacityAttempt({
@@ -369,6 +373,7 @@ export async function runRoleWorker({
   const startedAt = Date.now()
   const unavailable = []
   const seen = new Set()
+  let claimedNewAttempt = false
 
   for (const workerId of candidates) {
     if (seen.has(workerId)) continue
@@ -376,10 +381,6 @@ export async function runRoleWorker({
     const worker = config?.workers?.[workerId]
     if (!worker || typeof worker !== 'object' || Array.isArray(worker)) throw new Error(`Unknown agent worker ${workerId}`)
     const plannedCapacity = await workerCapacityState(registry, config, worker, workerId, Date.now(), attemptRoot, false)
-    if (!plannedCapacity.eligible) {
-      unavailable.push(workerId)
-      continue
-    }
     const attemptBase = {
       attemptId: journalIdentifier(`${attemptRoot}-${workerId}-${plannedCapacity.capacityGenerationHash}`, 'routing-attempt'),
       workRequestId,
@@ -394,8 +395,11 @@ export async function runRoleWorker({
     }
     const claim = await claimRoleAttempt(registry, attemptBase)
     if (!claim.claimed) {
-      unavailable.push(workerId)
       if (claim.duplicate) {
+        if (claim.attempt?.result?.outcome === 'capacity-deferred') {
+          unavailable.push(workerId)
+          continue
+        }
         return {
           version: 1,
           outcome: 'replayed',
@@ -410,6 +414,18 @@ export async function runRoleWorker({
           detail: 'This trusted routing generation was already claimed; no Worker or external authority was started.',
         }
       }
+      unavailable.push(workerId)
+      continue
+    }
+    claimedNewAttempt = true
+    if (!plannedCapacity.eligible) {
+      unavailable.push(workerId)
+      await appendRoleAttempt(registry, {
+        ...attemptBase,
+        attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
+        endedAt: Date.now(),
+        result: { outcome: 'capacity-deferred', category: 'capacity', reason: 'provider-unavailable' },
+      })
       continue
     }
     const capacity = await workerCapacityState(registry, config, worker, workerId, Date.now(), attemptRoot)
@@ -421,7 +437,7 @@ export async function runRoleWorker({
           ...attemptBase,
           attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
           endedAt: Date.now(),
-          result: { outcome: 'capacity-deferred', category: 'capacity', reason: capacity.startState },
+          result: { outcome: 'capacity-deferred', category: 'capacity', reason: 'provider-unavailable' },
         })
         probeFinalized = true
         continue
@@ -481,6 +497,21 @@ export async function runRoleWorker({
     }
   }
 
+  if (!claimedNewAttempt && unavailable.length === candidates.length) {
+    return {
+      version: 1,
+      outcome: 'replayed',
+      category: 'routing',
+      reason: 'replayed',
+      workRequestId,
+      role,
+      taskClass,
+      routePolicyHash,
+      candidates: [...candidates],
+      unavailable,
+      detail: 'This trusted routing generation was already deferred; no Worker or external authority was started.',
+    }
+  }
   return {
     version: 1,
     outcome: 'capacity-deferred',

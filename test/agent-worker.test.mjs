@@ -203,6 +203,63 @@ test('runRoleWorker returns structured capacity-deferred when every candidate is
   assert.deepEqual(result.candidates, ['primary', 'fallback'])
 })
 
+test('all-preclosed trusted generation records a deferred receipt and replays without invoking a Worker', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'dsh-role-deferred-replay-'))
+  const config = roleConfig('review')
+  config.operations.stateRoot = stateRoot
+  config.configurationHash = 'a'.repeat(64)
+  config.credentialGeneration = 'generation-1'
+  const attempts = new Map()
+  const registry = {
+    async get() {
+      return {
+        version: 1, capacityGroup: 'closed', scope: 'capacity-group', state: 'disabled',
+        reason: 'billing-disabled', code: 'billing.disabled', observedAt: '2026-08-21T00:00:00.000Z',
+        retryAtUtc: null, sourceWorker: 'primary', capacityIdentity: { provider: null, model: null, worker: null },
+        configurationHash: config.configurationHash, credentialGeneration: config.credentialGeneration,
+        generation: 2, lease: null,
+      }
+    },
+    async claimAttempt(input) {
+      const existing = attempts.get(input.attemptId)
+      if (existing) return { claimed: false, attempt: existing }
+      attempts.set(input.attemptId, input)
+      return { claimed: true, attempt: input }
+    },
+    async appendAttempt(input) { attempts.set(input.attemptId, input); return input },
+  }
+  const previousRunId = process.env.GITHUB_RUN_ID
+  const previousRunAttempt = process.env.GITHUB_RUN_ATTEMPT
+  let invocations = 0
+  let ready = 0
+  try {
+    process.env.GITHUB_RUN_ID = '9301'
+    process.env.GITHUB_RUN_ATTEMPT = '1'
+    const input = {
+      config, role: 'review', workRequest: { requestId: 'all-closed-review', role: 'review' },
+      subjectStateVersion: 'd'.repeat(64), trustedTaskSnapshot: { workflowStage: 'review' },
+      capacityRegistry: registry, invocation: roleInvocation(),
+      onCandidateReady: async () => { ready += 1 },
+      adapters: { fake: async () => { invocations += 1; return { sessionId: 'never', outcome: 'completed' } } },
+    }
+    const first = await runRoleWorker(input)
+    const attemptCount = attempts.size
+    const replay = await runRoleWorker(input)
+    assert.equal(first.outcome, 'capacity-deferred')
+    assert.equal(replay.outcome, 'replayed')
+    assert.equal(invocations, 0)
+    assert.equal(ready, 0)
+    assert.equal(attempts.size, attemptCount)
+    assert.ok([...attempts.values()].some(attempt => attempt.result.outcome === 'capacity-deferred'))
+  } finally {
+    if (previousRunId === undefined) delete process.env.GITHUB_RUN_ID
+    else process.env.GITHUB_RUN_ID = previousRunId
+    if (previousRunAttempt === undefined) delete process.env.GITHUB_RUN_ATTEMPT
+    else process.env.GITHUB_RUN_ATTEMPT = previousRunAttempt
+    await rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
 test('runRoleWorker closes a shared capacity group before considering its next candidate', async () => {
   const stateRoot = await mkdtemp(path.join(tmpdir(), 'dsh-role-capacity-'))
   const config = roleConfig('change')

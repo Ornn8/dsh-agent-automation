@@ -97,3 +97,5 @@ There is no direct Agent-to-Agent call. GitHub records the handoff before the pr
 - A valid blocked Issue receipt records `agent/dsh-blocked`, removes `agent/dsh`, and ends without workflow failure or automatic recovery. A trusted owner, member, or collaborator may use `/automation resume`; relabeling alone cannot resume the subject.
 
 The remaining common failure domains are GitHub, the network, and any machine that hosts more than one runner. Moving a runner to another host changes only its labels and machine-local worker configuration.
+
+The local routing record uses the existing fenced capacity-registry lease rather than a record-specific lock file. When every candidate is pre-closed, candidate claims receive durable deferred receipts; the first review publishes one neutral exact-head CheckRun, while a replay publishes no CheckRun or verdict.

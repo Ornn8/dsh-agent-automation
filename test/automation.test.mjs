@@ -1186,7 +1186,17 @@ test('Worker dispatch paths derive routing from local trusted state', async () =
   assert.match(reviewSource, /trustedTaskSnapshot/)
   assert.match(repairSource, /requireTrustedSubject: true/)
   assert.match(issueSource, /requireTrustedSubject: true/)
-  assert.match(reviewSource, /onCandidateReady: async/)
+  assert.match(reviewSource, /const ensureReviewCheck = async/)
+  assert.match(reviewSource, /onCandidateReady: ensureReviewCheck/)
+  assert.ok(
+    reviewSource.indexOf("if (workerReceipt.outcome === 'replayed')")
+      < reviewSource.indexOf("if (workerReceipt.outcome === 'capacity-deferred')"),
+    'replayed review generations must exit before deferred CheckRun creation',
+  )
+  const deferredStart = reviewSource.indexOf("if (workerReceipt.outcome === 'capacity-deferred')")
+  const deferredEnd = reviewSource.indexOf("if (workerReceipt.outcome !== 'completed')", deferredStart)
+  assert.match(reviewSource.slice(deferredStart, deferredEnd), /await ensureReviewCheck\(\)/)
+  assert.match(reviewSource.slice(deferredStart, deferredEnd), /conclusion: 'neutral'/)
 })
 
 test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {

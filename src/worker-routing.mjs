@@ -1,8 +1,9 @@
 // @ts-check
 
 import { createHash } from 'node:crypto'
-import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { withCapacityRegistryLock } from './capacity-registry-store.mjs'
 
 /**
  * Worker-neutral task classification and durable route-decision validation.
@@ -33,8 +34,6 @@ const CLASSIFICATION_FIELDS = new Set([
 ])
 const WORKER_ROUTE_ROLES = new Set(['change', 'review'])
 const ROUTING_RECORD_VERSION = 1
-const ROUTING_LOCK_RETRIES = 200
-const ROUTING_LOCK_DELAY_MS = 10
 
 /** @typedef {any} AnyValue Recursive JSON values are bounded and normalized before hashing. */
 /** @typedef {Record<string, any>} AnyObject */
@@ -613,28 +612,6 @@ function trustedActionsGeneration(value) {
   return `actions-${runIdText}-${runAttemptText}-${value}`
 }
 
-/** @param {string} lockPath @param {() => Promise<AnyObject>} work @returns {Promise<AnyObject>} */
-async function withRoutingRecordLock(lockPath, work) {
-  let handle
-  for (let attempt = 0; attempt < ROUTING_LOCK_RETRIES; attempt += 1) {
-    try {
-      handle = await open(lockPath, 'wx')
-      break
-    } catch (error) {
-      if (/** @type {any} */ (error)?.code !== 'EEXIST' || attempt === ROUTING_LOCK_RETRIES - 1) throw error
-      await new Promise(resolve => setTimeout(resolve, ROUTING_LOCK_DELAY_MS))
-    }
-  }
-  try {
-    return await work()
-  } finally {
-    await handle?.close()
-    await unlink(lockPath).catch(error => {
-      if (error?.code !== 'ENOENT') throw error
-    })
-  }
-}
-
 /** @param {string} recordPath @returns {Promise<AnyObject|null>} */
 async function readRoutingRecord(recordPath) {
   try {
@@ -702,9 +679,8 @@ export async function loadOrCreateLocalWorkerRoutingExecution({
   if (typeof stateRoot !== 'string' || !stateRoot.trim()) return create(null)
   const directory = join(stateRoot, 'worker-routing')
   const recordPath = join(directory, `${key}.json`)
-  const lockPath = `${recordPath}.lock`
   await mkdir(directory, { recursive: true })
-  return withRoutingRecordLock(lockPath, async () => {
+  return withCapacityRegistryLock(stateRoot, async () => {
     const existing = await readRoutingRecord(recordPath)
     const record = create(existing)
     if (!existing || existing.generation !== record.generation || existing.generationSource !== record.generationSource) {

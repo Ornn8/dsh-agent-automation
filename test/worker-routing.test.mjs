@@ -1,4 +1,10 @@
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
   classifyAndCreateWorkerRouteDecision,
@@ -13,6 +19,8 @@ import {
 } from '../src/worker-routing.mjs'
 
 const stateVersion = 'c'.repeat(64)
+const routingFixture = fileURLToPath(new URL('./fixtures/worker-routing-process.mjs', import.meta.url))
+const capacityFixture = fileURLToPath(new URL('./fixtures/capacity-store-process.mjs', import.meta.url))
 const workRequest = {
   version: 2,
   requestId: 'agent-work-example',
@@ -66,6 +74,14 @@ const deploymentFixture = {
 
 function classify(options = {}) {
   return classifyWorkRequest({ workRequest, stateVersion, ...options })
+}
+
+async function runRoutingProcess(stateRoot) {
+  const child = spawn(process.execPath, [routingFixture, stateRoot], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stdout = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
+  const [result] = await once(child, 'close')
+  return { code: result, output: JSON.parse(stdout) }
 }
 
 test('trusted route class wins before bounded deterministic rules', () => {
@@ -311,6 +327,28 @@ test('WorkerRouteDecision v1 binds request id, role, exact state, class, and has
     }),
     /Exact subject state version inputs must agree/,
   )
+})
+
+test('local routing records use the canonical process lease across concurrent workers and recover after a crash', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-routing-process-lock-'))
+  try {
+    const crashed = spawn(process.execPath, [capacityFixture, 'crash', stateRoot, 'routing-crash'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const [crashCode] = await once(crashed, 'close')
+    assert.equal(crashCode, 17)
+
+    const results = await Promise.all([runRoutingProcess(stateRoot), runRoutingProcess(stateRoot), runRoutingProcess(stateRoot)])
+    assert.deepEqual(results.map(result => result.code), [0, 0, 0])
+    assert.equal(new Set(results.map(result => result.output.routingAttemptId)).size, 1)
+
+    const recordNames = await readdir(join(stateRoot, 'worker-routing'))
+    assert.equal(recordNames.length, 1)
+    assert.match(recordNames[0], /^[a-f0-9]{64}\.json$/)
+    const record = JSON.parse(await readFile(join(stateRoot, 'worker-routing', recordNames[0]), 'utf8'))
+    assert.equal(record.routingAttemptId, results[0].output.routingAttemptId)
+    assert.doesNotMatch(recordNames[0], /\.lock$/)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
 })
 
 test('controller-owned routing execution binds a non-default decision and generation', () => {
