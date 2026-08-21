@@ -51,7 +51,13 @@ function repairRoutingFromStatus(status) {
   }
 }
 
-function sourceRepairComment(comment, { controllerSha, expectedHead, sourceRunId, markerAuthor, repository } = {}) {
+/**
+ * Validate one controller-authored repair status comment and restore its root request evidence.
+ * @param {unknown} comment
+ * @param {{controllerSha?: string, expectedHead?: string, sourceRunId?: string, markerAuthor?: string, repository?: string}} options
+ * @returns {{requestId: string, markerRequestId: string, runId: string, status: string, repairClass: string, repairCause: string, repairCode: string, workflowStage: string, ciWorkflow: string|null}|null}
+ */
+export function trustedRepairSourceComment(comment, { controllerSha, expectedHead, sourceRunId, markerAuthor, repository } = {}) {
   if (typeof markerAuthor !== 'string' || comment?.user?.login !== markerAuthor) return null
   const text = String(comment?.body || '')
   const marker = text.match(MARKER_PATTERN)
@@ -77,6 +83,16 @@ function sourceRepairComment(comment, { controllerSha, expectedHead, sourceRunId
     ...routing,
   }
 }
+
+/**
+ * Recover the root WorkRequest id from one strictly verified repair status comment.
+ * @param {{comment?: unknown, controllerSha?: string, expectedHead?: string, sourceRunId?: string, markerAuthor?: string, repository?: string}} options
+ * @returns {string|null}
+ */
+export function trustedRepairRecoveryRequestId({ comment, ...sourceOptions } = {}) {
+  return trustedRepairSourceComment(comment, sourceOptions)?.requestId || null
+}
+
 /** Parse the durable state recorded by one repair status comment. */
 export function recordedRepairState(body) {
   const text = String(body || '')
@@ -133,7 +149,7 @@ export function recoverableRepairIdentity({ requestId, comments, controllerSha, 
       return run?.[1] === repository ? run[2] : null
     }).filter(Boolean))]
   const candidates = sourceRunIds.flatMap(sourceRunId => (Array.isArray(comments) ? comments : [])
-    .map(comment => sourceRepairComment(comment, {
+    .map(comment => trustedRepairSourceComment(comment, {
       controllerSha, expectedHead, sourceRunId, markerAuthor, repository,
     }))
     .filter(value => value && (!recovery.originalRequestId || value.markerRequestId === recovery.originalRequestId)))

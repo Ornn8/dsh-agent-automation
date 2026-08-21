@@ -1,5 +1,5 @@
 import { actionsCredentialEnvironment, authenticatedMarker, parseJson, requiredEnv, run, trustedAssociation } from './common.mjs'
-import { recordedCiWorkflow, recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
+import { recoveryDecision, recoveryMarkerBody, trustedFailedAgentRun } from './recovery-policy.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
 import { recordedFailureClass, workflowFailureSignature } from './failure-classification.mjs'
@@ -14,6 +14,7 @@ import {
   pullRequestGovernorSubject,
   trustedGovernorRecords,
 } from './governor-state.mjs'
+import { trustedRepairSourceComment } from './repair-state.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const sourceRunId = requiredEnv('RECOVERY_SOURCE_RUN_ID')
@@ -37,6 +38,16 @@ const governorWriterTrust = {
 async function ghJson(args, description) {
   const result = await run(githubExecutable, args, { env: environment })
   return parseJson(result.stdout, description)
+}
+
+async function trustedControllerLogin() {
+  const variable = await ghJson([
+    'api', `repos/${repository}/actions/variables/AGENT_AUTOMATION_CONTROLLER_LOGIN`,
+  ], 'controller login variable')
+  if (typeof variable?.value !== 'string' || !/^[A-Za-z0-9-]{1,39}$/.test(variable.value)) {
+    throw new Error('Controller login variable is invalid')
+  }
+  return variable.value
 }
 
 function paginatedPath(path, page) {
@@ -180,15 +191,6 @@ function reviewedHead(body) {
   return /^- Reviewed head: `([0-9a-f]{40})`$/m.exec(String(body || ''))?.[1] || null
 }
 
-function repairRequestId(body, head) {
-  const escapedHead = head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const escapedController = controllerSha.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const text = String(body || '')
-  return new RegExp(`<!-- dsh-review-repair:${escapedController}:${escapedHead}:([^ >]{1,100}) -->`).exec(text)?.[1]
-    || new RegExp(`<!-- dsh-review-repair:${escapedHead}:([^ >]{1,100}) -->`).exec(text)?.[1]
-    || ''
-}
-
 function attemptRecords(comments, subject) {
   const head = subject.type === 'pull-request'
     ? `:${subject.base ? `${subject.base}:` : ''}${subject.head}` : ''
@@ -310,6 +312,7 @@ if (!role) {
   process.stdout.write(`Recovery ignored untrusted source workflow run ${sourceRunId}.\n`)
   process.exit(0)
 }
+const controllerLogin = role === 'pull-request' ? await trustedControllerLogin() : null
 const sourceJobs = await reviewJobs()
 const failureSignature = workflowFailureSignature(workflowRun, sourceJobs)
 
@@ -365,11 +368,25 @@ for (const current of subjects) {
   const comments = await pages(`repos/${repository}/issues/${current.number}/comments?per_page=100`, `comments for #${current.number}`)
   const sourceComments = comments.filter(comment => trustedAssociation(comment.author_association) && sourceMarker(comment.body))
   if (sourceComments.length === 0) continue
-  const sourceComment = role === 'pull-request'
-    ? sourceComments.find(comment => reviewedHead(comment.body))
-    : null
-  const sourceHead = sourceComment ? reviewedHead(sourceComment.body) : null
-  if (role === 'pull-request' && !sourceHead) continue
+  const sourceCandidates = role === 'pull-request'
+    ? sourceComments.flatMap(comment => {
+      const sourceHead = reviewedHead(comment.body)
+      if (!sourceHead || !controllerLogin) return []
+      const evidence = trustedRepairSourceComment(comment, {
+        controllerSha,
+        expectedHead: sourceHead,
+        sourceRunId,
+        markerAuthor: controllerLogin,
+        repository,
+      })
+      return evidence ? [{ comment, sourceHead, ...evidence }] : []
+    })
+    : []
+  if (role === 'pull-request' && sourceCandidates.length !== 1) continue
+  const sourceCandidate = sourceCandidates[0] || null
+  const sourceComment = sourceCandidate?.comment || null
+  const sourceHead = sourceCandidate?.sourceHead || null
+  if (role === 'pull-request' && !sourceCandidate) continue
   const subject = role === 'issue'
     ? { type: 'issue', number: current.number }
     : { type: 'pull-request', number: current.number, head: sourceHead }
@@ -410,11 +427,11 @@ for (const current of subjects) {
       '-f', `client_payload[request_id]=recovery-${sourceRunId}-${decision.attempt}`], { env: environment })
   } else {
     await waitForRetry(decision)
-    const originalRequestId = repairRequestId(sourceComment.body, subject.head)
+    const originalRequestId = sourceCandidate.requestId
     const recoveryRequestId = originalRequestId.startsWith('ci-run-')
       ? `${originalRequestId}.recovery-${decision.attempt}`
       : decision.requestId
-    const ciWorkflow = originalRequestId.startsWith('ci-run-') ? recordedCiWorkflow(sourceComment.body) : ''
+    const ciWorkflow = originalRequestId.startsWith('ci-run-') ? sourceCandidate.ciWorkflow : ''
     if (originalRequestId.startsWith('ci-run-') && !ciWorkflow) {
       throw new Error(`CI recovery for pull request #${subject.number} has no recorded workflow name`)
     }

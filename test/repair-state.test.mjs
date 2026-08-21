@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { ciRepairRequest } from '../src/dispatch-policy.mjs'
 import {
+  trustedRepairRecoveryRequestId,
   interruptedRepairMayRetry,
   repairRoutingEvidence,
   recoverableRepairIdentity,
@@ -191,6 +193,43 @@ test('CI recovery keeps the original source comment when recovery comments share
   })
   assert.equal(identity.originalRequestId, originalRequestId)
   assert.equal(identity.sourceRunId, String(originalRun))
+})
+
+test('recovery dispatch restores the root CI request before dsh-repair replay', () => {
+  const sourceRun = 31775196649
+  const head = 'c'.repeat(40)
+  const body = [
+    `<!-- dsh-review-repair:${controllerSha}:${head}:ci-run-81-2.recovery-1 -->`,
+    '- Status: **failed**',
+    `- Controller SHA: \`${controllerSha}\``,
+    '- Repair class: `automatic-ci`',
+    '- Stage: `repair`',
+    '- Original request: `ci-run-81-2`',
+    '- CI workflow: `CI`',
+    `- Reviewed head: \`${head}\``,
+    `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${sourceRun}`,
+  ].join('\n')
+
+  const rootRequestId = trustedRepairRecoveryRequestId({
+    comment: { user: { login: 'controller' }, body },
+    controllerSha,
+    expectedHead: head,
+    sourceRunId: String(sourceRun),
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  })
+  assert.equal(rootRequestId, 'ci-run-81-2')
+  assert.deepEqual(ciRepairRequest(`${rootRequestId}.recovery-2`), {
+    kind: 'run', runId: 81, attempt: 2,
+  })
+  assert.equal(trustedRepairRecoveryRequestId({
+    comment: { user: { login: 'controller' }, body: body.replace('- Original request: `ci-run-81-2`\n', '') },
+    controllerSha,
+    expectedHead: head,
+    sourceRunId: String(sourceRun),
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }), null)
 })
 
 test('repair route evidence excludes mutable metadata while exact paths and generations remain decisive', () => {

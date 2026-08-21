@@ -1223,6 +1223,15 @@ test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispat
   assert.match(workflow, /pull-requests: write/)
 })
 
+test('CI repair recovery dispatch uses verified source routing and a single root request suffix', async () => {
+  const source = await readFile(new URL('../src/recover-backlog.mjs', import.meta.url), 'utf8')
+  assert.match(source, /trustedRepairSourceComment/)
+  assert.match(source, /const originalRequestId = sourceCandidate\.requestId/)
+  assert.match(source, /originalRequestId\.startsWith\('ci-run-'\)/)
+  assert.match(source, /AGENT_AUTOMATION_CONTROLLER_LOGIN/)
+  assert.doesNotMatch(source, /function repairRequestId/)
+})
+
 test('review infrastructure faults are observed on hosted compute before bounded recovery runs', async () => {
   const target = await readFile(new URL('../templates/target/.github/workflows/agent-recovery.yml', import.meta.url), 'utf8')
   const observer = await readFile(new URL('../.github/workflows/observe-agent-fault.yml', import.meta.url), 'utf8')
