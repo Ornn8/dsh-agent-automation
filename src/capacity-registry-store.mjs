@@ -38,7 +38,7 @@ const MAX_LOCK_WAIT_MS = 60_000
 const DEFAULT_LOCK_LEASE_MS = 15 * 60 * 1000
 const MIN_LOCK_LEASE_MS = 100
 const MAX_LOCK_LEASE_MS = 30 * 60 * 1000
-const PROCESS_IDENTITY_TIMEOUT_MS = 1_000
+const PROCESS_IDENTITY_TIMEOUT_MS = 5_000
 const PROCESS_IDENTITY_TERMINATION_GRACE_MS = 2_500
 const ATTEMPT_COMPACTION_THRESHOLD = 64
 const READ_RETRIES = 8
@@ -773,7 +773,13 @@ export async function resolveProcessIdentity(pid, options = {}) {
   }
   if (platform === 'darwin') {
     const command = options.psPath ?? '/bin/ps'
-    const result = await runProcessProbe(command, ['-p', String(pid), '-o', 'lstart='], runCommand)
+    let result
+    try {
+      result = await runProcessProbe(command, ['-p', String(pid), '-o', 'lstart='], runCommand)
+    } catch (error) {
+      if (commandExitedWith(error, 1)) return null
+      throw error
+    }
     const value = result.stdout.trim()
     if (!value) return null
     const parsed = Date.parse(value)

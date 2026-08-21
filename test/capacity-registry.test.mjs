@@ -428,6 +428,13 @@ test('process identity fails closed when macOS ps is missing', async () => {
   await assert.rejects(resolveProcessIdentity(123, { platform: 'darwin', runCommand }), /ps|missing|unavailable/i)
 })
 
+test('process identity returns null when macOS ps clearly reports a missing PID', async () => {
+  const runCommand = async () => {
+    throw new Error('/bin/ps exited with code 1: signal null')
+  }
+  assert.equal(await resolveProcessIdentity(123, { platform: 'darwin', runCommand }), null)
+})
+
 test('process identity returns null only when Windows reports the target PID absent', async () => {
   const runCommand = async () => {
     throw new Error('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe exited with code 3: target absent')
@@ -439,19 +446,19 @@ test('process identity returns null only when Windows reports the target PID abs
   }), null)
 })
 
-test('process identity bounds a hung macOS probe', { timeout: 5_000 }, async () => {
+test('process identity bounds a hung macOS probe', { timeout: 10_000 }, async () => {
   const started = Date.now()
   const runCommand = async (_command, _args, options) => {
-    assert.equal(options.timeoutMs, 1_000)
+    assert.equal(options.timeoutMs, 5_000)
     return new Promise(() => {})
   }
   await assert.rejects(resolveProcessIdentity(123, { platform: 'darwin', runCommand }), /timed out/)
-  assert.ok(Date.now() - started < 4_000)
+  assert.ok(Date.now() - started < 9_000)
 })
 
-test('process identity bounds a hung Windows probe through the injectable seam', { timeout: 5_000 }, async () => {
+test('process identity bounds a hung Windows probe through the injectable seam', { timeout: 10_000 }, async () => {
   const runCommand = async (_command, _args, options) => {
-    assert.equal(options.timeoutMs, 1_000)
+    assert.equal(options.timeoutMs, 5_000)
     return new Promise(() => {})
   }
   await assert.rejects(resolveProcessIdentity(123, {
@@ -461,7 +468,7 @@ test('process identity bounds a hung Windows probe through the injectable seam',
   }), /timed out/)
 })
 
-test('identity probe timeout fails acquisition without reclaiming the old gate', { timeout: 5_000 }, async () => {
+test('identity probe timeout fails acquisition without reclaiming the old gate', { timeout: 10_000 }, async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-identity-timeout-'))
   try {
     const paths = capacityRegistryPaths(stateRoot)
@@ -482,7 +489,7 @@ test('identity probe timeout fails acquisition without reclaiming the old gate',
       waitMs: 100,
       processIdentity: async () => new Promise(() => {}),
     }), /timed out/)
-    assert.ok(Date.now() - started < 4_000)
+    assert.ok(Date.now() - started < 9_000)
     assert.equal((await readdir(paths.lockPath)).length, 1)
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
