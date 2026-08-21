@@ -63,9 +63,24 @@ function workerCapacityGroup(worker, workerId) {
     : workerId
 }
 
+/** @param {AnyObject} value @returns {string} */
+function capacityPlanHash(value) {
+  if (DIGEST.test(value?.capacityGenerationHash || '')) return value.capacityGenerationHash
+  const records = Array.isArray(value?.records)
+    ? value.records.map(entry => ({
+        key: entry?.key,
+        scope: entry?.scope,
+        generation: entry?.record?.generation,
+        state: entry?.record?.state,
+        identity: entry?.record?.capacityIdentity,
+      })).sort((left, right) => String(left.key).localeCompare(String(right.key)))
+    : []
+  return stableDigest(records)
+}
+
 /**
- * Read one single-scope capacity decision. Half-open coordination belongs to
- * the provider; this router never claims or completes a multi-scope probe.
+ * Read the trusted capacity plan for one candidate. An expired scope remains
+ * eligible until the provider atomically claims every expired scope.
  * @param {AnyObject} provider
  * @param {AnyObject} config
  * @param {AnyObject} worker
@@ -76,19 +91,23 @@ async function inspectCapacity(provider, config, worker, workerId) {
   const capacityGroup = workerCapacityGroup(worker, workerId)
   if (typeof provider.inspect === 'function') {
     const value = await provider.inspect({ workerId, worker, capacityGroup })
-    if (!value || !Number.isSafeInteger(value.generation) || value.generation < 0) {
+    const generation = value?.capacityGeneration ?? value?.generation
+    if (!value || !Number.isSafeInteger(generation) || generation < 0) {
       throw new Error('Capacity provider must return a trusted non-negative generation')
     }
     const state = START_STATES.has(value.state) ? value.state : value.eligible === false ? 'cooldown' : 'available'
     return {
-      eligible: value.eligible !== false && value.available !== false && state === 'available',
+      eligible: value.eligible !== false && value.available !== false,
       state,
-      generation: value.generation,
+      generation,
       capacityGroup,
+      generationHash: capacityPlanHash(value),
+      probeRequired: Array.isArray(value.probeScopes) ? value.probeScopes.length > 0 : value.requiresProbe === true,
+      probeScopes: Array.isArray(value.probeScopes) ? [...value.probeScopes] : [],
     }
   }
   const record = await provider.get(capacityRecordKey({ capacityGroup, scope: 'capacity-group' }))
-  if (!record) return { eligible: true, state: 'available', generation: 0, capacityGroup }
+  if (!record) return { eligible: true, state: 'available', generation: 0, generationHash: capacityPlanHash({ records: [] }), capacityGroup }
   const eligibility = capacityEligibility(record, {
     configurationHash: config.configurationHash,
     credentialGeneration: config.credentialGeneration,
@@ -98,6 +117,9 @@ async function inspectCapacity(provider, config, worker, workerId) {
     state: START_STATES.has(eligibility.state) ? eligibility.state : 'cooldown',
     generation: record.generation,
     capacityGroup,
+    generationHash: capacityPlanHash({ records: [{ key: 'capacity-group', scope: 'capacity-group', record }] }),
+    probeRequired: eligibility.requiresProbe === true,
+    probeScopes: eligibility.requiresProbe ? [eligibility.state] : [],
   }
 }
 
@@ -131,7 +153,7 @@ function attemptIdentity(input) {
     workerId: input.workerId,
     capacityGroup: input.capacityGroup,
     capacityGeneration: input.capacityGeneration,
-    capacityGenerationHash,
+    capacityGenerationHash: input.capacityGenerationHash ?? capacityGenerationHash,
   }
   return {
     ...identity,
@@ -164,12 +186,13 @@ async function prepareAttempt(state, workerId) {
     workerId,
     capacityGroup: capacity.capacityGroup,
     capacityGeneration: capacity.generation,
+    capacityGenerationHash: capacity.generationHash,
     startState: capacity.state,
   })
   base.startedAt = Date.now()
   const claim = Object.freeze({})
   ATTEMPT_CLAIMS.set(claim, { state, base, capacity, workerId })
-  return { claim, capacity }
+  return { claim, capacity, base, workerId }
 }
 
 /** @param {AnyObject} state @param {object} claim @returns {Promise<AnyObject>} */
@@ -197,6 +220,45 @@ async function recordAttemptFailure(state, claim, failure) {
     capacityGroup: prepared.capacity.capacityGroup,
     failure,
   })
+}
+
+/** @param {AnyObject} state @param {AnyObject} prepared @returns {Promise<AnyObject|null>} */
+async function claimCapacityProbe(state, prepared) {
+  if (!prepared.capacity.probeRequired) return null
+  if (typeof state.provider.claimHalfOpenProbe !== 'function') return { eligible: false, probe: null }
+  const probe = await state.provider.claimHalfOpenProbe({
+    workerId: prepared.workerId,
+    leaseId: boundedId(`${prepared.base.attemptId}-probe`, 'capacity-probe'),
+    owner: boundedId(`routing-${state.execution.routingAttemptId}`, 'routing-owner'),
+  })
+  if (!probe || typeof probe.eligible !== 'boolean') throw new Error('Capacity provider returned an invalid half-open probe result')
+  return probe
+}
+
+/** @param {AnyObject} state @param {AnyObject} capacity @param {string} outcome @param {AnyObject|undefined} [failure] @returns {Promise<void>} */
+async function completeCapacityProbe(state, capacity, outcome, failure = undefined) {
+  if (!capacity.probe) return
+  if (typeof state.provider.completeHalfOpenProbe === 'function') {
+    await state.provider.completeHalfOpenProbe({
+      probe: capacity.probe,
+      outcome,
+      ...(failure ? { failure } : {}),
+    })
+    capacity.probe = null
+    return
+  }
+  if (typeof state.provider.completeHalfOpenLease !== 'function') {
+    throw new Error('Capacity provider cannot complete a half-open probe')
+  }
+  for (const lease of capacity.probe.leases ?? []) {
+    await state.provider.completeHalfOpenLease({
+      key: lease.key,
+      leaseId: lease.leaseId,
+      outcome: outcome === 'failure' && failure?.scope === lease.scope ? 'failure' : outcome === 'failure' ? 'abandon' : outcome,
+      ...(outcome === 'failure' && failure?.scope === lease.scope ? { failure } : {}),
+    })
+  }
+  capacity.probe = null
 }
 
 /**
@@ -292,23 +354,41 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
         detail: 'This trusted routing claim was already durably claimed; no Worker was started.',
       }
     }
-    if (!prepared.capacity.eligible) {
-      unavailable.push(workerId)
-      await finishAttempt(state, prepared.claim, {
-        outcome: 'capacity-deferred', category: 'capacity', reason: 'provider-unavailable',
-      })
-      continue
-    }
     let candidateStarted = false
-    const candidateInvocation = {
-      ...invocation,
-      onStarted: /** @param {AnyObject} value */ async value => {
-        candidateStarted = true
-        return typeof invocation?.onStarted === 'function' ? invocation.onStarted(value) : undefined
-      },
-    }
+    let invocationAttempted = false
+    let probeFinalized = false
     try {
+      if (!prepared.capacity.eligible) {
+        unavailable.push(workerId)
+        await finishAttempt(state, prepared.claim, {
+          outcome: 'capacity-deferred', category: 'capacity', reason: 'provider-unavailable',
+        })
+        probeFinalized = true
+        continue
+      }
+      const probe = await claimCapacityProbe(state, prepared)
+      if (probe) {
+        if (!probe.eligible || !probe.probe) {
+          unavailable.push(workerId)
+          await finishAttempt(state, prepared.claim, {
+            outcome: 'capacity-deferred', category: 'capacity', reason: 'provider-unavailable',
+          })
+          probeFinalized = true
+          continue
+        }
+        prepared.capacity.probe = probe.probe
+      }
+      const candidateInvocation = {
+        ...invocation,
+        onStarted: /** @param {AnyObject} value */ async value => {
+          candidateStarted = true
+          return typeof invocation?.onStarted === 'function' ? invocation.onStarted(value) : undefined
+        },
+      }
+      invocationAttempted = true
       const receipt = await runAgentWorker({ config: state.config, workerId, invocation: candidateInvocation, adapters })
+      await completeCapacityProbe(state, prepared.capacity, 'success')
+      probeFinalized = true
       await finishAttempt(state, prepared.claim, { outcome: receipt.outcome })
       return receipt
     } catch (error) {
@@ -329,21 +409,30 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
           confidence: 'authoritative',
         })
       }
-      const canContinue = !candidateStarted
+      const canContinue = invocationAttempted && !candidateStarted
         && failure.phase === 'pre-session'
-        && failure.scope === 'capacity-group'
         && failure.confidence === 'authoritative'
+        && ['capacity-group', 'worker', 'model', 'provider'].includes(failure.scope)
         && canFailoverCapacityFailure(failure)
       if (!canContinue) {
+        await completeCapacityProbe(state, prepared.capacity, 'abandon')
+        probeFinalized = true
         await finishAttempt(state, prepared.claim, {
           outcome: 'failed', category: failure.category, reason: failure.reason,
         })
         throw error
       }
-      await recordAttemptFailure(state, prepared.claim, failure)
+      if (prepared.capacity.probe) {
+        await completeCapacityProbe(state, prepared.capacity, 'failure', failure)
+      } else {
+        await recordAttemptFailure(state, prepared.claim, failure)
+      }
+      probeFinalized = true
       await finishAttempt(state, prepared.claim, {
         outcome: 'capacity-failure', category: failure.category, reason: failure.reason,
       })
+    } finally {
+      if (!probeFinalized) await completeCapacityProbe(state, prepared.capacity, 'abandon')
     }
   }
 
