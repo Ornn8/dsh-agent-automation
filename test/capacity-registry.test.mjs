@@ -435,6 +435,28 @@ test('process identity returns null when macOS ps clearly reports a missing PID'
   assert.equal(await resolveProcessIdentity(123, { platform: 'darwin', runCommand }), null)
 })
 
+test('process identity rejects empty macOS output instead of reclaiming a gate', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-empty-identity-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    await mkdir(paths.directory, { recursive: true })
+    await mkdir(paths.lockPath)
+    await writeFile(join(paths.lockPath, 'registry-owner.empty.json'), `${JSON.stringify({
+      version: 1, ownerToken: 'empty', fence: 10, pid: process.pid,
+      processIdentity: 'wrong-process-start', acquiredAt: '1970-01-01T00:00:00.000Z',
+      expiresAt: '1970-01-01T00:00:00.500Z',
+    })}\n`, 'utf8')
+    const runCommand = async () => ({ stdout: '' })
+    await assert.rejects(withCapacityRegistryLock(stateRoot, async () => undefined, {
+      now: 1_000,
+      processIdentity: pid => resolveProcessIdentity(pid, { platform: 'darwin', runCommand }),
+    }), /empty/)
+    assert.deepEqual(await readdir(paths.lockPath), ['registry-owner.empty.json'])
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
 test('process identity returns null only when Windows reports the target PID absent', async () => {
   const runCommand = async () => {
     throw new Error('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe exited with code 3: target absent')
@@ -446,29 +468,29 @@ test('process identity returns null only when Windows reports the target PID abs
   }), null)
 })
 
-test('process identity bounds a hung macOS probe', { timeout: 10_000 }, async () => {
-  const started = Date.now()
+test('process identity requires an aborted child runner to acknowledge close', { timeout: 10_000 }, async () => {
+  let child
+  let closed = false
+  let runnerSettled = false
   const runCommand = async (_command, _args, options) => {
-    assert.equal(options.timeoutMs, 5_000)
-    return new Promise(() => {})
+    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    options.signal.addEventListener('abort', () => child.kill(), { once: true })
+    await once(child, 'close')
+    closed = true
+    await new Promise(resolve => setTimeout(resolve, 3_000))
+    runnerSettled = true
+    return { stdout: '' }
   }
-  await assert.rejects(resolveProcessIdentity(123, { platform: 'darwin', runCommand }), /timed out/)
-  assert.ok(Date.now() - started < 9_000)
+  const platform = process.platform === 'win32' ? 'win32' : 'darwin'
+  const options = platform === 'win32'
+    ? { platform, powershellPath: process.execPath, runCommand }
+    : { platform, psPath: process.execPath, runCommand }
+  await assert.rejects(resolveProcessIdentity(123, options), /runner did not settle/)
+  assert.equal(closed, true)
+  assert.equal(runnerSettled, false)
 })
 
-test('process identity bounds a hung Windows probe through the injectable seam', { timeout: 10_000 }, async () => {
-  const runCommand = async (_command, _args, options) => {
-    assert.equal(options.timeoutMs, 5_000)
-    return new Promise(() => {})
-  }
-  await assert.rejects(resolveProcessIdentity(123, {
-    platform: 'win32',
-    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-    runCommand,
-  }), /timed out/)
-})
-
-test('identity probe timeout fails acquisition without reclaiming the old gate', { timeout: 10_000 }, async () => {
+test('identity probe failure fails acquisition without reclaiming the old gate', async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-identity-timeout-'))
   try {
     const paths = capacityRegistryPaths(stateRoot)
@@ -483,13 +505,11 @@ test('identity probe timeout fails acquisition without reclaiming the old gate',
       acquiredAt: '1970-01-01T00:00:00.000Z',
       expiresAt: '1970-01-01T00:00:00.500Z',
     })}\n`, 'utf8')
-    const started = Date.now()
     await assert.rejects(withCapacityRegistryLock(stateRoot, async () => undefined, {
       now: 1_000,
       waitMs: 100,
-      processIdentity: async () => new Promise(() => {}),
-    }), /timed out/)
-    assert.ok(Date.now() - started < 9_000)
+      processIdentity: async () => { throw new Error('identity probe unavailable') },
+    }), /identity probe unavailable/)
     assert.equal((await readdir(paths.lockPath)).length, 1)
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })

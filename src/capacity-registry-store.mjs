@@ -694,30 +694,40 @@ function commandExitedWith(error, code) {
 /** @param {string} command @param {string[]} args @param {typeof run} runCommand @returns {Promise<{stdout: string}>} */
 async function runProcessProbe(command, args, runCommand) {
   const controller = new AbortController()
-  let timedOut = false
   let timer
   const commandPromise = Promise.resolve().then(() => runCommand(command, args, {
     signal: controller.signal,
     timeoutMs: PROCESS_IDENTITY_TIMEOUT_MS,
     maxOutputBytes: 64 * 1024,
   }))
-  const timeoutPromise = new Promise((_, reject) => {
+  const timeoutPromise = new Promise(resolvePromise => {
     timer = setTimeout(() => {
-      timedOut = true
       controller.abort()
-      reject(new Error(`Process identity probe timed out after ${PROCESS_IDENTITY_TIMEOUT_MS} ms`))
+      resolvePromise({ type: 'timeout' })
     }, PROCESS_IDENTITY_TIMEOUT_MS)
   })
   try {
-    return await Promise.race([commandPromise, timeoutPromise])
+    const outcome = await Promise.race([
+      commandPromise.then(value => ({ type: 'result', value }), error => ({ type: 'error', error })),
+      timeoutPromise,
+    ])
+    if (outcome.type === 'result') return outcome.value
+    if (outcome.type === 'error') throw outcome.error
+    if (runCommand !== run) {
+      const settled = await Promise.race([
+        commandPromise.then(() => true, () => true),
+        new Promise(resolvePromise => setTimeout(() => resolvePromise(false), PROCESS_IDENTITY_TERMINATION_GRACE_MS)),
+      ])
+      if (!settled) throw new Error('Process identity probe runner did not settle after abort')
+    }
+    try {
+      await commandPromise
+    } catch (error) {
+      throw new Error(`Process identity probe timed out after ${PROCESS_IDENTITY_TIMEOUT_MS} ms`, { cause: error })
+    }
+    throw new Error(`Process identity probe timed out after ${PROCESS_IDENTITY_TIMEOUT_MS} ms`)
   } finally {
     clearTimeout(timer)
-    if (timedOut) {
-      await Promise.race([
-        commandPromise.catch(() => undefined),
-        new Promise(resolvePromise => setTimeout(resolvePromise, PROCESS_IDENTITY_TERMINATION_GRACE_MS)),
-      ])
-    }
   }
 }
 
@@ -812,7 +822,7 @@ export async function resolveProcessIdentity(pid, options = {}) {
       throw error
     }
     const value = result.stdout.trim()
-    if (!value) return null
+    if (!value) throw new Error('macOS process identity output is empty')
     const parsed = Date.parse(value)
     if (!Number.isFinite(parsed)) throw new Error('macOS process start time is invalid')
     return `darwin:${new Date(parsed).toISOString()}`
