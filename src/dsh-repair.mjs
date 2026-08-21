@@ -27,6 +27,7 @@ import { controllerMutationMarker } from './controller-mutation-marker.mjs'
 import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 import {
   interruptedRepairMayRetry,
+  recordedRepairRouteDecision,
   recordedRepairState,
 } from './repair-state.mjs'
 import {
@@ -47,6 +48,7 @@ import {
 } from './governor-state.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
+import { classifyAndCreateWorkerRouteDecision, workerRouteDecisionBody } from './worker-routing.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -172,7 +174,7 @@ if (pullRequestNumber === 0) {
   pullRequestNumber = matches[0].number
 }
 
-async function upsertStatus(status, branch, detail, failureClass) {
+async function upsertStatus(status, branch, detail, failureClass, routeDecision = null) {
   const runUrl = requiredEnv('RUN_URL')
   const body = [
     marker,
@@ -192,6 +194,7 @@ async function upsertStatus(status, branch, detail, failureClass) {
     `- Run: ${runUrl}`,
     ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
     `- Detail: ${detail}`,
+    ...(routeDecision ? ['', workerRouteDecisionBody(routeDecision)] : []),
     '',
     '_DSH owns the technical response and any implementation changes._',
     '',
@@ -430,8 +433,18 @@ if (ciRequest && !recoveryRequest) {
   && record.stateVersion === governorStateVersion)) {
   throw new Error(`Pull request #${pullRequestNumber} has no current controller-attested repair admission`)
 }
+const executionWorkRequest = transportedRequest ?? Object.freeze({
+  requestId: requestId || `repair-${pullRequestNumber}-${expectedHead}`,
+  role: repairRole,
+})
+let routeDecision = null
 const priorRun = priorComments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
 if (priorRun) {
+  routeDecision = recordedRepairRouteDecision(priorRun.body, {
+    workRequest: executionWorkRequest,
+    stateVersion: governorStateVersion,
+    routingPolicy: config.operations.routing.change,
+  })
   const recorded = recordedRepairState(priorRun.body)
   const priorActionRun = recorded.runId
     ? await ghJson(['api', `repos/${repository}/actions/runs/${recorded.runId}`], 'prior repair workflow run')
@@ -447,14 +460,29 @@ if (priorRun) {
 const branch = pullRequest.head.ref
 const baseBranch = pullRequest.base.ref
 if (baseBranch !== defaultBranch) throw new Error(`Pull request base ${baseBranch} is not the configured default branch ${defaultBranch}`)
-const executionWorkRequest = transportedRequest ?? Object.freeze({
-  requestId: requestId || `repair-${pullRequestNumber}-${expectedHead}`,
-  role: repairRole,
-})
+if (!routeDecision) {
+  routeDecision = classifyAndCreateWorkerRouteDecision({
+    workRequest: executionWorkRequest,
+    subjectStateVersion: governorStateVersion,
+    trustedTaskSnapshot: {
+      workflowStage: transportedRequest?.stageId || 'repair',
+      labels: pullRequest.labels,
+      title: pullRequest.title,
+      body: pullRequest.body,
+      failureEvidence: {
+        class: repairClass,
+        code: ciWorkflowName || repairCause || 'review-repair',
+      },
+    },
+    routingPolicy: config.operations.routing.change,
+  })
+}
 const executionClaim = createWorkerExecutionClaim({
   config,
   role: repairRole,
   workRequest: executionWorkRequest,
+  routeDecision,
+  durableRouteDecision: true,
   subjectStateVersion: governorStateVersion,
   trustedTaskSnapshot: {
     workflowStage: transportedRequest?.stageId || 'repair',
@@ -474,7 +502,7 @@ await upsertStatus('running', branch, explicitRequest
     : `Trusted rework request ${requestId} started a fresh DSH repair session.`
   : mergeRequest
     ? `The exact-pair merge-conflict repair request ${requestId} started a fresh DSH repair session.`
-  : 'The blocking Agent review verdict started a fresh repair session.')
+  : 'The blocking Agent review verdict started a fresh repair session.', undefined, routeDecision)
 await setRepairLabels({
   add: ciRequest || mergeRequest ? ['automation/repairing'] : ['automation/review-blocked', 'automation/repairing'],
   remove: ciRequest
@@ -525,7 +553,7 @@ try {
       requiredSkill: repairProcedure,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
-      onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible change Worker session: ${sessionId}.`),
+      onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible change Worker session: ${sessionId}.`, undefined, routeDecision),
     },
     adapters: createAgentAdapters(),
   })
@@ -542,7 +570,10 @@ try {
     : null
   if (effectiveReceipt.outcome === 'capacity-deferred') {
     await upsertStatus('capacity-waiting', branch,
-      'All admitted change Workers are currently unavailable due to verified capacity state; the original repair WorkRequest remains eligible.')
+      'All admitted change Workers are currently unavailable due to verified capacity state; the original repair WorkRequest remains eligible.',
+      undefined,
+      routeDecision)
+    await setRepairLabels({ remove: ['automation/repairing'] })
     process.stdout.write(`Pull request #${pullRequestNumber} repair is waiting for an available change Worker; no product failure was recorded.\n`)
   } else if (baselineReference) {
     const baselineIssue = await ghJson([
@@ -607,7 +638,7 @@ try {
   }
 } catch (error) {
   const failureClass = classifyAgentFailure(error)
-  await upsertStatus('failed', branch, `The repair run failed: ${String(error.message).slice(0, 1000)}`, failureClass)
+  await upsertStatus('failed', branch, `The repair run failed: ${String(error.message).slice(0, 1000)}`, failureClass, routeDecision)
     .catch(() => undefined)
   await setRepairLabels({
     add: ciRequest ? ['agent/dsh-failed'] : ['automation/review-blocked', 'agent/dsh-failed'],

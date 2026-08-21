@@ -322,6 +322,7 @@ export function createWorkerExecutionClaim(options = {}) {
     role,
     workRequest,
     routeDecision,
+    durableRouteDecision,
     subjectStateVersion,
     trustedTaskSnapshot,
     routingPolicy,
@@ -336,6 +337,7 @@ export function createWorkerExecutionClaim(options = {}) {
   const provider = requireCapacityProvider(config, capacityProvider ?? capacityRegistry)
   const execution = createLocalWorkerRoutingExecution({
     routeDecision,
+    durableRouteDecision,
     workRequest,
     subjectStateVersion,
     trustedTaskSnapshot: trustedTaskSnapshot ?? { workflowStage: role },

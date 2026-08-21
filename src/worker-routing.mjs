@@ -606,19 +606,23 @@ export function classifyAndCreateWorkerRouteDecision(options = {}) {
 
 /**
  * Derive the Worker-owned routing execution identity from trusted local input.
- * The returned identity contains no concrete Worker, provider, or model.
+ * A persisted WorkerRouteDecision is accepted when the caller has already
+ * authenticated its durable source; otherwise it must match fresh local
+ * classification. The returned identity contains no concrete Worker,
+ * provider, or model.
  * @param {AnyObject} options
  * @returns {AnyObject}
  */
-export function createLocalWorkerRoutingExecution({ routeDecision, ...options } = {}) {
+export function createLocalWorkerRoutingExecution({ routeDecision, durableRouteDecision = false, ...options } = {}) {
   if (Object.prototype.hasOwnProperty.call(options, 'generation')) {
     throw new Error('local routing generation is provider-owned')
   }
-  const localDecision = classifyAndCreateWorkerRouteDecision(options)
+  const localDecision = durableRouteDecision ? null : classifyAndCreateWorkerRouteDecision(options)
   const decision = routeDecision === undefined
-    ? localDecision
+    ? localDecision || classifyAndCreateWorkerRouteDecision(options)
     : parseWorkerRouteDecision(routeDecision, options)
-  if (routeDecision !== undefined && JSON.stringify(decision) !== JSON.stringify(localDecision)) {
+  if (routeDecision !== undefined && !durableRouteDecision
+    && JSON.stringify(decision) !== JSON.stringify(localDecision)) {
     throw new Error('WorkerRouteDecision does not match the local trusted routing authority')
   }
   const identity = {

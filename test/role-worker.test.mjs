@@ -169,6 +169,35 @@ test('local routing rejects a wrong or stale WorkerRouteDecision', async () => {
   }), /provider-owned/)
 })
 
+test('local routing reuses a durable route decision across changed task evidence', () => {
+  const workRequest = { requestId: 'request-durable-route', role: 'change' }
+  const routingPolicy = {
+    version: 1,
+    default: 'default',
+    classificationOrder: ['frontend'],
+    routes: {
+      frontend: { rules: { titleIncludes: ['frontend'] } },
+      default: { rules: {} },
+    },
+  }
+  const routeDecision = classifyAndCreateWorkerRouteDecision({
+    workRequest,
+    subjectStateVersion: stateVersion,
+    routingPolicy,
+    trustedTaskSnapshot: { title: 'frontend repair', labels: ['automation/ci-failed'] },
+  })
+  const execution = createLocalWorkerRoutingExecution({
+    workRequest,
+    subjectStateVersion: stateVersion,
+    routingPolicy,
+    trustedTaskSnapshot: { title: 'ordinary repair', labels: ['automation/repairing'] },
+    routeDecision,
+    durableRouteDecision: true,
+  })
+
+  assert.deepEqual(execution.routeDecision, routeDecision)
+})
+
 function attemptProvider({ available = true, generation = 1, replayOutcome = null } = {}) {
   let currentGeneration = generation
   const claims = new Map()
