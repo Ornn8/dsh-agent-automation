@@ -785,6 +785,37 @@ test('multi-scope recovery claims one atomic probe and remains recoverable after
   }
 })
 
+test('multi-scope probe conflict rolls back every uncommitted lease', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-probe-rollback-'))
+  try {
+    let current = now
+    const worker = { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'rollback-group' }
+    const registry = createCapacityRegistry({
+      stateRoot, configurationHash, credentialGeneration, workers: { 'worker-1': worker }, now: () => current,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'rollback-group', sourceWorker: 'worker-1', failure: capacityFailure(), cooldownMs: 1_000,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'rollback-group', sourceWorker: 'worker-1', failure: capacityFailure({ scope: 'worker' }), cooldownMs: 1_000,
+    })
+    current += 60_001
+    const keys = [
+      capacityRecordKey({ capacityGroup: 'rollback-group', scope: 'capacity-group' }),
+      capacityRecordKey({ capacityGroup: 'rollback-group', scope: 'worker', identity: { provider: 'provider-1', model: 'model-1', worker: 'worker-1' } }),
+    ]
+    const external = await registry.acquireHalfOpenLease({ key: keys[1], leaseId: 'external-probe', owner: 'other-worker' })
+    assert.ok(external)
+    const rejected = await registry.claimHalfOpenProbe({ keys, leaseId: 'shared-probe', owner: 'worker-1' })
+    assert.equal(rejected.eligible, false)
+    assert.equal(rejected.probe, null)
+    assert.equal((await registry.get(keys[0])).state, 'cooldown')
+    assert.equal((await registry.get(keys[1])).lease.owner, 'other-worker')
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
 test('registry default clock is evaluated for each decision', async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-live-clock-'))
   try {

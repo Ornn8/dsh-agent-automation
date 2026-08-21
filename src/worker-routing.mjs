@@ -1,6 +1,8 @@
 // @ts-check
 
 import { createHash } from 'node:crypto'
+import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 /**
  * Worker-neutral task classification and durable route-decision validation.
@@ -30,6 +32,9 @@ const CLASSIFICATION_FIELDS = new Set([
   'version', 'workRequestId', 'role', 'stateVersion', 'taskClass', 'policyHash', 'evidenceHash', 'source',
 ])
 const WORKER_ROUTE_ROLES = new Set(['change', 'review'])
+const ROUTING_RECORD_VERSION = 1
+const ROUTING_LOCK_RETRIES = 200
+const ROUTING_LOCK_DELAY_MS = 10
 
 /** @typedef {any} AnyValue Recursive JSON values are bounded and normalized before hashing. */
 /** @typedef {Record<string, any>} AnyObject */
@@ -588,6 +593,137 @@ export function parseWorkerRoutingExecution(value, options = {}) {
     routingAttemptId: value.routingAttemptId,
     routeDecision: parseWorkerRouteDecision(value.routeDecision, options),
   }
+}
+
+/** @param {AnyValue} value @returns {string} */
+function routingRecordKey(value) {
+  return digest(value)
+}
+
+/** @param {string} value @returns {string|null} */
+function trustedActionsGeneration(value) {
+  const runId = process.env.GITHUB_RUN_ID
+  const runAttempt = process.env.GITHUB_RUN_ATTEMPT
+  const runIdText = runId || ''
+  const runAttemptText = runAttempt || ''
+  if (!/^\d+$/.test(runIdText) || !/^\d+$/.test(runAttemptText)
+    || Number.parseInt(runIdText, 10) < 1 || Number.parseInt(runAttemptText, 10) < 1) return null
+  const runUrl = process.env.RUN_URL || process.env.GITHUB_RUN_URL
+  if (runUrl !== undefined && !new RegExp(`/actions/runs/${runIdText}(?:$|[?#])`).test(runUrl)) return null
+  return `actions-${runIdText}-${runAttemptText}-${value}`
+}
+
+/** @param {string} lockPath @param {() => Promise<AnyObject>} work @returns {Promise<AnyObject>} */
+async function withRoutingRecordLock(lockPath, work) {
+  let handle
+  for (let attempt = 0; attempt < ROUTING_LOCK_RETRIES; attempt += 1) {
+    try {
+      handle = await open(lockPath, 'wx')
+      break
+    } catch (error) {
+      if (/** @type {any} */ (error)?.code !== 'EEXIST' || attempt === ROUTING_LOCK_RETRIES - 1) throw error
+      await new Promise(resolve => setTimeout(resolve, ROUTING_LOCK_DELAY_MS))
+    }
+  }
+  try {
+    return await work()
+  } finally {
+    await handle?.close()
+    await unlink(lockPath).catch(error => {
+      if (error?.code !== 'ENOENT') throw error
+    })
+  }
+}
+
+/** @param {string} recordPath @returns {Promise<AnyObject|null>} */
+async function readRoutingRecord(recordPath) {
+  try {
+    const value = JSON.parse(await readFile(recordPath, 'utf8'))
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== ROUTING_RECORD_VERSION) {
+      throw new Error('Local Worker routing record is invalid')
+    }
+    return value
+  } catch (error) {
+    if (/** @type {any} */ (error)?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+/**
+ * Classify and persist Worker routing on the target machine. Controller and
+ * GitHub event payloads are intentionally absent from this authority path.
+ * @param {AnyObject} options
+ * @returns {Promise<AnyObject>}
+ */
+export async function loadOrCreateLocalWorkerRoutingExecution({
+  stateRoot,
+  workRequest,
+  subjectState,
+  subjectStateVersion,
+  stateVersion,
+  trustedTaskSnapshot,
+  routingPolicy,
+} = {}) {
+  const routeDecision = classifyAndCreateWorkerRouteDecision({
+    workRequest,
+    subjectState,
+    subjectStateVersion,
+    stateVersion,
+    trustedTaskSnapshot,
+    routingPolicy,
+  })
+  const identity = {
+    workRequestId: routeDecision.workRequestId,
+    role: routeDecision.role,
+    stateVersion: routeDecision.stateVersion,
+    policyHash: routeDecision.policyHash,
+    evidenceHash: routeDecision.evidenceHash,
+  }
+  const key = routingRecordKey(identity)
+  const actionGeneration = trustedActionsGeneration(key.slice(0, 16))
+  const generationSource = actionGeneration || `local-${key}`
+  /** @param {AnyObject|null} existing @returns {AnyObject} */
+  const create = existing => {
+    const sameGeneration = existing
+      && existing.key === key
+      && existing.generationSource === generationSource
+      && existing.routeDecision
+    const generation = sameGeneration ? existing.generation : (existing?.generation || 0) + 1
+    const routingAttemptId = `local-${key.slice(0, 24)}-g${generation}`
+    return {
+      version: ROUTING_RECORD_VERSION,
+      key,
+      generation,
+      generationSource,
+      routingAttemptId,
+      routeDecision,
+    }
+  }
+  if (typeof stateRoot !== 'string' || !stateRoot.trim()) return create(null)
+  const directory = join(stateRoot, 'worker-routing')
+  const recordPath = join(directory, `${key}.json`)
+  const lockPath = `${recordPath}.lock`
+  await mkdir(directory, { recursive: true })
+  return withRoutingRecordLock(lockPath, async () => {
+    const existing = await readRoutingRecord(recordPath)
+    const record = create(existing)
+    if (!existing || existing.generation !== record.generation || existing.generationSource !== record.generationSource) {
+      const temporaryPath = `${recordPath}.${process.pid}.${Date.now()}.tmp`
+      await writeFile(temporaryPath, `${JSON.stringify(record)}\n`, 'utf8')
+      await rename(temporaryPath, recordPath)
+    }
+    return {
+      version: 1,
+      routingAttemptId: record.routingAttemptId,
+      routeDecision: parseWorkerRouteDecision(record.routeDecision, {
+        workRequest,
+        subjectState,
+        subjectStateVersion,
+        stateVersion,
+        routingPolicy,
+      }),
+    }
+  })
 }
 
 /** Serialize a validated decision with stable key ordering for durable transport. */

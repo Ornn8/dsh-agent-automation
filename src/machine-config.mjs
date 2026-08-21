@@ -89,7 +89,7 @@ function routingIdentifier(value, field) {
   return value
 }
 
-/** Return a route name from the optional PR1 route decision input. */
+/** Return a route name from a locally derived route decision. */
 /** @param {unknown} routeDecision @returns {string} */
 function routeNameFromDecision(routeDecision) {
   if (routeDecision === undefined || routeDecision === null) return 'default'
@@ -183,8 +183,14 @@ function compileRoutingConfig(config) {
       routingIdentifier(routeName, `operations.routing.${role}.routes name`)
       const route = routes[routeName]
       if (!route || typeof route !== 'object' || Array.isArray(route)) throw new Error(`operations.routing.${role}.routes.${routeName} must be an object`)
-      const unknownRouteFields = Object.keys(route).filter(field => field !== 'selectors')
+      const unknownRouteFields = Object.keys(route).filter(field => !['selectors', 'rules', 'priority'].includes(field))
       if (unknownRouteFields.length) throw new Error(`operations.routing.${role}.routes.${routeName} contains unsupported field(s): ${unknownRouteFields.join(', ')}`)
+      if (route.priority !== undefined && (!Number.isSafeInteger(route.priority) || route.priority < 0 || route.priority > MAX_ROUTING_ROUTES)) {
+        throw new Error(`operations.routing.${role}.routes.${routeName}.priority must be an integer from 0 through ${MAX_ROUTING_ROUTES}`)
+      }
+      if (route.rules !== undefined && (!route.rules || typeof route.rules !== 'object' || Array.isArray(route.rules))) {
+        throw new Error(`operations.routing.${role}.routes.${routeName}.rules must be an object`)
+      }
       if (!Array.isArray(route.selectors) || !route.selectors.length || route.selectors.length > MAX_ROUTE_SELECTORS) {
         throw new Error(`operations.routing.${role}.routes.${routeName}.selectors must contain 1 through ${MAX_ROUTE_SELECTORS} selectors`)
       }

@@ -25,7 +25,6 @@ import { GOVERNOR_WORKFLOW_PATHS, issueGovernorSubject, trustedGovernorRecords }
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseAgentWorkRequest } from './work-request.mjs'
-import { createWorkerRoutingExecution } from './worker-routing.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
@@ -33,9 +32,6 @@ const issueNumber = workRequest.subject.number
 const issueRequestId = workRequest.requestId
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-let routingExecution = process.env.WORKER_ROUTING_EXECUTION_JSON?.trim()
-  ? parseJson(process.env.WORKER_ROUTING_EXECUTION_JSON, 'Worker routing execution')
-  : undefined
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
@@ -163,20 +159,6 @@ const governorRecords = await trustedGovernorRecords({
 })
 const governorSubject = issueGovernorSubject(issue)
 const governorStateVersion = subjectStateVersion(governorSubject)
-if (!routingExecution) {
-  routingExecution = createWorkerRoutingExecution({
-    routingAttemptId: issueRequestId,
-    workRequest,
-    subjectStateVersion: governorStateVersion,
-    routingPolicy: config.operations.routing?.[stage.role],
-    trustedTaskSnapshot: {
-      title: issue.title,
-      body: issue.body,
-      labels: issue.labels,
-      workflowStage: workRequest.stageId,
-    },
-  })
-}
 if (!governorRecords.some(record => record.status === 'applied'
   && record.transition === workflowStageTransition(workRequest)
   && record.subject.type === 'issue'
@@ -276,10 +258,14 @@ try {
     config,
     role: stage.role,
     workRequest,
-    routingExecution,
     subjectStateVersion: governorStateVersion,
-    routingPolicy: config.operations.routing?.[stage.role],
-    requireRoutingExecution: true,
+    requireTrustedSubject: true,
+    trustedTaskSnapshot: {
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+      workflowStage: workRequest.stageId,
+    },
     invocation: {
       taskId: `issue-${repository}-${issueNumber}-${issueRequestId}`,
       cwd: checkoutPath,
@@ -293,7 +279,11 @@ try {
     adapters: createAgentAdapters(),
   })
 
-  if (workerReceipt.outcome === 'capacity-deferred') {
+  if (workerReceipt.outcome === 'replayed') {
+    await upsertStatus(statusBody('running', branch, 'This trusted WorkRequest generation was already claimed; no new Worker or pull request was started.'))
+    process.stdout.write(`The trusted Issue generation was already claimed for #${issueNumber}; no model or new pull request was started.\n`)
+    deferred = true
+  } else if (workerReceipt.outcome === 'capacity-deferred') {
     await upsertStatus(statusBody('capacity-deferred', branch, workerReceipt.detail))
     process.stdout.write(`All routed change Workers are at capacity for Issue #${issueNumber}; the WorkRequest remains deferred.\n`)
     deferred = true

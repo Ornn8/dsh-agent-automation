@@ -8,6 +8,7 @@ import { createAgentAdapters } from '../src/agent-adapters.mjs'
 import { parseClaudeCodeOutput } from '../src/claude-code-cli.mjs'
 import { parseOpenCodeRunOutput } from '../src/opencode-cli.mjs'
 import { capacityRecordKey, createCapacityRegistry } from '../src/capacity-registry-store.mjs'
+import { projectWorkerCapacityIdentity } from '../src/capacity-registry.mjs'
 import { classifyAndCreateWorkerRouteDecision } from '../src/worker-routing.mjs'
 
 test('a controller invokes any configured worker through one interface', async () => {
@@ -248,7 +249,7 @@ test('runRoleWorker keeps non-capacity failures on the original recovery path', 
   assert.deepEqual(calls, ['primary'])
 })
 
-test('runRoleWorker executes a controller decision only under the current routing policy', async () => {
+test('runRoleWorker derives routing locally and ignores a caller route decision', async () => {
   const workRequest = { requestId: 'role-work-policy', role: 'change' }
   const decision = durableRouteDecision(workRequest)
   const receipt = await runRoleWorker({
@@ -259,34 +260,38 @@ test('runRoleWorker executes a controller decision only under the current routin
     },
   })
   assert.equal(receipt.workerId, 'primary')
-  await assert.rejects(runRoleWorker({
+  const replay = await runRoleWorker({
     config: roleConfig(), role: 'change', workRequest,
     routeDecision: { ...decision, policyHash: 'd'.repeat(64) },
     subjectStateVersion: 'c'.repeat(64), routingPolicy: routePolicy,
     invocation: roleInvocation(), adapters: {
-      fake: async () => ({ sessionId: 'never', outcome: 'completed' }),
+      fake: async ({ workerId }) => ({ sessionId: workerId, outcome: 'completed' }),
     },
-  }), /policyHash does not match routingPolicy/)
+  })
+  assert.equal(replay.outcome, 'completed')
 })
 
-test('runRoleWorker rejects arbitrary, stale, or wrong WorkRequest route decisions', async () => {
+test('runRoleWorker rejects no caller routing authority', async () => {
   const workRequest = { requestId: 'role-work-1', role: 'change' }
-  await assert.rejects(runRoleWorker({
+  const arbitrary = await runRoleWorker({
     config: roleConfig(), role: 'change', workRequest,
     routeDecision: { route: 'default' }, subjectStateVersion: 'c'.repeat(64),
-    invocation: roleInvocation(), adapters: { fake: async () => ({ sessionId: 'never', outcome: 'completed' }) },
-  }), /unknown field route/)
+    invocation: roleInvocation(), adapters: { fake: async ({ workerId }) => ({ sessionId: workerId, outcome: 'completed' }) },
+  })
+  assert.equal(arbitrary.outcome, 'completed')
   const decision = durableRouteDecision(workRequest)
-  await assert.rejects(runRoleWorker({
+  const wrongWorkRequest = await runRoleWorker({
     config: roleConfig(), role: 'change', workRequest,
     routeDecision: { ...decision, workRequestId: 'other-work' }, subjectStateVersion: 'c'.repeat(64),
-    invocation: roleInvocation(), adapters: { fake: async () => ({ sessionId: 'never', outcome: 'completed' }) },
-  }), /does not match the WorkRequest/)
-  await assert.rejects(runRoleWorker({
+    invocation: roleInvocation({ taskId: 'role-work-wrong' }), adapters: { fake: async ({ workerId }) => ({ sessionId: workerId, outcome: 'completed' }) },
+  })
+  assert.equal(wrongWorkRequest.outcome, 'completed')
+  const wrongSubject = await runRoleWorker({
     config: roleConfig(), role: 'change', workRequest,
     routeDecision: decision, subjectStateVersion: 'd'.repeat(64),
-    invocation: roleInvocation(), adapters: { fake: async () => ({ sessionId: 'never', outcome: 'completed' }) },
-  }), /does not match the subject/)
+    invocation: roleInvocation({ taskId: 'role-work-subject' }), adapters: { fake: async ({ workerId }) => ({ sessionId: workerId, outcome: 'completed' }) },
+  })
+  assert.equal(wrongSubject.outcome, 'completed')
 })
 
 test('runRoleWorker claims each candidate before one sequential or concurrent invocation', async () => {
@@ -326,8 +331,8 @@ test('runRoleWorker claims each candidate before one sequential or concurrent in
     }),
   ])
   assert.equal(first.workerId, 'primary')
-  assert.deepEqual([second.outcome, third.outcome].sort(), ['capacity-deferred', 'completed'])
-  assert.equal(calls.length, 2)
+  assert.deepEqual([second.outcome, third.outcome].sort(), ['replayed', 'replayed'])
+  assert.equal(calls.length, 1)
 })
 
 test('real registry claim makes same routing generation idempotent and accepts a new generation', async () => {
@@ -343,26 +348,171 @@ test('real registry claim makes same routing generation idempotent and accepts a
       return { sessionId: `session-${calls.length}`, outcome: 'completed' }
     },
   }
+  const previousRunId = process.env.GITHUB_RUN_ID
+  const previousRunAttempt = process.env.GITHUB_RUN_ATTEMPT
   try {
+    process.env.GITHUB_RUN_ID = '9101'
+    process.env.GITHUB_RUN_ATTEMPT = '1'
     const first = await runRoleWorker({
-      config, role: 'change', routingAttemptId: 'same-generation', workRequest: { requestId: 'role-work-identity', role: 'change' },
+      config, role: 'change', workRequest: { requestId: 'role-work-identity', role: 'change' },
       invocation: roleInvocation(), adapters,
     })
     const replay = await runRoleWorker({
-      config, role: 'change', routingAttemptId: 'same-generation', workRequest: { requestId: 'role-work-identity', role: 'change' },
+      config, role: 'change', workRequest: { requestId: 'role-work-identity', role: 'change' },
       invocation: roleInvocation(), adapters,
     })
+    process.env.GITHUB_RUN_ID = '9102'
     const recovered = await runRoleWorker({
-      config, role: 'change', routingAttemptId: 'new-generation', workRequest: { requestId: 'role-work-identity', role: 'change' },
+      config, role: 'change', workRequest: { requestId: 'role-work-identity', role: 'change' },
       invocation: roleInvocation(), adapters,
     })
     assert.equal(first.outcome, 'completed')
-    assert.equal(replay.outcome, 'capacity-deferred')
+    assert.equal(replay.outcome, 'replayed')
     assert.equal(recovered.outcome, 'completed')
     assert.deepEqual(calls, ['primary', 'primary'])
   } finally {
+    if (previousRunId === undefined) delete process.env.GITHUB_RUN_ID
+    else process.env.GITHUB_RUN_ID = previousRunId
+    if (previousRunAttempt === undefined) delete process.env.GITHUB_RUN_ATTEMPT
+    else process.env.GITHUB_RUN_ATTEMPT = previousRunAttempt
     await rm(stateRoot, { recursive: true, force: true })
   }
+})
+
+test('Worker derives a non-default route from local policy and ignores a transported envelope', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'dsh-local-routing-'))
+  const config = roleConfig()
+  config.operations.stateRoot = stateRoot
+  config.configurationHash = 'a'.repeat(64)
+  config.credentialGeneration = 'generation-1'
+  config.operations.routing.change.routes = {
+    frontend: { rules: { labelsAny: ['ui'] }, selectors: [{ worker: 'fallback' }] },
+    default: { selectors: [{ worker: 'primary' }] },
+  }
+  const previousRunId = process.env.GITHUB_RUN_ID
+  const previousRunAttempt = process.env.GITHUB_RUN_ATTEMPT
+  try {
+    process.env.GITHUB_RUN_ID = '9001'
+    process.env.GITHUB_RUN_ATTEMPT = '1'
+    const result = await runRoleWorker({
+      config,
+      role: 'change',
+      workRequest: { requestId: 'local-route-work', role: 'change' },
+      subjectStateVersion: 'c'.repeat(64),
+      trustedTaskSnapshot: { labels: ['ui'], workflowStage: 'change' },
+      routingExecution: { version: 1, routingAttemptId: 'forged', routeDecision: { route: 'default' } },
+      invocation: roleInvocation(),
+      adapters: { fake: async ({ workerId }) => ({ sessionId: workerId, outcome: 'completed' }) },
+    })
+    assert.equal(result.workerId, 'fallback')
+  } finally {
+    if (previousRunId === undefined) delete process.env.GITHUB_RUN_ID
+    else process.env.GITHUB_RUN_ID = previousRunId
+    if (previousRunAttempt === undefined) delete process.env.GITHUB_RUN_ATTEMPT
+    else process.env.GITHUB_RUN_ATTEMPT = previousRunAttempt
+    await rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('same local routing generation is a replay no-op before capacity inspection or invocation', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'dsh-routing-replay-'))
+  const config = roleConfig()
+  config.operations.stateRoot = stateRoot
+  config.configurationHash = 'a'.repeat(64)
+  config.credentialGeneration = 'generation-1'
+  const calls = []
+  let ready = 0
+  const adapters = { fake: async ({ workerId }) => {
+    calls.push(workerId)
+    return { sessionId: workerId, outcome: 'completed' }
+  } }
+  const previousRunId = process.env.GITHUB_RUN_ID
+  const previousRunAttempt = process.env.GITHUB_RUN_ATTEMPT
+  try {
+    process.env.GITHUB_RUN_ID = '9002'
+    process.env.GITHUB_RUN_ATTEMPT = '1'
+    const first = await runRoleWorker({
+      config, role: 'change', workRequest: { requestId: 'replay-work', role: 'change' },
+      subjectStateVersion: 'd'.repeat(64), trustedTaskSnapshot: { workflowStage: 'change' },
+      invocation: roleInvocation(), onCandidateReady: async () => { ready += 1 }, adapters,
+    })
+    const replay = await runRoleWorker({
+      config, role: 'change', workRequest: { requestId: 'replay-work', role: 'change' },
+      subjectStateVersion: 'd'.repeat(64), trustedTaskSnapshot: { workflowStage: 'change' },
+      invocation: roleInvocation(), onCandidateReady: async () => { ready += 1 }, adapters,
+    })
+    assert.equal(first.outcome, 'completed')
+    assert.equal(replay.outcome, 'replayed')
+    assert.deepEqual(calls, ['primary'])
+    assert.equal(ready, 1)
+  } finally {
+    if (previousRunId === undefined) delete process.env.GITHUB_RUN_ID
+    else process.env.GITHUB_RUN_ID = previousRunId
+    if (previousRunAttempt === undefined) delete process.env.GITHUB_RUN_ATTEMPT
+    else process.env.GITHUB_RUN_ATTEMPT = previousRunAttempt
+    await rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('capacity attempt identity changes when any applicable scope generation changes', async () => {
+  const config = roleConfig()
+  config.workers.primary.capacityGroup = 'vector-group'
+  const identity = projectWorkerCapacityIdentity('primary', config.workers.primary)
+  const keys = {
+    group: capacityRecordKey({ capacityGroup: 'vector-group', scope: 'capacity-group' }),
+    worker: capacityRecordKey({ capacityGroup: 'vector-group', scope: 'worker', identity }),
+  }
+  let workerGeneration = 1
+  const attempts = new Map()
+  const record = (scope, generation) => ({
+    version: 1,
+    capacityGroup: 'vector-group',
+    scope,
+    state: 'available',
+    reason: null,
+    code: null,
+    observedAt: new Date().toISOString(),
+    retryAtUtc: null,
+    sourceWorker: scope === 'worker' ? 'primary' : null,
+    capacityIdentity: scope === 'worker' ? identity : { provider: null, model: null, worker: null },
+    configurationHash: 'a'.repeat(64),
+    credentialGeneration: 'generation-1',
+    generation,
+    lease: null,
+  })
+  const registry = {
+    async get(key) {
+      if (key === keys.group) return record('capacity-group', 5)
+      if (key === keys.worker) return record('worker', workerGeneration)
+      return null
+    },
+    async claimAttempt(input) {
+      const existing = attempts.get(input.attemptId)
+      if (existing) return { claimed: false, attempt: existing }
+      attempts.set(input.attemptId, input)
+      return { claimed: true, attempt: input }
+    },
+  }
+  const calls = []
+  const run = () => runRoleWorker({
+    config,
+    role: 'change',
+    workRequest: { requestId: 'scope-vector-work', role: 'change' },
+    subjectStateVersion: 'e'.repeat(64),
+    capacityRegistry: registry,
+    invocation: roleInvocation(),
+    adapters: { fake: async ({ workerId }) => { calls.push(workerId); return { sessionId: workerId, outcome: 'completed' } } },
+  })
+  const first = await run()
+  workerGeneration = 2
+  const second = await run()
+  const claimed = [...attempts.values()]
+  assert.equal(first.outcome, 'completed')
+  assert.equal(second.outcome, 'completed')
+  assert.deepEqual(calls, ['primary', 'primary'])
+  assert.equal(claimed.length, 2)
+  assert.notEqual(claimed[0].attemptId, claimed[1].attemptId)
+  assert.notEqual(claimed[0].capacityGenerationHash, claimed[1].capacityGenerationHash)
 })
 
 test('runRoleWorker allows a new capacity generation but does not switch command-json mutation', async () => {
@@ -417,18 +567,13 @@ test('runRoleWorker allows a new capacity generation but does not switch command
   assert.equal(fallbackCalls, 0)
 })
 
-test('runRoleWorker abandons a zero-invocation half-open probe and leaves deferred budget untouched', async () => {
+test('runRoleWorker abandons a claimed half-open probe when setup throws before invocation', async () => {
   const outcomes = []
-  const claims = new Map([['routing-attempt-primary-g2', {
-    result: { outcome: 'claimed' },
-  }], ['routing-attempt-fallback-g0', {
-    result: { outcome: 'claimed' },
-  }]])
-  let firstScope = true
+  const claims = new Map()
+  const groupKey = capacityRecordKey({ capacityGroup: 'group-primary', scope: 'capacity-group' })
   const registry = {
-    async get() {
-      if (!firstScope) return null
-      firstScope = false
+    async get(key) {
+      if (key !== groupKey) return null
       return {
         version: 1, capacityGroup: 'group-primary', scope: 'capacity-group', state: 'cooldown',
         reason: 'rate-limited', code: 'provider.rate-limit', observedAt: new Date(Date.now() - 5_000).toISOString(),
@@ -448,13 +593,12 @@ test('runRoleWorker abandons a zero-invocation half-open probe and leaves deferr
   }
   let invocations = 0
   let budgetWrites = 0
-  const result = await runRoleWorker({
-    config: roleConfig(), role: 'change', routingAttemptId: 'routing-attempt',
+  await assert.rejects(runRoleWorker({
+    config: roleConfig(), role: 'change',
     workRequest: { requestId: 'role-work-1', role: 'change' }, invocation: roleInvocation(),
-    capacityRegistry: registry, onCandidateReady: async () => { budgetWrites += 1 },
+    capacityRegistry: registry, onCandidateReady: async () => { throw new Error('checkout setup failed') },
     adapters: { fake: async () => { invocations += 1; return { sessionId: 'never', outcome: 'completed' } } },
-  })
-  assert.equal(result.outcome, 'capacity-deferred')
+  }), /checkout setup failed/)
   assert.equal(invocations, 0)
   assert.equal(budgetWrites, 0)
   assert.deepEqual(outcomes, ['abandon'])

@@ -151,11 +151,13 @@ export function capacityRecordKey(input) {
 export function parseCapacityAttempt(value) {
   const object = exactKeys(value, [
     'version', 'attemptId', 'workRequestId', 'routePolicyHash', 'taskClass', 'workerId',
-    'capacityGroup', 'capacityGeneration', 'startState', 'startedAt', 'endedAt', 'result',
+    'capacityGroup', 'capacityGeneration', 'capacityGenerationHash', 'startState', 'startedAt', 'endedAt', 'result',
   ], 'Capacity attempt')
   if (object.version !== 1) throw new Error('Capacity attempt version must be 1')
   const startState = object.startState
   if (!STATE_SET.has(startState)) throw new Error('Capacity attempt startState is unsupported')
+  const capacityGenerationHash = object.capacityGenerationHash === undefined || object.capacityGenerationHash === null
+    ? null : digest(object.capacityGenerationHash, 'Capacity attempt capacityGenerationHash')
   const result = exactKeys(object.result, ['outcome', 'category', 'reason'], 'Capacity attempt result')
   if (!RESULT_SET.has(result.outcome)) throw new Error('Capacity attempt result outcome is unsupported')
   const category = result.category === undefined || result.category === null ? null : identifier(result.category, 'Capacity attempt result category')
@@ -177,6 +179,7 @@ export function parseCapacityAttempt(value) {
     capacityGroup: identifier(object.capacityGroup, 'Capacity attempt capacityGroup'),
     capacityGeneration: Number.isSafeInteger(object.capacityGeneration) && object.capacityGeneration >= 0
       ? object.capacityGeneration : (() => { throw new Error('Capacity attempt capacityGeneration must be a non-negative integer') })(),
+    capacityGenerationHash,
     startState,
     startedAt,
     endedAt,
@@ -196,6 +199,7 @@ export function createCapacityAttempt(input) {
     workerId: input.workerId,
     capacityGroup: input.capacityGroup,
     capacityGeneration: input.capacityGeneration,
+    capacityGenerationHash: input.capacityGenerationHash ?? null,
     startState: input.startState,
     startedAt: new Date(input.startedAt ?? Date.now()).toISOString(),
     endedAt: input.endedAt === undefined || input.endedAt === null ? null : new Date(input.endedAt).toISOString(),
@@ -489,7 +493,7 @@ async function claimAttemptUnlocked(stateRoot, attempt, options = {}) {
   const current = await readAttemptSnapshot(stateRoot)
   const existing = current.attempts.find(item => item.attemptId === normalized.attemptId)
   if (existing) {
-    const immutable = ['version', 'attemptId', 'workRequestId', 'routePolicyHash', 'taskClass', 'workerId', 'capacityGroup', 'capacityGeneration', 'startState']
+    const immutable = ['version', 'attemptId', 'workRequestId', 'routePolicyHash', 'taskClass', 'workerId', 'capacityGroup', 'capacityGeneration', 'capacityGenerationHash', 'startState']
     if (immutable.some(key => existing[key] !== normalized[key])) {
       throw new Error(`Capacity attempt ${normalized.attemptId} conflicts with the existing immutable identity`)
     }
@@ -1218,6 +1222,14 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
     async get(key) {
       identifier(key, 'capacity registry key')
       return (await this.records())[key] ?? null
+    },
+    /**
+     * Read one durable record without applying clock or identity projections.
+     * @param {string} key
+     */
+    async peek(key) {
+      identifier(key, 'capacity registry key')
+      return (await readRegistrySnapshot(stateRoot)).document.records[key] ?? null
     },
     /** @param {RegistryFailureInput} input */
     async recordFailure({ key, capacityGroup, scope, sourceWorker, failure, now: observationTime, cooldownMs }) {

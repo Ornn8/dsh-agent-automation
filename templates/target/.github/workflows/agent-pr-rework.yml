@@ -58,4 +58,3 @@ jobs:
       ci_workflow_name: ${{ github.event.client_payload.ci_workflow_name || '' }}
       repair_cause: ${{ github.event.client_payload.repair_cause || '' }}
       work_request: ${{ github.event.action == 'agent_work_requested' && toJSON(github.event.client_payload.work_request) || '' }}
-      worker_routing_execution: ${{ toJSON(github.event.client_payload.worker_routing_execution) || '' }}

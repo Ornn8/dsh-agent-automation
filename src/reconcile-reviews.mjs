@@ -390,17 +390,7 @@ for (const summary of summaries.flat()) {
         })
         await dispatchWithReceipt({
           executable: githubExecutable, environment: actionsEnvironment,
-          workflowFile: 'agent-pr-rework.yml', payload: repositoryDispatchBody(request, {
-            routingAttemptId: request.requestId,
-            subjectStateVersion: governed.stateVersion,
-            routingPolicy: config.operations.routing?.change,
-            trustedTaskSnapshot: {
-              title: pullRequest.title,
-              labels: pullRequest.labels,
-              workflowStage: 'change',
-              failureEvidence: { class: pendingTransition },
-            },
-          }),
+          workflowFile: 'agent-pr-rework.yml', payload: repositoryDispatchBody(request),
           requestId: request.requestId,
         })
       } else if (mergeRepair) {
@@ -412,17 +402,7 @@ for (const summary of summaries.flat()) {
           head: pullRequest.head.sha,
           reviewObservationId: repairObservationIdFromGovernorRecord(pendingTransition, pendingRecord),
         })
-        const dispatch = repositoryDispatchBody(request, {
-          routingAttemptId: request.requestId,
-          subjectStateVersion: governed.stateVersion,
-          routingPolicy: config.operations.routing?.change,
-          trustedTaskSnapshot: {
-            title: pullRequest.title,
-            labels: pullRequest.labels,
-            workflowStage: 'change',
-            failureEvidence: { class: 'merge-conflict' },
-          },
-        })
+        const dispatch = repositoryDispatchBody(request)
         dispatch.client_payload.repair_cause = 'merge-conflict'
         await dispatchWithReceipt({
           executable: githubExecutable, environment: actionsEnvironment, repository,

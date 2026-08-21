@@ -111,36 +111,13 @@ test('Issue requests resolve their root Stage and bind the Profile hash', () => 
   assert.deepEqual(request.subject, { type: 'issue', number: 7 })
 })
 
-test('repository dispatch requires a controller-owned routing execution', () => {
+test('repository dispatch carries only the immutable WorkRequest', () => {
   const request = createReviewRepairRequest({
     ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head, reviewObservationId,
   })
-  assert.throws(() => repositoryDispatchBody(request), /routing execution inputs/)
-})
-
-test('controller repository dispatch persists a live non-default routing execution', () => {
-  const request = createIssueImplementationRequest({
-    ...profile, repository: 'owner/repository', workflowId: 'default', issueNumber: 7, base,
-    requestId: 'agent-work-routing',
-  })
-  const routingPolicy = {
-    version: 1,
-    classificationOrder: ['frontend'],
-    routes: {
-      frontend: { rules: { labelsAny: ['ui'] } },
-      default: { rules: {} },
-    },
-  }
-  const body = repositoryDispatchBody(request, {
-    routingAttemptId: 'issue-generation-1',
-    subjectStateVersion: 'c'.repeat(64),
-    routingPolicy,
-    trustedTaskSnapshot: { labels: ['ui'], workflowStage: request.stageId },
-  })
-  assert.equal(body.client_payload.worker_routing_execution.version, 1)
-  assert.equal(body.client_payload.worker_routing_execution.routingAttemptId, 'issue-generation-1')
-  assert.equal(body.client_payload.worker_routing_execution.routeDecision.taskClass, 'frontend')
-  assert.equal(body.client_payload.worker_routing_execution.routeDecision.workRequestId, request.requestId)
+  const body = repositoryDispatchBody(request)
+  assert.deepEqual(body.client_payload, { work_request: request })
+  assert.equal(Object.hasOwn(body.client_payload, 'worker_routing_execution'), false)
 })
 
 test('WorkRequest parsing fails closed on unknown fields and mutable identities', () => {

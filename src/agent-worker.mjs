@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto'
 import { annotateAdapterFailure, canFailoverCapacityFailure, parseAdapterFailure } from './capacity-failure.mjs'
 import { capacityEligibility, projectWorkerCapacityIdentity } from './capacity-registry.mjs'
 import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry } from './capacity-registry-store.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
-import { parseWorkerRouteDecision, parseWorkerRoutingExecution } from './worker-routing.mjs'
+import { loadOrCreateLocalWorkerRoutingExecution } from './worker-routing.mjs'
 
 const TERMINAL_OUTCOMES = new Set([
   'completed', 'blocked', 'superseded', 'timed-out', 'failed',
@@ -120,6 +121,17 @@ function journalIdentifier(value, fallback) {
   return /^[A-Za-z0-9]/.test(normalized) ? normalized : `work-${normalized}`
 }
 
+/** @param {Record<string, any>[]} records @returns {string} */
+function capacityGenerationHash(records) {
+  const vector = records.map(entry => ({
+    key: entry.key,
+    identity: entry.record?.capacityIdentity || null,
+    generation: entry.record?.generation ?? 0,
+    state: entry.record?.state || 'available',
+  })).sort((left, right) => left.key.localeCompare(right.key))
+  return createHash('sha256').update(JSON.stringify(vector)).digest('hex')
+}
+
 /** @param {Record<string, any>} config @param {object|undefined} provided @returns {object|null} */
 function roleCapacityRegistry(config, provided) {
   if (provided) return provided
@@ -145,13 +157,14 @@ function capacityWorkerSnapshot(worker, workerId) {
   }
 }
 
-/** @param {object|null} registry @param {Record<string, any>} config @param {Record<string, any>} worker @param {string} workerId @param {number} now @param {string} leaseOwner @returns {Promise<Record<string, any>>} */
-async function workerCapacityState(registry, config, worker, workerId, now, leaseOwner) {
+/** @param {object|null} registry @param {Record<string, any>} config @param {Record<string, any>} worker @param {string} workerId @param {number} now @param {string} leaseOwner @param {boolean} claimProbe @returns {Promise<Record<string, any>>} */
+async function workerCapacityState(registry, config, worker, workerId, now, leaseOwner, claimProbe = true) {
   const snapshot = capacityWorkerSnapshot(worker, workerId)
   const result = {
     eligible: true,
     startState: 'available',
     capacityGeneration: 0,
+    capacityGenerationHash: capacityGenerationHash([]),
     records: [],
     probe: null,
   }
@@ -162,7 +175,7 @@ async function workerCapacityState(registry, config, worker, workerId, now, leas
     if (scope === 'model' && (snapshot.identity.provider === null || snapshot.identity.model === null)) return []
     return [capacityRecordKey({ capacityGroup: snapshot.capacityGroup, scope, identity: snapshot.identity })]
   })
-  if (typeof registry.claimHalfOpenProbe === 'function') {
+  if (typeof registry.claimHalfOpenProbe === 'function' && claimProbe) {
     const inspected = await registry.claimHalfOpenProbe({
       keys,
       leaseId: journalIdentifier(`${leaseOwner}-${workerId}`, 'capacity-probe'),
@@ -173,6 +186,7 @@ async function workerCapacityState(registry, config, worker, workerId, now, leas
     result.startState = inspected.startState
     result.capacityGeneration = inspected.capacityGeneration
     result.records = inspected.records.map(entry => ({ key: entry.key, record: entry.record }))
+    result.capacityGenerationHash = capacityGenerationHash(result.records)
     result.probe = inspected.probe
     return result
   }
@@ -181,7 +195,7 @@ async function workerCapacityState(registry, config, worker, workerId, now, leas
     if (scope === 'provider' && snapshot.identity.provider === null) continue
     if (scope === 'model' && (snapshot.identity.provider === null || snapshot.identity.model === null)) continue
     const key = capacityRecordKey({ capacityGroup: snapshot.capacityGroup, scope, identity: snapshot.identity })
-    const record = await registry.get(key)
+    const record = await (typeof registry.peek === 'function' ? registry.peek(key) : registry.get(key))
     if (!record) continue
     const eligibility = capacityEligibility(record, {
       configurationHash: config.configurationHash,
@@ -199,12 +213,14 @@ async function workerCapacityState(registry, config, worker, workerId, now, leas
       probes.push({ key, scope, generation: eligibility.record.generation })
     }
   }
+  result.capacityGenerationHash = capacityGenerationHash(result.records)
   if (!result.eligible) return result
   if (probes.length > 1) {
-    result.eligible = false
     result.startState = 'half-open'
+    result.eligible = false
     return result
   }
+  if (!claimProbe) return result
   if (probes.length === 1) {
     if (typeof registry.acquireHalfOpenLease !== 'function') {
       result.eligible = false
@@ -241,6 +257,7 @@ async function completeCapacityProbe(registry, state, failure, now) {
       ...(failure ? { failure } : {}),
       now,
     })
+    state.probe = null
     return
   }
   const sameScope = failure && failure.scope === state.probe.scope
@@ -251,6 +268,7 @@ async function completeCapacityProbe(registry, state, failure, now) {
       outcome: 'success',
       now,
     })
+    state.probe = null
     return
   }
   await registry.completeHalfOpenLease({
@@ -260,6 +278,7 @@ async function completeCapacityProbe(registry, state, failure, now) {
     ...(failure ? { failure } : {}),
     now,
   })
+  state.probe = null
 }
 
 /** @param {object|null} registry @param {Record<string, any>} state @param {number} now */
@@ -313,47 +332,27 @@ export async function runRoleWorker({
   config,
   role,
   workRequest,
-  routeDecision,
-  routingExecution,
   invocation,
   adapters,
   capacityRegistry,
-  routingAttemptId,
   subjectStateVersion,
-  routingPolicy,
+  trustedTaskSnapshot,
   onCandidateReady,
-  requireRoutingExecution = false,
+  requireTrustedSubject = false,
 } = {}) {
   if (!['change', 'review'].includes(role)) throw new Error(`Worker routing is not available for ${String(role)}`)
-  const boundExecution = routingExecution === undefined || routingExecution === null
-    ? undefined
-    : parseWorkerRoutingExecution(routingExecution, {
-      workRequest,
-      subjectStateVersion,
-      routingPolicy,
-    })
-  if (boundExecution && routingAttemptId !== undefined && routingAttemptId !== boundExecution.routingAttemptId) {
-    throw new Error('routingAttemptId does not match the controller routing execution')
-  }
-  const boundRouteDecision = boundExecution?.routeDecision || (routeDecision === undefined || routeDecision === null
-    ? undefined
-    : parseWorkerRouteDecision(routeDecision, {
-      workRequest,
-      subjectStateVersion,
-      routingPolicy,
-    }))
-  if (boundRouteDecision && !subjectStateVersion) {
-    throw new Error('WorkerRouteDecision execution requires the current subject state version')
-  }
-  if (requireRoutingExecution && !boundExecution && !boundRouteDecision) {
-    const compatibilityCandidates = resolveWorkerCandidates({ config, role })
-    const rolePolicy = config?.operations?.routing?.[role]
-    const onlyDefaultRoute = rolePolicy?.routes && Object.keys(rolePolicy.routes).length === 1
-      && Object.hasOwn(rolePolicy.routes, 'default')
-    if (!onlyDefaultRoute || compatibilityCandidates.length !== 1) {
-      throw new Error('Controller routing execution is required for this multi-Worker route')
-    }
-  }
+  const localWorkRequest = workRequest || { requestId: invocation?.taskId, role }
+  const localStateVersion = subjectStateVersion
+    || (requireTrustedSubject ? undefined : DIGEST.test(config?.configurationHash || '') ? config.configurationHash : '0'.repeat(64))
+  const localRoutingPolicy = config?.operations?.routing?.[role]
+  const localExecution = await loadOrCreateLocalWorkerRoutingExecution({
+    stateRoot: config?.operations?.stateRoot,
+    workRequest: localWorkRequest,
+    subjectStateVersion: localStateVersion,
+    trustedTaskSnapshot: trustedTaskSnapshot || { workflowStage: role },
+    routingPolicy: localRoutingPolicy,
+  })
+  const boundRouteDecision = localExecution.routeDecision
   const candidates = resolveWorkerCandidates({
     config,
     role,
@@ -365,8 +364,8 @@ export async function runRoleWorker({
   const routePolicyHash = boundRouteDecision && DIGEST.test(boundRouteDecision.policyHash || '')
     ? boundRouteDecision.policyHash
     : DIGEST.test(config?.configurationHash || '') ? config.configurationHash : '0'.repeat(64)
-  const workRequestId = journalIdentifier(workRequest?.requestId ?? invocation?.taskId, 'role-work')
-  const attemptRoot = journalIdentifier(boundExecution?.routingAttemptId ?? routingAttemptId ?? `${workRequestId}-${role}`, 'routing-attempt')
+  const workRequestId = journalIdentifier(localWorkRequest?.requestId ?? invocation?.taskId, 'role-work')
+  const attemptRoot = journalIdentifier(localExecution.routingAttemptId, 'routing-attempt')
   const startedAt = Date.now()
   const unavailable = []
   const seen = new Set()
@@ -376,44 +375,57 @@ export async function runRoleWorker({
     seen.add(workerId)
     const worker = config?.workers?.[workerId]
     if (!worker || typeof worker !== 'object' || Array.isArray(worker)) throw new Error(`Unknown agent worker ${workerId}`)
-    const capacity = await workerCapacityState(registry, config, worker, workerId, Date.now(), attemptRoot)
-    if (!capacity.eligible) {
+    const plannedCapacity = await workerCapacityState(registry, config, worker, workerId, Date.now(), attemptRoot, false)
+    if (!plannedCapacity.eligible) {
       unavailable.push(workerId)
       continue
     }
     const attemptBase = {
-      attemptId: journalIdentifier(`${attemptRoot}-${workerId}-g${capacity.capacityGeneration}`, 'routing-attempt'),
+      attemptId: journalIdentifier(`${attemptRoot}-${workerId}-${plannedCapacity.capacityGenerationHash}`, 'routing-attempt'),
       workRequestId,
       routePolicyHash,
       taskClass,
       workerId,
       capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
-      capacityGeneration: capacity.capacityGeneration,
-      startState: capacity.startState,
+      capacityGeneration: plannedCapacity.capacityGeneration,
+      capacityGenerationHash: plannedCapacity.capacityGenerationHash,
+      startState: plannedCapacity.startState,
       startedAt,
     }
     const claim = await claimRoleAttempt(registry, attemptBase)
     if (!claim.claimed) {
       unavailable.push(workerId)
-      await abandonCapacityProbe(registry, capacity, Date.now())
       if (claim.duplicate) {
         return {
           version: 1,
-          outcome: 'capacity-deferred',
-          category: 'capacity',
-          reason: 'capacity-deferred',
+          outcome: 'replayed',
+          category: 'routing',
+          reason: 'replayed',
           workRequestId,
           role,
           taskClass,
           routePolicyHash,
           candidates: [...candidates],
           unavailable,
-          detail: 'This routing generation has already been claimed by another Worker process.',
+          detail: 'This trusted routing generation was already claimed; no Worker or external authority was started.',
         }
       }
       continue
     }
+    const capacity = await workerCapacityState(registry, config, worker, workerId, Date.now(), attemptRoot)
+    let probeFinalized = false
     try {
+      if (!capacity.eligible) {
+        unavailable.push(workerId)
+        await appendRoleAttempt(registry, {
+          ...attemptBase,
+          attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
+          endedAt: Date.now(),
+          result: { outcome: 'capacity-deferred', category: 'capacity', reason: capacity.startState },
+        })
+        probeFinalized = true
+        continue
+      }
       await onCandidateReady?.({ workerId, capacity, workRequest, role })
       const candidateInvocation = typeof invocation?.onStarted === 'function'
         ? {
@@ -423,6 +435,7 @@ export async function runRoleWorker({
         : invocation
       const receipt = await runAgentWorker({ config, workerId, invocation: candidateInvocation, adapters })
       await completeCapacityProbe(registry, capacity, undefined, Date.now())
+      probeFinalized = true
       await appendRoleAttempt(registry, {
         ...attemptBase,
         attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
@@ -431,11 +444,13 @@ export async function runRoleWorker({
       })
       return receipt
     } catch (error) {
-      const failure = parseAdapterFailure(error?.adapterFailure ?? error)
+      const failure = parseAdapterFailure(error?.adapterFailure
+        ?? annotateAdapterFailure(error, { phase: 'pre-session', scope: 'worker' }).adapterFailure)
       const safeCapacityFailover = canFailoverCapacityFailure(failure)
         && (role === 'review' || (failure.phase === 'pre-session' && worker.adapter !== 'command-json'))
       if (!safeCapacityFailover) {
         await abandonCapacityProbe(registry, capacity, Date.now())
+        probeFinalized = true
         await appendRoleAttempt(registry, {
           ...attemptBase,
           attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
@@ -454,12 +469,15 @@ export async function runRoleWorker({
         })
       }
       await completeCapacityProbe(registry, capacity, failure, Date.now())
+      probeFinalized = true
       await appendRoleAttempt(registry, {
         ...attemptBase,
         attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
         endedAt: Date.now(),
         result: { outcome: 'capacity-failure', category: failure.category, reason: failure.reason },
       })
+    } finally {
+      if (!probeFinalized) await abandonCapacityProbe(registry, capacity, Date.now())
     }
   }
 

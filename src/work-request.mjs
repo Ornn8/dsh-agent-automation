@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { workflowDefinitionHash } from './workflow-definition.mjs'
 import { resolveIssueEntryStage, resolveWorkflowStage } from './workflow-profile.mjs'
-import { createWorkerRoutingExecution } from './worker-routing.mjs'
 
 const FULL_SHA = /^[0-9a-f]{40}$/
 const SHA256 = /^[0-9a-f]{64}$/
@@ -212,16 +211,11 @@ export function createReviewRepairRequest({
   })
 }
 
-/** Wrap a validated WorkRequest and its controller-owned routing execution for repository_dispatch transport. */
-export function repositoryDispatchBody(request, options = {}) {
+/** Wrap a validated WorkRequest for GitHub repository_dispatch transport. */
+export function repositoryDispatchBody(request) {
   const workRequest = parseAgentWorkRequest(request)
-  if (options.routingAttemptId === undefined || (options.subjectStateVersion === undefined && options.subjectState === undefined)
-    || options.routingPolicy === undefined) {
-    throw new Error('repositoryDispatchBody requires the controller routing execution inputs')
-  }
-  const execution = createWorkerRoutingExecution({ workRequest, ...options })
   return {
     event_type: 'agent_work_requested',
-    client_payload: { work_request: workRequest, worker_routing_execution: execution },
+    client_payload: { work_request: workRequest },
   }
 }

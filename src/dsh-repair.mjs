@@ -47,7 +47,6 @@ import {
 } from './governor-state.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
-import { createWorkerRoutingExecution } from './worker-routing.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -64,9 +63,6 @@ const repairCause = process.env.REPAIR_CAUSE?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
 const role = transportedRequest?.role || requiredEnv('AGENT_ROLE')
-let routingExecution = process.env.WORKER_ROUTING_EXECUTION_JSON?.trim()
-  ? parseJson(process.env.WORKER_ROUTING_EXECUTION_JSON, 'Worker routing execution')
-  : undefined
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
@@ -366,21 +362,6 @@ const governorRecords = await trustedGovernorRecords({
 })
 const governorSubject = pullRequestGovernorSubject(pullRequest)
 const governorStateVersion = subjectStateVersion(governorSubject)
-if (!routingExecution) {
-  routingExecution = createWorkerRoutingExecution({
-    routingAttemptId: requestId || `repair-${expectedHead}`,
-    workRequest: transportedRequest || { requestId: requestId || `repair-${expectedHead}`, role },
-    subjectStateVersion: governorStateVersion,
-    routingPolicy: config.operations.routing?.[role],
-    trustedTaskSnapshot: {
-      title: pullRequest.title,
-      body: pullRequest.body,
-      labels: pullRequest.labels,
-      workflowStage: 'change',
-      failureEvidence: { class: repairClass },
-    },
-  })
-}
 if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
   throw new Error(`Pull request #${pullRequestNumber} is paused and requires an authorized resume`)
 }
@@ -524,10 +505,15 @@ try {
     config,
     role,
     workRequest: transportedRequest || { requestId: requestId || `repair-${expectedHead}`, role },
-    routingExecution,
     subjectStateVersion: governorStateVersion,
-    routingPolicy: config.operations.routing?.[role],
-    requireRoutingExecution: true,
+    requireTrustedSubject: true,
+    trustedTaskSnapshot: {
+      title: pullRequest.title,
+      body: pullRequest.body,
+      labels: pullRequest.labels,
+      workflowStage: 'change',
+      failureEvidence: { class: repairClass },
+    },
     onCandidateReady,
     invocation: {
       taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
@@ -542,7 +528,11 @@ try {
     adapters: createAgentAdapters(),
   })
 
-  if (workerReceipt.outcome === 'capacity-deferred') {
+  if (workerReceipt.outcome === 'replayed') {
+    await upsertStatus('running', branch, 'This trusted repair generation was already claimed; no new repair attempt was started.')
+    process.stdout.write(`The trusted repair generation was already claimed for PR #${pullRequestNumber}; no model or repair budget was consumed.\n`)
+    deferred = true
+  } else if (workerReceipt.outcome === 'capacity-deferred') {
     await setRepairLabels({ remove: ['automation/repairing'] })
     await upsertStatus('capacity-deferred', branch, workerReceipt.detail)
     process.stdout.write(`All routed repair Workers are at capacity for PR #${pullRequestNumber}; the repair remains deferred.\n`)

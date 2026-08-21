@@ -24,10 +24,6 @@ on:
         required: false
         type: string
         default: review
-      worker_routing_execution:
-        required: false
-        type: string
-        default: ''
 concurrency:
   group: agent-review-${{ github.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: true
@@ -63,7 +59,6 @@ jobs:
           PROFILE_ID: ${{ inputs.profile_id }}
           WORKFLOW_ID: ${{ inputs.workflow_id }}
           STAGE_ID: ${{ inputs.stage_id }}
-          WORKER_ROUTING_EXECUTION_JSON: ${{ inputs.worker_routing_execution }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
           CONTROLLER_SHA: ${{ job.workflow_sha }}

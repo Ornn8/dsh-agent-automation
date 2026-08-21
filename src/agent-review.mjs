@@ -22,7 +22,6 @@ import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { reviewMarker } from './review-authority.mjs'
 import { reviewObservations } from './review-observations.mjs'
-import { createWorkerRoutingExecution } from './worker-routing.mjs'
 import { agentFailureCode, classifyAgentFailure } from './failure-classification.mjs'
 import { subjectStateVersion } from './governor-policy.mjs'
 import { pullRequestGovernorSubject } from './governor-state.mjs'
@@ -118,9 +117,6 @@ const reviewStage = requireEligibleWorkflowStage(
 if (reviewStage.procedure !== AGENT_REVIEW_SKILL) {
   throw new Error(`Review workflow cannot execute procedure ${reviewStage.procedure}`)
 }
-let routingExecution = process.env.WORKER_ROUTING_EXECUTION_JSON?.trim()
-  ? parseJson(process.env.WORKER_ROUTING_EXECUTION_JSON, 'Worker routing execution')
-  : undefined
 const expectedBaseRef = pullRequest.baseRefName
 const reviewWorkRequest = {
   requestId: `review-pr-${pullRequestNumber}-${expectedBase}-${expectedHead}`,
@@ -134,19 +130,6 @@ const reviewSubjectStateVersion = subjectStateVersion(pullRequestGovernorSubject
   head: { sha: pullRequest.headRefOid },
   labels: pullRequest.labels,
 }))
-if (!routingExecution) {
-  routingExecution = createWorkerRoutingExecution({
-    routingAttemptId: `review-${pullRequestNumber}-${expectedBase}-${expectedHead}`,
-    workRequest: reviewWorkRequest,
-    subjectStateVersion: reviewSubjectStateVersion,
-    routingPolicy: config.operations.routing?.[reviewStage.role],
-    trustedTaskSnapshot: {
-      title: pullRequest.title,
-      labels: pullRequest.labels,
-      workflowStage: stageId,
-    },
-  })
-}
 const replicaId = await reviewReplicaIdForRunner({
   stateRoot: config.operations.stateRoot,
   runnerName: requiredEnv('RUNNER_NAME'),
@@ -211,20 +194,7 @@ for (const label of [
     '--remove-label', label,
   ], { env: githubEnvironment }).catch(() => undefined)
 }
-const reviewCheckId = await startReviewCheck({
-  ghExecutable: config.ghExecutable,
-  repository,
-  head: expectedHead,
-  runUrl: requiredEnv('RUN_URL'),
-  runAttempt,
-  identity: {
-    workflowId,
-    stageId,
-    definitionHash: profile.definitionHash,
-  },
-  env: githubEnvironment,
-})
-await writeOutput('review_check_id', reviewCheckId)
+let reviewCheckId = null
 
 const prompt = `Review GitHub PR #${pullRequestNumber} in ${repository} at exact head ${expectedHead} against base ${expectedBase}.
 
@@ -264,10 +234,30 @@ const workerReceipt = await runRoleWorker({
   config,
   role: reviewStage.role,
   workRequest: reviewWorkRequest,
-  routingExecution,
   subjectStateVersion: reviewSubjectStateVersion,
-  routingPolicy: config.operations.routing?.[reviewStage.role],
-  requireRoutingExecution: true,
+  requireTrustedSubject: true,
+  trustedTaskSnapshot: {
+    title: pullRequest.title,
+    labels: pullRequest.labels,
+    workflowStage: stageId,
+  },
+  onCandidateReady: async () => {
+    if (reviewCheckId !== null) return
+    reviewCheckId = await startReviewCheck({
+      ghExecutable: config.ghExecutable,
+      repository,
+      head: expectedHead,
+      runUrl: requiredEnv('RUN_URL'),
+      runAttempt,
+      identity: {
+        workflowId,
+        stageId,
+        definitionHash: profile.definitionHash,
+      },
+      env: githubEnvironment,
+    })
+    await writeOutput('review_check_id', reviewCheckId)
+  },
   invocation: {
     taskId: `review-${expectedBase}-${expectedHead}`,
     cwd: reviewCheckout,
@@ -279,6 +269,11 @@ const workerReceipt = await runRoleWorker({
   },
   adapters: createAgentAdapters(),
 })
+if (workerReceipt.outcome === 'replayed') {
+  await writeOutput('replayed', 'true')
+  process.stdout.write(`The trusted review generation was already claimed; no new CheckRun or verdict was published for ${expectedHead}.\n`)
+  return
+}
 if (workerReceipt.outcome === 'capacity-deferred') {
   await completeReviewCheck({
     ghExecutable: config.ghExecutable,

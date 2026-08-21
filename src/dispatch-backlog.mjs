@@ -27,7 +27,6 @@ import {
 import { agentWorkRequestId } from './agent-work.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflow } from './workflow-profile.mjs'
 import { createIssueImplementationRequest, repositoryDispatchBody } from './work-request.mjs'
-import { createWorkerRoutingExecution } from './worker-routing.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
@@ -49,9 +48,6 @@ const governorWriterTrust = {
   workflowPath: '.github/workflows/dispatch-backlog.yml',
 }
 const observationId = `${requiredEnv('GITHUB_RUN_ID')}:${process.env.GITHUB_RUN_ATTEMPT || '1'}`
-const routingPolicy = process.env.WORKER_ROUTING_POLICY_JSON?.trim()
-  ? parseJson(process.env.WORKER_ROUTING_POLICY_JSON, 'worker routing policy')
-  : { version: 1, defaultRoute: 'default', routes: { default: {} } }
 const requestedIssueNumber = (() => {
   const value = process.env.REQUESTED_ISSUE_NUMBER?.trim() || '0'
   if (!/^\d+$/.test(value)) throw new Error('REQUESTED_ISSUE_NUMBER must be a non-negative integer')
@@ -295,19 +291,6 @@ if (!admittedSource) throw new Error(`Governor subject #${work.number} disappear
 
 if (work.type === 'repair') {
   await recordApplied(work, admission)
-  const routingExecution = createWorkerRoutingExecution({
-    routingAttemptId: `repair-${work.number}-${work.head}`,
-    workRequest: { requestId: 'backlog', role: 'change' },
-    subjectStateVersion: admission.stateVersion,
-    routingPolicy,
-    trustedTaskSnapshot: {
-      title: admittedSource.title,
-      body: admittedSource.body,
-      labels: admittedSource.labels,
-      workflowStage: 'change',
-      failureEvidence: { class: 'repair' },
-    },
-  })
   await run(githubExecutable, [
     'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
   ], {
@@ -318,7 +301,6 @@ if (work.type === 'repair') {
         pr_number: work.number,
         head_sha: work.head,
         request_id: 'backlog',
-        worker_routing_execution: routingExecution,
       },
     }),
   })
@@ -330,17 +312,7 @@ if (work.type === 'repair') {
   try {
     await run(githubExecutable, [
       'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
-    ], { env: githubEnvironment, input: JSON.stringify(repositoryDispatchBody(work.request, {
-      routingAttemptId: work.request.requestId,
-      subjectStateVersion: admission.stateVersion,
-      routingPolicy,
-      trustedTaskSnapshot: {
-        title: admittedSource.title,
-        body: admittedSource.body,
-        labels: admittedSource.labels,
-        workflowStage: work.request.stageId,
-      },
-    })) })
+    ], { env: githubEnvironment, input: JSON.stringify(repositoryDispatchBody(work.request)) })
   } catch (error) {
     await run(githubExecutable, [
       'issue', 'edit', String(work.number), '--repo', repository, '--remove-label', 'agent/dsh',
