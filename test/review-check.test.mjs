@@ -81,7 +81,7 @@ test('capacity-deferred creates one neutral exact-head CheckRun and recognizes a
     ],
   }
   const replay = recorder('{"id":94}')
-  const replayId = trustedDeferredReviewCheckId(response, { repository, head, identity })
+  const replayId = trustedDeferredReviewCheckId(response, { repository, head, identity: identityWithRun })
     ?? await startDeferredReviewCheck({
       ghExecutable: 'gh', repository, head, runUrl, runAttempt: 2, identity,
       summary: 'No review Worker was available because all routed capacity was deferred.',
@@ -89,9 +89,11 @@ test('capacity-deferred creates one neutral exact-head CheckRun and recognizes a
     })
   assert.equal(replayId, 91)
   assert.equal(replay.calls.length, 0, 'trusted neutral replay must not create another CheckRun')
-  assert.equal(trustedDeferredReviewCheckId({ ...response, check_runs: response.check_runs.map(check => ({ ...check, conclusion: 'failure' })) }, { repository, head, identity }), null)
-  assert.equal(trustedDeferredReviewCheckId({ ...response, check_runs: response.check_runs.map(check => ({ ...check, external_id: undefined })) }, { repository, head, identity }), null)
-  assert.equal(trustedDeferredReviewCheckId({ ...response, check_runs: response.check_runs.map(check => ({ ...check, external_id: reviewCheckIdentity({ ...identityWithRun, definitionHash: 'c'.repeat(64) }) })) }, { repository, head, identity }), null)
+  assert.equal(trustedDeferredReviewCheckId({ ...response, check_runs: response.check_runs.map(check => ({ ...check, conclusion: 'failure' })) }, { repository, head, identity: identityWithRun }), null)
+  assert.equal(trustedDeferredReviewCheckId({ ...response, check_runs: response.check_runs.map(check => ({ ...check, external_id: undefined })) }, { repository, head, identity: identityWithRun }), null)
+  assert.equal(trustedDeferredReviewCheckId({ ...response, check_runs: response.check_runs.map(check => ({ ...check, external_id: reviewCheckIdentity({ ...identityWithRun, definitionHash: 'c'.repeat(64) }) })) }, { repository, head, identity: identityWithRun }), null)
+  assert.equal(trustedDeferredReviewCheckId(response, { repository, head, identity: { ...identityWithRun, runId: 18 } }), null)
+  assert.equal(trustedDeferredReviewCheckId(response, { repository, head, identity: { ...identityWithRun, runAttempt: 3 } }), null)
 })
 
 test('review CheckRun identity binds the trusted Profile workflow and rejects malformed metadata', () => {

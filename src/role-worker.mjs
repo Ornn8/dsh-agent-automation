@@ -381,6 +381,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
         routingAttemptId: state.execution.routingAttemptId,
         candidates: [...state.candidates],
         priorOutcome,
+        ...(typeof admission.attempt.result.output === 'string' ? { output: admission.attempt.result.output } : {}),
         detail: 'This trusted routing claim was already durably claimed; no Worker was started.',
       }
     }
@@ -419,7 +420,10 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
       const receipt = await runAgentWorker({ config: state.config, workerId, invocation: candidateInvocation, adapters })
       await completeCapacityProbe(state, prepared.capacity, 'success')
       probeFinalized = true
-      await finishAttempt(state, prepared.claim, { outcome: receipt.outcome })
+      await finishAttempt(state, prepared.claim, {
+        outcome: receipt.outcome,
+        ...(receipt.outcome === 'completed' && typeof receipt.output === 'string' ? { output: receipt.output } : {}),
+      })
       return receipt
     } catch (error) {
       const failureSource = error && typeof error === 'object' && 'adapterFailure' in error

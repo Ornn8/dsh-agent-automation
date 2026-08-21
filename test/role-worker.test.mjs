@@ -404,6 +404,26 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
 })
 
+test('completed Worker output is durably available to a replay', async () => {
+  const provider = attemptProvider()
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'review', workRequest: { requestId: 'request-replay-output', role: 'review' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => ({ sessionId: 'review-session', outcome: 'completed', output: 'machine review result' }) },
+  }
+
+  const first = await runRoleWorker(input)
+  const replay = await runRoleWorker(input)
+
+  assert.equal(first.outcome, 'completed')
+  assert.equal(replay.outcome, 'replayed')
+  assert.equal(replay.priorOutcome, 'completed')
+  assert.equal(replay.output, 'machine review result')
+})
+
 test('all previously capacity-deferred candidates replay as deferred without starting a Worker', async () => {
   const provider = attemptProvider({ available: false, generation: 3 })
   let calls = 0

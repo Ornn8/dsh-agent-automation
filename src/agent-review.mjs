@@ -44,6 +44,7 @@ const config = await loadConfig()
 const profileId = requiredEnv('PROFILE_ID')
 const workflowId = requiredEnv('WORKFLOW_ID')
 const stageId = requiredEnv('STAGE_ID')
+const runId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
 const runAttempt = Number.parseInt(requiredEnv('GITHUB_RUN_ATTEMPT'), 10)
 const marker = reviewMarker(expectedHead)
 const githubEnvironment = actionsCredentialEnvironment()
@@ -55,6 +56,9 @@ if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
 }
 if (!Number.isSafeInteger(runAttempt) || runAttempt < 1 || String(runAttempt) !== process.env.GITHUB_RUN_ATTEMPT) {
   throw new Error(`Invalid GITHUB_RUN_ATTEMPT: ${process.env.GITHUB_RUN_ATTEMPT}`)
+}
+if (!Number.isSafeInteger(runId) || runId < 1 || String(runId) !== process.env.GITHUB_RUN_ID) {
+  throw new Error(`Invalid GITHUB_RUN_ID: ${process.env.GITHUB_RUN_ID}`)
 }
 
 async function ghJson(args, description) {
@@ -178,6 +182,8 @@ const deferredReviewCheckId = trustedDeferredReviewCheckId(observationChecks, {
     workflowId,
     stageId,
     definitionHash: profile.definitionHash,
+    runId,
+    runAttempt,
   },
 })
 const workRequest = Object.freeze({
@@ -283,7 +289,10 @@ if (workerReceipt.outcome === 'capacity-deferred') {
   process.stdout.write('Review deferred: all routed Workers are unavailable due to capacity.\n')
   return
 }
-if (workerReceipt.outcome !== 'completed') {
+const replayedCompletedReview = workerReceipt.outcome === 'replayed'
+  && workerReceipt.priorOutcome === 'completed'
+  && typeof workerReceipt.output === 'string'
+if (workerReceipt.outcome !== 'completed' && !replayedCompletedReview) {
   throw new Error(`Review worker ended with ${workerReceipt.outcome}: ${workerReceipt.detail}`)
 }
 const reviewCheckId = await startReviewCheck({
@@ -296,6 +305,8 @@ const reviewCheckId = await startReviewCheck({
     workflowId,
     stageId,
     definitionHash: profile.definitionHash,
+    runId,
+    runAttempt,
   },
   env: githubEnvironment,
 })

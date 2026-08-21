@@ -45,6 +45,7 @@ const PROCESS_IDENTITY_TIMEOUT_MS = 5_000
 const PROCESS_IDENTITY_TERMINATION_GRACE_MS = 2_500
 const ATTEMPT_COMPACTION_THRESHOLD = 64
 const ATTEMPT_RESULT_SUFFIX = '-result'
+const MAX_ATTEMPT_OUTPUT_LENGTH = 512 * 1024
 const ATTEMPT_IMMUTABLE_FIELDS = [
   'version', 'attemptId', 'workRequestId', 'routePolicyHash', 'taskClass', 'workerId',
   'capacityGroup', 'capacityGeneration', 'capacityGenerationHash', 'startState',
@@ -164,7 +165,7 @@ export function parseCapacityAttempt(value) {
   if (!STATE_SET.has(startState)) throw new Error('Capacity attempt startState is unsupported')
   const capacityGenerationHash = object.capacityGenerationHash === undefined || object.capacityGenerationHash === null
     ? null : digest(object.capacityGenerationHash, 'Capacity attempt capacityGenerationHash')
-  const result = exactKeys(object.result, ['outcome', 'category', 'reason'], 'Capacity attempt result')
+  const result = exactKeys(object.result, ['outcome', 'category', 'reason', 'output'], 'Capacity attempt result')
   if (!RESULT_SET.has(result.outcome)) throw new Error('Capacity attempt result outcome is unsupported')
   const category = result.category === undefined || result.category === null ? null : identifier(result.category, 'Capacity attempt result category')
   if (category !== null && !CATEGORY_SET.has(category)) throw new Error('Capacity attempt result category is unsupported')
@@ -172,6 +173,10 @@ export function parseCapacityAttempt(value) {
   if (reason !== null && !REASON_SET.has(reason)) throw new Error('Capacity attempt result reason is unsupported')
   if ((category === null) !== (reason === null)) throw new Error('Capacity attempt result category and reason must be paired')
   if (category !== null && reason !== null && categoryForReason(reason) !== category) throw new Error('Capacity attempt result category does not match reason')
+  if (result.output !== undefined
+    && (typeof result.output !== 'string' || result.output.length > MAX_ATTEMPT_OUTPUT_LENGTH)) {
+    throw new Error(`Capacity attempt result output must be text of at most ${MAX_ATTEMPT_OUTPUT_LENGTH} characters`)
+  }
   const startedAt = timestamp(object.startedAt, 'Capacity attempt startedAt')
   const endedAt = object.endedAt === null || object.endedAt === undefined ? null : timestamp(object.endedAt, 'Capacity attempt endedAt')
   if (endedAt !== null && Date.parse(endedAt) < Date.parse(startedAt)) throw new Error('Capacity attempt endedAt precedes startedAt')
@@ -189,7 +194,12 @@ export function parseCapacityAttempt(value) {
     startState,
     startedAt,
     endedAt,
-    result: { outcome: result.outcome, category, reason },
+    result: {
+      outcome: result.outcome,
+      category,
+      reason,
+      ...(result.output === undefined ? {} : { output: result.output }),
+    },
   }
 }
 

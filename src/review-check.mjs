@@ -50,6 +50,8 @@ export function trustedDeferredReviewCheckId(response, { repository, head, ident
   if (response.total_count > response.check_runs.length) {
     throw new Error('Review CheckRun snapshot is incomplete')
   }
+  if (!Number.isSafeInteger(identity?.runId) || identity.runId < 1
+    || !Number.isSafeInteger(identity?.runAttempt) || identity.runAttempt < 1) return null
   return response.check_runs
     .filter(check => check?.name === REVIEW_CHECK_NAME
       && check.head_sha === head
@@ -65,6 +67,8 @@ export function trustedDeferredReviewCheckId(response, { repository, head, ident
         return parsed?.workflowId === identity?.workflowId
           && parsed?.stageId === identity?.stageId
           && parsed?.definitionHash === identity?.definitionHash
+          && parsed?.runId === identity.runId
+          && parsed?.runAttempt === identity.runAttempt
       })())
     .map(check => check.id)
     .sort((left, right) => right - left)[0] ?? null
