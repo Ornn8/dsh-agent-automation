@@ -356,6 +356,8 @@ export function createWorkerExecutionClaim(options = {}) {
     candidates: [...candidates],
     workRequest,
     workRequestId: boundedId(workRequest.requestId, 'role-work'),
+    workerStartCommitted: false,
+    workerStartPromise: null,
   }
   EXECUTION_CLAIMS.add(token)
   EXECUTION_STATES.set(token, state)
@@ -373,9 +375,12 @@ export function createWorkerExecutionAllocator(options = {}) {
  * @param {AnyObject} options
  * @returns {Promise<AnyObject>}
  */
-export async function runRoleWorker({ executionClaim, invocation, adapters } = {}) {
+export async function runRoleWorker({ executionClaim, invocation, adapters, beforeWorkerStart } = {}) {
   if (!EXECUTION_CLAIMS.has(executionClaim)) {
     throw new Error('runRoleWorker requires an opaque Worker execution claim')
+  }
+  if (beforeWorkerStart !== undefined && typeof beforeWorkerStart !== 'function') {
+    throw new Error('runRoleWorker beforeWorkerStart must be a function')
   }
   const state = EXECUTION_STATES.get(executionClaim)
   const attempted = new Set()
@@ -411,6 +416,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
     let invocationAttempted = false
     let probeFinalized = false
     let attemptFinalized = false
+    let controllerStartFailure = null
     try {
       if (!prepared.capacity.eligible) {
         unavailable.push(workerId)
@@ -432,6 +438,19 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
         }
         prepared.capacity.probe = probe.probe
       }
+      if (!state.workerStartCommitted && beforeWorkerStart) {
+        try {
+          if (!state.workerStartPromise) {
+            state.workerStartPromise = Promise.resolve()
+              .then(() => beforeWorkerStart())
+              .then(() => { state.workerStartCommitted = true })
+          }
+          await state.workerStartPromise
+        } catch (error) {
+          controllerStartFailure = error
+          throw error
+        }
+      }
       const candidateInvocation = {
         ...invocation,
         onStarted: /** @param {AnyObject} value */ async value => {
@@ -450,6 +469,15 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
       probeFinalized = true
       return receipt
     } catch (error) {
+      if (controllerStartFailure) {
+        await completeCapacityProbe(state, prepared.capacity, 'abandon')
+        probeFinalized = true
+        await finishAttempt(state, prepared.claim, {
+          outcome: 'failed', category: 'controller', reason: 'controller-failure',
+        })
+        attemptFinalized = true
+        throw error
+      }
       if (attemptFinalized) {
         // The durable execution result is authoritative. A capacity projection
         // failure must not rewrite it or start the Worker again on replay.

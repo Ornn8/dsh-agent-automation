@@ -7,7 +7,6 @@ import test from 'node:test'
 import { createWorkerExecutionClaim, runRoleWorker } from '../src/role-worker.mjs'
 import { classifyAndCreateWorkerRouteDecision, createLocalWorkerRoutingExecution } from '../src/worker-routing.mjs'
 import { capacityRecordKey, createCapacityRegistry } from '../src/capacity-registry-store.mjs'
-import { createGovernorStartRecorder } from '../src/governor-policy.mjs'
 
 const stateVersion = 'a'.repeat(64)
 
@@ -567,65 +566,103 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
 })
 
-test('capacity deferral leaves Governor start records untouched until same-claim reentry starts a Worker', async () => {
+test('capacity deferral leaves the controller start hook untouched until same-claim reentry starts a Worker', async () => {
   const provider = attemptProvider({ available: false, generation: 3 })
-  const writes = []
-  const recordGovernorStart = createGovernorStartRecorder({
-    records: [
-      { version: 1, status: 'attempt', transition: 'ci-repair' },
-      { version: 1, status: 'applied', transition: 'ci-repair' },
-    ],
-    writeRecord: async record => writes.push(record),
-  })
+  const starts = []
   let calls = 0
   const input = {
     executionClaim: createWorkerExecutionClaim({
       config: config(), role: 'change', workRequest: { requestId: 'request-deferred-reentry', role: 'change' },
       subjectStateVersion: stateVersion, capacityProvider: provider,
     }),
-    invocation: { ...invocation(), onStarted: recordGovernorStart },
-    adapters: { fake: async ({ invocation }) => {
+    beforeWorkerStart: async () => { starts.push('started') },
+    invocation: invocation(),
+    adapters: { fake: async () => {
       calls += 1
-      await invocation.onStarted({ sessionId: 'reentry-session' })
       return { sessionId: 'reentry-session', outcome: 'completed' }
     } },
   }
 
   const deferred = await runRoleWorker(input)
   assert.equal(deferred.outcome, 'capacity-deferred')
-  assert.deepEqual(writes, [])
+  assert.deepEqual(starts, [])
   assert.equal(calls, 0)
 
   provider.setAvailable(true)
   provider.setGeneration(4)
   const resumed = await runRoleWorker(input)
   assert.equal(resumed.outcome, 'completed')
-  assert.deepEqual(writes.map(record => record.status), ['attempt', 'applied'])
+  assert.deepEqual(starts, ['started'])
   assert.equal(calls, 1)
 })
 
-test('Governor start record failure stops the prompt and does not fail over', async () => {
+test('controller start hook runs before every adapter and succeeds once across pre-session failover', async () => {
   const provider = attemptProvider()
   const calls = []
-  await assert.rejects(runRoleWorker({
+  const events = []
+  const result = await runRoleWorker({
     executionClaim: createWorkerExecutionClaim({
-      config: config(), role: 'change', workRequest: { requestId: 'request-start-write-failure', role: 'change' },
+      config: config(), role: 'change', workRequest: { requestId: 'request-start-order', role: 'change' },
       subjectStateVersion: stateVersion, capacityProvider: provider,
     }),
-    invocation: {
-      ...invocation(),
-      onStarted: async () => { throw new Error('Governor record write failed') },
-    },
+    beforeWorkerStart: async () => { events.push('before-worker-start') },
+    invocation: invocation(),
+    adapters: { fake: async ({ workerId }) => {
+      events.push(`${workerId}:adapter`)
+      calls.push(workerId)
+      if (workerId === 'first') throw quotaError()
+      return { sessionId: 'second-session', outcome: 'completed' }
+    } },
+  })
+
+  assert.equal(result.workerId, 'second')
+  assert.deepEqual(calls, ['first', 'second'])
+  assert.deepEqual(events, ['before-worker-start', 'first:adapter', 'second:adapter'])
+})
+
+test('a successful controller start hook is not repeated when the same claim re-enters', async () => {
+  const localConfig = config()
+  localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+  const provider = attemptProvider({ generation: 1 })
+  let starts = 0
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-start-reentry', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    beforeWorkerStart: async () => { starts += 1 },
+    invocation: invocation(),
+    adapters: { fake: async () => { throw quotaError() } },
+  }
+
+  assert.equal((await runRoleWorker(input)).outcome, 'capacity-deferred')
+  provider.setGeneration(2)
+  assert.equal((await runRoleWorker(input)).outcome, 'capacity-deferred')
+  assert.equal(starts, 1)
+})
+
+test('controller start hook failure ends the attempt without invoking or failing over an adapter', async () => {
+  const provider = attemptProvider()
+  const calls = []
+  let starts = 0
+  await assert.rejects(runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-start-hook-failure', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    beforeWorkerStart: async () => { starts += 1; throw new Error('Governor started record write failed') },
+    invocation: invocation(),
     adapters: {
-      fake: async ({ workerId, invocation }) => {
-        calls.push(`${workerId}:session`)
-        await invocation.onStarted({ sessionId: `${workerId}-session` })
-        calls.push(`${workerId}:prompt`)
+      fake: async ({ workerId }) => {
+        calls.push(workerId)
         return { sessionId: `${workerId}-session`, outcome: 'completed' }
       },
     },
-  }), /Governor record write failed/)
-  assert.deepEqual(calls, ['first:session'])
+  }), /Governor started record write failed/)
+  assert.equal(starts, 1)
+  assert.deepEqual(calls, [])
+  assert.equal(provider.records.at(-1).result.category, 'controller')
+  assert.equal(provider.records.at(-1).result.reason, 'controller-failure')
 })
 
 test('completed Worker output is durably available to a replay', async () => {

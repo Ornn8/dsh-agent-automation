@@ -6,7 +6,7 @@
  * an observation permits another Worker attempt.
  */
 export const ADAPTER_FAILURE_CATEGORIES = Object.freeze([
-  'capacity', 'authentication', 'billing', 'transport', 'protocol', 'host', 'task',
+  'capacity', 'authentication', 'billing', 'transport', 'protocol', 'host', 'task', 'controller',
 ])
 
 export const CAPACITY_FAILURE_REASONS = Object.freeze([
@@ -16,7 +16,7 @@ export const CAPACITY_FAILURE_REASONS = Object.freeze([
 export const ADAPTER_FAILURE_REASONS = Object.freeze([
   ...CAPACITY_FAILURE_REASONS,
   'authentication-invalid', 'billing-disabled', 'transport-failure',
-  'protocol-invalid', 'host-failure', 'task-failure',
+  'protocol-invalid', 'host-failure', 'task-failure', 'controller-failure',
 ])
 
 export const ADAPTER_FAILURE_SCOPES = Object.freeze([
@@ -81,6 +81,7 @@ function categoryForReason(reason) {
   if (normalizedReason === 'transport-failure') return 'transport'
   if (normalizedReason === 'protocol-invalid') return 'protocol'
   if (normalizedReason === 'host-failure') return 'host'
+  if (normalizedReason === 'controller-failure') return 'controller'
   return 'task'
 }
 

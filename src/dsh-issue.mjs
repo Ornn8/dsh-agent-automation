@@ -160,7 +160,7 @@ const governorRecords = await trustedGovernorRecords({
 })
 const governorSubject = issueGovernorSubject(issue)
 const governorStateVersion = subjectStateVersion(governorSubject)
-if (!governorRecords.some(record => record.status === 'applied'
+if (!governorRecords.some(record => (record.status === 'applied' || record.status === 'started')
   && record.transition === workflowStageTransition(workRequest)
   && record.subject.type === 'issue'
   && record.subject.number === issueNumber

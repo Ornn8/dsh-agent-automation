@@ -40,7 +40,7 @@ import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
 import { hasNewReviewCheck, trustedReviewCheckIds } from './review-check.mjs'
 import {
-  createGovernorStartRecorder,
+  createStartedGovernorRecord,
   governorBudgetDecision,
   governorDecision,
   subjectStateVersion,
@@ -403,7 +403,7 @@ const governedTransition = ciRequest
     ? reviewRepairTransition(reviewObservationId)
     : 'review-repair'
 const budgetTransition = ciRequest ? 'ci-repair' : mergeRequest ? 'merge-repair' : 'review-repair'
-const governorStartRecords = []
+let governorStartedRecord = null
 if (ciRequest && !recoveryRequest) {
   const admission = governorDecision({
     transition: governedTransition,
@@ -412,7 +412,7 @@ if (ciRequest && !recoveryRequest) {
     observationId: governorObservationId,
     records: governorRecords,
   })
-  if (admission.record) await writeGovernorRecord(admission.record)
+  if (admission.record && admission.action === 'record-candidate') await writeGovernorRecord(admission.record)
   if (!admission.execute) {
     if (admission.action === 'record-candidate') {
       await run(config.ghExecutable, [
@@ -445,26 +445,17 @@ if (ciRequest && !recoveryRequest) {
     process.stdout.write(`CI repair budget exhausted for pull request #${pullRequestNumber}; no model was started.\n`)
     process.exit(0)
   }
-  if (budget.record) governorStartRecords.push(budget.record)
-  governorStartRecords.push({
-    version: 1,
-    status: 'applied',
-    transition: governedTransition,
-    subject: { type: governorSubject.type, number: governorSubject.number },
-    stateVersion: governorStateVersion,
-    observationId: governorObservationId,
+  governorStartedRecord = createStartedGovernorRecord({
+    admittedRecord: admission.record,
+    attemptRecord: budget.record,
   })
-} else if (!governorRecords.some(record => ['admitted', 'applied'].includes(record.status)
+} else if (!governorRecords.some(record => ['admitted', 'applied', 'started'].includes(record.status)
   && (record.transition === governedTransition || (recoveryRequest && record.transition === 'workflow-recovery'))
   && record.subject.type === 'pull-request'
   && record.subject.number === pullRequestNumber
   && record.stateVersion === governorStateVersion)) {
   throw new Error(`Pull request #${pullRequestNumber} has no current controller-attested repair admission`)
 }
-const recordGovernorStart = createGovernorStartRecorder({
-  records: governorStartRecords,
-  writeRecord: writeGovernorRecord,
-})
 const executionWorkRequest = transportedRequest ?? Object.freeze({
   requestId: requestId || `repair-${pullRequestNumber}-${expectedHead}`,
   role: repairRole,
@@ -550,6 +541,9 @@ try {
 
   const workerReceipt = await runRoleWorker({
     executionClaim,
+    ...(governorStartedRecord ? {
+      beforeWorkerStart: async () => writeGovernorRecord(governorStartedRecord),
+    } : {}),
     invocation: {
       taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
       cwd: checkoutPath,
@@ -559,7 +553,6 @@ try {
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
       onStarted: async ({ sessionId }) => {
-        await recordGovernorStart()
         await upsertStatus('running', branch, `Visible change Worker session: ${sessionId}.`)
       },
     },

@@ -7,6 +7,7 @@ import {
   consumePullRequestAdvancement,
   repairObservationIdFromGovernorRecord,
 } from '../src/advancement-runtime.mjs'
+import { advancementGovernorState } from '../src/advancement-state.mjs'
 import { advancementRepairObservationId } from '../src/work-request.mjs'
 const sha = letter => letter.repeat(40)
 const digest = letter => letter.repeat(64)
@@ -105,6 +106,36 @@ test('admitted repair replay restores the original candidate observation', () =>
   const admission = { status: 'admitted', observationId: '9001:1', candidateObservationId: candidate.observationId }
   assert.equal(repairObservationIdFromGovernorRecord('review-repair', admission), 'comment-9001')
   assert.equal(repairObservationIdFromGovernorRecord('review-repair:run-42', admission), 'run-42')
+})
+test('started repair replay restores the candidate observation and projects as running', () => {
+  const stateVersion = digest('d')
+  const started = {
+    version: 1,
+    status: 'started',
+    transition: 'review-repair:run-42',
+    subject: { type: 'pull-request', number: 12 },
+    stateVersion,
+    observationId: '9002:1',
+    candidateObservationId: 'comment-9001',
+    budgetTransition: 'review-repair',
+    workIdentity: 'branch:agent/fix',
+    attempt: 1,
+  }
+  const candidate = {
+    version: 1,
+    status: 'candidate',
+    transition: started.transition,
+    subject: started.subject,
+    stateVersion,
+    observationId: started.candidateObservationId,
+  }
+  assert.equal(repairObservationIdFromGovernorRecord('review-repair', started), 'comment-9001')
+  assert.deepEqual(advancementGovernorState([candidate, started], 12, stateVersion), {
+    repair: 'running',
+    repairCandidate: null,
+    recovery: 'idle',
+    paused: false,
+  })
 })
 test('a durable applied transition makes duplicate landing wakes one effective request', async () => {
   const claimed = new Set()

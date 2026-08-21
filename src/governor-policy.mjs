@@ -101,7 +101,7 @@ export function unappliedGovernorCandidate(records, predicate = () => true) {
   }
   return records.find(candidate => ['candidate', 'admitted'].includes(candidate?.status)
     && predicate(candidate)
-    && !records.some(record => record?.status === 'applied'
+    && !records.some(record => ['applied', 'started'].includes(record?.status)
       && record.transition === candidate.transition
       && record.stateVersion === candidate.stateVersion
       && record.subject?.type === candidate.subject?.type
@@ -134,7 +134,7 @@ function validatedRecord(value) {
     transitionIsValid = false
   }
   if (!value || value.version !== 1
-    || !['candidate', 'admitted', 'applied', 'attempt', 'paused', 'resumed'].includes(value.status)
+    || !['candidate', 'admitted', 'applied', 'started', 'attempt', 'paused', 'resumed'].includes(value.status)
     || !transitionIsValid
     || !SUBJECT_TYPES.has(value.subject?.type)
     || !Number.isSafeInteger(value.subject?.number) || value.subject.number < 1
@@ -150,6 +150,8 @@ function validatedRecord(value) {
     expected = [...common, 'stateVersion', 'candidateObservationId']
   } else if (value.status === 'attempt') {
     expected = [...common, 'workIdentity', 'attempt']
+  } else if (value.status === 'started') {
+    expected = [...common, 'stateVersion', 'candidateObservationId', 'budgetTransition', 'workIdentity', 'attempt']
   } else if (value.status === 'paused') {
     expected = [...common, 'reason', ...(value.stateVersion === undefined ? ['workIdentity'] : ['stateVersion'])]
   } else {
@@ -166,19 +168,20 @@ function validatedRecord(value) {
     || !Object.hasOwn(value.subject, 'type') || !Object.hasOwn(value.subject, 'number')) {
     throw new Error('Governor record subject has unexpected fields')
   }
-  if (value.status === 'admitted'
+  if (['admitted', 'started'].includes(value.status)
     && (typeof value.candidateObservationId !== 'string' || !value.candidateObservationId.trim()
       || value.candidateObservationId.length > 200
       || value.candidateObservationId === value.observationId)) {
     throw new Error('Governor admission requires an independent candidate observation')
   }
-  if (['attempt', 'paused'].includes(value.status) && Object.hasOwn(value, 'workIdentity')
+  if (['attempt', 'started', 'paused'].includes(value.status) && Object.hasOwn(value, 'workIdentity')
     && (typeof value.workIdentity !== 'string' || !value.workIdentity.trim() || value.workIdentity.length > 300)) {
     throw new Error('Governor budget record requires a bounded work identity')
   }
-  if (value.status === 'attempt' && (!Number.isSafeInteger(value.attempt) || value.attempt < 1)) {
+  if (['attempt', 'started'].includes(value.status) && (!Number.isSafeInteger(value.attempt) || value.attempt < 1)) {
     throw new Error('Governor attempt record requires a positive attempt number')
   }
+  if (value.status === 'started') transitionId(value.budgetTransition)
   if (value.status === 'paused'
     && (typeof value.reason !== 'string' || !value.reason.trim() || value.reason.length > 200)) {
     throw new Error('Governor pause record requires a bounded reason')
@@ -245,7 +248,7 @@ export function governorDecision({ transition, subject, stateVersion, observatio
   const matching = epoch.records.filter(record => record?.version === 1
     && record.transition === transition
     && record.stateVersion === stateVersion)
-  if (matching.some(record => record.status === 'applied')) {
+  if (matching.some(record => ['applied', 'started'].includes(record.status))) {
     return { action: 'noop', execute: false, reason: 'transition-already-applied' }
   }
   if (matching.some(record => record.status === 'admitted')) {
@@ -288,8 +291,8 @@ export function governorBudgetDecision({ transition, subject, workIdentity, obse
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Governor budget limit must be from 1 to 100')
   if (!Array.isArray(records)) throw new Error('Governor budget records must be an array')
   const attempts = activeGovernorEpoch(records, subject).records.filter(record => record?.version === 1
-    && record.status === 'attempt'
-    && record.transition === transition
+    && ((record.status === 'attempt' && record.transition === transition)
+      || (record.status === 'started' && record.budgetTransition === transition))
     && record.subject?.type === subject.type
     && record.subject?.number === subject.number
     && record.workIdentity === workIdentity)
@@ -328,21 +331,35 @@ export function governorBudgetDecision({ transition, subject, workIdentity, obse
 }
 
 /**
- * Create the one-shot writer for Governor records that become true at Worker start.
- * @param {{records?: object[], writeRecord: (record: object) => Promise<void>|void}} options
- * @returns {() => Promise<void>}
+ * Join one admitted Governor transition and one budget attempt into the only
+ * durable record that proves the Worker actually started.
+ * @param {{admittedRecord: object, attemptRecord: object}} options
+ * @returns {object}
  */
-export function createGovernorStartRecorder({ records = [], writeRecord } = {}) {
-  if (!Array.isArray(records) || records.some(record => !record || typeof record !== 'object')) {
-    throw new Error('Governor start records must be objects')
+export function createStartedGovernorRecord({ admittedRecord, attemptRecord } = {}) {
+  const admitted = validatedRecord(admittedRecord)
+  const attempt = validatedRecord(attemptRecord)
+  if (admitted.status !== 'admitted' || attempt.status !== 'attempt') {
+    throw new Error('Governor started record requires one admitted record and one attempt record')
   }
-  if (typeof writeRecord !== 'function') throw new Error('Governor start recorder requires a writer')
-  let started = false
-  return async () => {
-    if (started) return
-    for (const record of records) await writeRecord(record)
-    started = true
+  if (admitted.subject.type !== attempt.subject.type || admitted.subject.number !== attempt.subject.number) {
+    throw new Error('Governor started records must have the same subject')
   }
+  if (admitted.observationId !== attempt.observationId) {
+    throw new Error('Governor started records must have the same observation')
+  }
+  return validatedRecord({
+    version: 1,
+    status: 'started',
+    transition: admitted.transition,
+    subject: { type: admitted.subject.type, number: admitted.subject.number },
+    stateVersion: admitted.stateVersion,
+    observationId: admitted.observationId,
+    candidateObservationId: admitted.candidateObservationId,
+    budgetTransition: attempt.transition,
+    workIdentity: attempt.workIdentity,
+    attempt: attempt.attempt,
+  })
 }
 
 /** Return whether a value is one exact Gregorian calendar date in UTC notation. */
