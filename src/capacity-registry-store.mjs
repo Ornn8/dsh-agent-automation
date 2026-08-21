@@ -1,10 +1,9 @@
 // @ts-check
 
 import { createHash, randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
 import { lstat, mkdir, open, readFile, readdir, rm, rename, rmdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { promisify } from 'node:util'
+import { run } from './common.mjs'
 import {
   ADAPTER_FAILURE_CATEGORIES,
   ADAPTER_FAILURE_REASONS,
@@ -39,6 +38,8 @@ const MAX_LOCK_WAIT_MS = 60_000
 const DEFAULT_LOCK_LEASE_MS = 15 * 60 * 1000
 const MIN_LOCK_LEASE_MS = 100
 const MAX_LOCK_LEASE_MS = 30 * 60 * 1000
+const PROCESS_IDENTITY_TIMEOUT_MS = 1_000
+const PROCESS_IDENTITY_TERMINATION_GRACE_MS = 2_500
 const ATTEMPT_COMPACTION_THRESHOLD = 64
 const READ_RETRIES = 8
 const STALE_LEASE_CLEANUP_LIMIT = 64
@@ -48,7 +49,6 @@ const FENCE_HIGH_WATER = 'registry-fence.json'
 const GATE_OWNER_PREFIX = 'registry-owner'
 const RECLAIM_PENDING_PREFIX = 'registry-reclaim'
 const GATE_OWNER_FILE_PATTERN = /^registry-owner\.[A-Za-z0-9._:-]{1,128}\.json$/
-const execFileAsync = promisify(execFile)
 
 /** @typedef {{provider?: string|null, model?: string|null, worker?: string|null}} CapacityIdentity */
 /** @typedef {{stateRoot: string, configurationHash: string, credentialGeneration: string, workers?: Record<string, any>, now?: number|(() => number)}} RegistryOptions */
@@ -549,9 +549,10 @@ async function legacyLeaseFiles(directory, prefix) {
  * @param {string} ownerToken
  * @param {number} fence
  * @param {number} now
+ * @param {ProcessIdentityVerifier} verifier
  * @returns {Promise<void>}
  */
-async function cleanupStaleLeaseFiles(paths, prefix, ownerToken, fence, now) {
+async function cleanupStaleLeaseFiles(paths, prefix, ownerToken, fence, now, verifier) {
   let removed = 0
   for (const name of await legacyLeaseFiles(paths.directory, prefix)) {
     if (removed >= STALE_LEASE_CLEANUP_LIMIT) break
@@ -566,15 +567,15 @@ async function cleanupStaleLeaseFiles(paths, prefix, ownerToken, fence, now) {
     }
     if (!lease || lease.ownerToken !== expectedOwner) continue
     if (lease.ownerToken === ownerToken && lease.fence === fence) continue
-    if (lease.fence >= fence || await leaseIsHeld(lease, () => now)) continue
+    if (lease.fence >= fence || await leaseIsHeld(lease, () => now, verifier)) continue
     await bestEffortRemove(join(paths.directory, name))
     removed += 1
   }
 }
 
-/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {string} ownerToken @param {number} fence @param {number} now */
-async function cleanupStaleLegacyLeases(paths, ownerToken, fence, now) {
-  await cleanupStaleLeaseFiles(paths, paths.leasePrefix, ownerToken, fence, now)
+/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {string} ownerToken @param {number} fence @param {number} now @param {ProcessIdentityVerifier} verifier */
+async function cleanupStaleLegacyLeases(paths, ownerToken, fence, now, verifier) {
+  await cleanupStaleLeaseFiles(paths, paths.leasePrefix, ownerToken, fence, now, verifier)
 }
 
 /** @param {string} directory @param {string} snapshotPrefix @param {ReturnType<typeof capacityRegistryPaths>} paths @returns {Promise<number>} */
@@ -665,7 +666,8 @@ async function reserveLeaseFence(paths, lease) {
   throw new Error('Capacity registry fence high water changed during every reservation attempt')
 }
 
-/** @typedef {{waitMs?: number, leaseMs?: number, now?: number|(() => number)}} RegistryLockOptions */
+/** @typedef {(pid: number) => Promise<string|null>} ProcessIdentityVerifier */
+/** @typedef {{waitMs?: number, leaseMs?: number, now?: number|(() => number), processIdentity?: ProcessIdentityVerifier}} RegistryLockOptions */
 
 /** @param {RegistryLockOptions} options @returns {() => number} */
 function lockClock(options) {
@@ -680,74 +682,124 @@ async function waitForLock(milliseconds) {
   await new Promise(resolvePromise => setTimeout(resolvePromise, milliseconds))
 }
 
-/** @param {unknown} error @returns {number|undefined} */
-function numericErrorCode(error) {
-  const code = error && typeof error === 'object' ? /** @type {{code?: unknown}} */ (error).code : undefined
-  return typeof code === 'number' ? code : undefined
+/** @typedef {{platform?: NodeJS.Platform, readFile?: typeof readFile, runCommand?: typeof run, psPath?: string, powershellPath?: string}} ProcessIdentityOptions */
+
+/** @param {unknown} error @param {number} code @returns {boolean} */
+function commandExitedWith(error, code) {
+  return error instanceof Error && new RegExp(`exited with code ${code}(?::|$)`).test(error.message)
+}
+
+/** @param {string} command @param {string[]} args @param {typeof run} runCommand @returns {Promise<{stdout: string}>} */
+async function runProcessProbe(command, args, runCommand) {
+  const controller = new AbortController()
+  let timedOut = false
+  let timer
+  const commandPromise = Promise.resolve().then(() => runCommand(command, args, {
+    signal: controller.signal,
+    timeoutMs: PROCESS_IDENTITY_TIMEOUT_MS,
+    maxOutputBytes: 64 * 1024,
+  }))
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+      reject(new Error(`Process identity probe timed out after ${PROCESS_IDENTITY_TIMEOUT_MS} ms`))
+    }, PROCESS_IDENTITY_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([commandPromise, timeoutPromise])
+  } finally {
+    clearTimeout(timer)
+    if (timedOut) {
+      await Promise.race([
+        commandPromise.catch(() => undefined),
+        new Promise(resolvePromise => setTimeout(resolvePromise, PROCESS_IDENTITY_TERMINATION_GRACE_MS)),
+      ])
+    }
+  }
+}
+
+/** @param {ProcessIdentityVerifier} verifier @param {number} pid @returns {Promise<string|null>} */
+async function boundedProcessIdentity(verifier, pid) {
+  let timer
+  const identityPromise = Promise.resolve().then(() => verifier(pid))
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Process identity probe timed out after ${PROCESS_IDENTITY_TIMEOUT_MS} ms`)), PROCESS_IDENTITY_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([identityPromise, timeoutPromise])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** @returns {string} */
+function defaultPowerShellPath() {
+  const systemRoot = process.env.SystemRoot
+  if (!systemRoot || !isAbsolute(systemRoot)) throw new Error('Windows process identity requires an absolute SystemRoot')
+  return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 }
 
 /**
  * Read an OS process-start identity. Linux uses the boot id and `/proc` start
  * ticks; macOS uses the locale-neutral `ps` start time; Windows uses the
- * Operations `Process.StartTime` verifier. A missing process returns null.
+ * Operations `Process.StartTime` verifier. Only a clearly absent target PID
+ * returns null; command, filesystem, timeout, and parse failures throw.
  * @param {number} pid
+ * @param {ProcessIdentityOptions} [options]
  * @returns {Promise<string|null>}
  */
-async function processIdentity(pid) {
+export async function resolveProcessIdentity(pid, options = {}) {
   if (!Number.isSafeInteger(pid) || pid < 1) return null
-  if (process.platform === 'linux') {
+  const platform = options.platform ?? process.platform
+  const read = options.readFile ?? readFile
+  const runCommand = options.runCommand ?? run
+  if (platform === 'linux') {
+    let stat
     try {
-      const stat = await readFile(`/proc/${pid}/stat`, 'utf8')
-      const close = stat.lastIndexOf(')')
-      if (close < 0) throw new Error('Linux process stat is malformed')
-      const fields = stat.slice(close + 2).trim().split(/\s+/)
-      const startTicks = fields[19]
-      const bootId = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim()
-      if (!startTicks || !bootId) throw new Error('Linux process identity is incomplete')
-      return `linux:${bootId}:${startTicks}`
+      stat = await read(`/proc/${pid}/stat`, 'utf8')
     } catch (error) {
       if (errorCode(error) === 'ENOENT') return null
       throw error
     }
+    const close = stat.lastIndexOf(')')
+    if (close < 0) throw new Error('Linux process stat is malformed')
+    const fields = stat.slice(close + 2).trim().split(/\s+/)
+    const startTicks = fields[19]
+    if (!startTicks) throw new Error('Linux process stat has no start time')
+    const bootId = (await read('/proc/sys/kernel/random/boot_id', 'utf8')).trim()
+    if (!bootId) throw new Error('Linux process boot identity is empty')
+    return `linux:${bootId}:${startTicks}`
   }
-  if (process.platform === 'darwin') {
+  if (platform === 'darwin') {
+    const command = options.psPath ?? '/bin/ps'
+    const result = await runProcessProbe(command, ['-p', String(pid), '-o', 'lstart='], runCommand)
+    const value = result.stdout.trim()
+    if (!value) return null
+    const parsed = Date.parse(value)
+    if (!Number.isFinite(parsed)) throw new Error('macOS process start time is invalid')
+    return `darwin:${new Date(parsed).toISOString()}`
+  }
+  if (platform === 'win32') {
+    const command = `$process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 3 }; $process.StartTime.ToUniversalTime().ToString('o')`
+    const executable = options.powershellPath ?? defaultPowerShellPath()
+    let result
     try {
-      const result = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], {
-        env: { ...process.env, LC_ALL: 'C' },
-        windowsHide: true,
-      })
-      const value = result.stdout.trim()
-      if (!value) return null
-      const parsed = Date.parse(value)
-      if (!Number.isFinite(parsed)) throw new Error('macOS process start time is invalid')
-      return `darwin:${new Date(parsed).toISOString()}`
+      result = await runProcessProbe(executable, ['-NoProfile', '-NonInteractive', '-Command', command], runCommand)
     } catch (error) {
-      if (numericErrorCode(error) === 1 || errorCode(error) === 'ENOENT') return null
+      if (commandExitedWith(error, 3)) return null
       throw error
     }
+    const value = result.stdout.trim()
+    if (!value) throw new Error('Windows process identity output is empty')
+    return `windows:${value}`
   }
-  if (process.platform === 'win32') {
-    const command = `$process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 3 }; $process.StartTime.ToUniversalTime().ToString('o')`
-    let missingCommand = true
-    for (const executable of ['powershell.exe', 'pwsh.exe']) {
-      try {
-        const result = await execFileAsync(executable, ['-NoProfile', '-NonInteractive', '-Command', command], {
-          windowsHide: true,
-        })
-        missingCommand = false
-        const value = result.stdout.trim()
-        return value ? `windows:${value}` : null
-      } catch (error) {
-        if (errorCode(error) === 'ENOENT') continue
-        missingCommand = false
-        if (numericErrorCode(error) === 3) return null
-        throw error
-      }
-    }
-    if (missingCommand) throw new Error('No PowerShell executable is available to verify process identity')
-    return null
-  }
-  throw new Error(`Unsupported platform for process identity verification: ${process.platform}`)
+  throw new Error(`Unsupported platform for process identity verification: ${platform}`)
+}
+
+/** @param {number} pid @returns {Promise<string|null>} */
+async function processIdentity(pid) {
+  return resolveProcessIdentity(pid)
 }
 
 let localProcessIdentityPromise
@@ -761,11 +813,11 @@ async function localProcessIdentity() {
   return localProcessIdentityPromise
 }
 
-/** @param {ReturnType<typeof parseLease>} lease @param {() => number} clock @returns {Promise<boolean>} */
-async function leaseIsHeld(lease, clock) {
+/** @param {ReturnType<typeof parseLease>} lease @param {() => number} clock @param {ProcessIdentityVerifier} verifier @returns {Promise<boolean>} */
+async function leaseIsHeld(lease, clock, verifier) {
   if (Date.parse(lease.expiresAt) > clock()) return true
   if (lease.pid === undefined || lease.processIdentity === undefined) return false
-  const identity = await processIdentity(lease.pid)
+  const identity = await verifier(lease.pid)
   return identity !== null && identity === lease.processIdentity
 }
 
@@ -803,12 +855,12 @@ async function bestEffortRemoveTree(path) {
   }
 }
 
-/** @param {string} path @param {() => number} clock */
-async function removeStaleReclaim(path, clock) {
+/** @param {string} path @param {() => number} clock @param {ProcessIdentityVerifier} verifier */
+async function removeStaleReclaim(path, clock, verifier) {
   for (const name of await gateOwnerFiles(path)) {
     const ownerPath = join(path, name)
     const lease = await readLeaseFile(ownerPath)
-    if (lease && await leaseIsHeld(lease, clock)) continue
+    if (lease && await leaseIsHeld(lease, clock, verifier)) continue
     await bestEffortRemove(ownerPath)
   }
   await bestEffortRemoveEmptyDirectory(path)
@@ -823,31 +875,31 @@ async function bestEffortRemoveEmptyDirectory(path) {
   }
 }
 
-/** @param {string} path @param {() => number} clock @returns {Promise<{state: 'absent'|'held'|'stale', lease?: ReturnType<typeof parseLease>}>} */
-async function readReclaimState(path, clock) {
+/** @param {string} path @param {() => number} clock @param {ProcessIdentityVerifier} verifier @returns {Promise<{state: 'absent'|'held'|'stale', lease?: ReturnType<typeof parseLease>}>} */
+async function readReclaimState(path, clock, verifier) {
   let pendingLease = false
   for (const name of await legacyLeaseFiles(dirname(path), RECLAIM_PENDING_PREFIX)) {
     const lease = await readLeaseFile(join(dirname(path), name))
-    if (lease && await leaseIsHeld(lease, clock)) return { state: 'held', lease }
+    if (lease && await leaseIsHeld(lease, clock, verifier)) return { state: 'held', lease }
     pendingLease = true
   }
   const info = await pathStats(path)
   if (!info) return pendingLease ? { state: 'stale' } : { state: 'absent' }
   if (!info.isDirectory()) {
     const lease = await readLeaseFile(path)
-    if (lease && await leaseIsHeld(lease, clock)) return { state: 'held', lease }
+    if (lease && await leaseIsHeld(lease, clock, verifier)) return { state: 'held', lease }
     return lease ? { state: 'stale', lease } : { state: 'stale' }
   }
   const names = await gateOwnerFiles(path)
   for (const name of names) {
     const lease = await readLeaseFile(join(path, name))
-    if (lease && await leaseIsHeld(lease, clock)) return { state: 'held', lease }
+    if (lease && await leaseIsHeld(lease, clock, verifier)) return { state: 'held', lease }
   }
   return pendingLease ? { state: 'stale' } : { state: 'stale' }
 }
 
-/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {string} gatePath @param {() => number} clock @returns {Promise<{state: 'absent'|'held'|'stale', lease?: ReturnType<typeof parseLease>}>} */
-async function readGateState(paths, gatePath, clock) {
+/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {string} gatePath @param {() => number} clock @param {ProcessIdentityVerifier} verifier @returns {Promise<{state: 'absent'|'held'|'stale', lease?: ReturnType<typeof parseLease>}>} */
+async function readGateState(paths, gatePath, clock, verifier) {
   let pendingLease = false
   for (const name of await legacyLeaseFiles(paths.directory, paths.leasePrefix)) {
     let lease
@@ -858,38 +910,38 @@ async function readGateState(paths, gatePath, clock) {
     // intent. Older owner-addressed leases remain cleanup candidates and must
     // not block a fresh canonical gate.
     if (lease?.pid === undefined) continue
-    if (await leaseIsHeld(lease, clock)) return { state: 'held', lease }
+    if (await leaseIsHeld(lease, clock, verifier)) return { state: 'held', lease }
     pendingLease = true
   }
   const info = await pathStats(gatePath)
   if (!info) return pendingLease ? { state: 'stale' } : { state: 'absent' }
   if (!info.isDirectory()) {
     const lease = await readLeaseFile(gatePath)
-    if (lease && await leaseIsHeld(lease, clock)) return { state: 'held', lease }
+    if (lease && await leaseIsHeld(lease, clock, verifier)) return { state: 'held', lease }
     return lease ? { state: 'stale', lease } : { state: 'stale' }
   }
   const names = await gateOwnerFiles(gatePath)
   if (names.length > 1) throw new Error('Capacity registry gate has multiple owners')
   if (names.length === 1) {
     const lease = await readLeaseFile(join(gatePath, names[0]))
-    if (lease && await leaseIsHeld(lease, clock)) return { state: 'held', lease }
+    if (lease && await leaseIsHeld(lease, clock, verifier)) return { state: 'held', lease }
     return lease ? { state: 'stale', lease } : { state: 'stale' }
   }
   return { state: 'stale' }
 }
 
-/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {string} ownerToken @param {number} fence @param {() => number} clock */
-async function assertLeaseOwner(paths, ownerToken, fence, clock) {
+/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {string} ownerToken @param {number} fence @param {() => number} clock @param {ProcessIdentityVerifier} verifier */
+async function assertLeaseOwner(paths, ownerToken, fence, clock, verifier) {
   const current = await readLeaseFile(gateOwnerPath(paths.lockPath, ownerToken))
-  if (!current || current.ownerToken !== ownerToken || current.fence !== fence || !(await leaseIsHeld(current, clock))) {
+  if (!current || current.ownerToken !== ownerToken || current.fence !== fence || !(await leaseIsHeld(current, clock, verifier))) {
     throw new Error('Capacity registry lease ownership was lost')
   }
 }
 
-/** @param {string} markerPath @param {string} ownerToken @param {number} fence @param {() => number} clock */
-async function assertReclaimOwner(markerPath, ownerToken, fence, clock) {
+/** @param {string} markerPath @param {string} ownerToken @param {number} fence @param {() => number} clock @param {ProcessIdentityVerifier} verifier */
+async function assertReclaimOwner(markerPath, ownerToken, fence, clock, verifier) {
   const current = await readLeaseFile(gateOwnerPath(markerPath, ownerToken))
-  if (!current || current.ownerToken !== ownerToken || current.fence !== fence || !(await leaseIsHeld(current, clock))) {
+  if (!current || current.ownerToken !== ownerToken || current.fence !== fence || !(await leaseIsHeld(current, clock, verifier))) {
     throw new Error('Capacity registry reclaim ownership was lost')
   }
 }
@@ -913,18 +965,18 @@ async function releaseReclaim(markerPath, ownerToken, fence) {
   await bestEffortRemoveEmptyDirectory(markerPath)
 }
 
-/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {() => number} clock @param {number} leaseMs @param {number} deadline @returns {Promise<ReturnType<typeof parseLease>|null>} */
-async function claimReclaimMarker(paths, clock, leaseMs, deadline) {
+/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {() => number} clock @param {number} leaseMs @param {number} deadline @param {ProcessIdentityVerifier} verifier @returns {Promise<ReturnType<typeof parseLease>|null>} */
+async function claimReclaimMarker(paths, clock, leaseMs, deadline, verifier) {
   let firstAttempt = true
   while (firstAttempt || Date.now() < deadline) {
     firstAttempt = false
-    const state = await readReclaimState(paths.reclaimPath, clock)
+    const state = await readReclaimState(paths.reclaimPath, clock, verifier)
     if (state.state === 'held') return null
     if (state.state === 'stale') {
       const info = await pathStats(paths.reclaimPath)
-      if (info?.isDirectory()) await removeStaleReclaim(paths.reclaimPath, clock)
+      if (info?.isDirectory()) await removeStaleReclaim(paths.reclaimPath, clock, verifier)
       else await bestEffortRemove(paths.reclaimPath)
-      await cleanupStaleLeaseFiles(paths, RECLAIM_PENDING_PREFIX, '', Number.MAX_SAFE_INTEGER, clock())
+      await cleanupStaleLeaseFiles(paths, RECLAIM_PENDING_PREFIX, '', Number.MAX_SAFE_INTEGER, clock(), verifier)
       continue
     }
     const ownerToken = randomUUID()
@@ -952,32 +1004,32 @@ async function claimReclaimMarker(paths, clock, leaseMs, deadline) {
   return null
 }
 
-/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {() => number} clock @param {number} leaseMs @param {number} deadline @returns {Promise<ReturnType<typeof parseLease>|null>} */
-async function acquireCanonicalLease(paths, clock, leaseMs, deadline) {
+/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {() => number} clock @param {number} leaseMs @param {number} deadline @param {ProcessIdentityVerifier} verifier @returns {Promise<ReturnType<typeof parseLease>|null>} */
+async function acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier) {
   let firstAttempt = true
   while (firstAttempt || Date.now() < deadline) {
     firstAttempt = false
-    const observed = await readGateState(paths, paths.lockPath, clock)
+    const observed = await readGateState(paths, paths.lockPath, clock, verifier)
     if (observed.state === 'held') {
       await waitForLock(10)
       continue
     }
-    const reclaim = observed.state === 'stale' ? await claimReclaimMarker(paths, clock, leaseMs, deadline) : null
+    const reclaim = observed.state === 'stale' ? await claimReclaimMarker(paths, clock, leaseMs, deadline, verifier) : null
     if (observed.state === 'stale' && !reclaim) {
       await waitForLock(10)
       continue
     }
     if (reclaim) {
       try {
-        await assertReclaimOwner(paths.reclaimPath, reclaim.ownerToken, reclaim.fence, clock)
-        await cleanupStaleLegacyLeases(paths, reclaim.ownerToken, reclaim.fence, clock())
-        const current = await readGateState(paths, paths.lockPath, clock)
+        await assertReclaimOwner(paths.reclaimPath, reclaim.ownerToken, reclaim.fence, clock, verifier)
+        await cleanupStaleLegacyLeases(paths, reclaim.ownerToken, reclaim.fence, clock(), verifier)
+        const current = await readGateState(paths, paths.lockPath, clock, verifier)
         if (current.state === 'held') {
           await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
           await waitForLock(10)
           continue
         }
-        const quarantine = await readGateState(paths, paths.quarantinePath, clock)
+        const quarantine = await readGateState(paths, paths.quarantinePath, clock, verifier)
         if (quarantine.state === 'held') {
           await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
           await waitForLock(10)
@@ -1031,13 +1083,17 @@ export async function withCapacityRegistryLock(stateRoot, operation, options = {
   if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > MAX_LOCK_WAIT_MS) throw new Error('capacity lock waitMs is out of bounds')
   if (!Number.isSafeInteger(leaseMs) || leaseMs < MIN_LOCK_LEASE_MS || leaseMs > MAX_LOCK_LEASE_MS) throw new Error('capacity lock leaseMs is out of bounds')
   const clock = lockClock(options)
+  const injectedVerifier = options.processIdentity
+  const verifier = injectedVerifier === undefined
+    ? processIdentity
+    : /** @type {ProcessIdentityVerifier} */ (pid => boundedProcessIdentity(injectedVerifier, pid))
   const deadline = Date.now() + waitMs
-  const acquired = await acquireCanonicalLease(paths, clock, leaseMs, deadline)
+  const acquired = await acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier)
   if (!acquired) throw new Error('Capacity registry lock is busy')
   const ownerPath = join(paths.directory, `${paths.leasePrefix}.${acquired.ownerToken}.json`)
   try {
-    await cleanupStaleLegacyLeases(paths, acquired.ownerToken, acquired.fence, clock())
-    const assertOwner = () => assertLeaseOwner(paths, acquired.ownerToken, acquired.fence, clock)
+    await cleanupStaleLegacyLeases(paths, acquired.ownerToken, acquired.fence, clock(), verifier)
+    const assertOwner = () => assertLeaseOwner(paths, acquired.ownerToken, acquired.fence, clock, verifier)
     const result = await operation(paths, { ownerToken: acquired.ownerToken, fence: acquired.fence, assertOwner })
     await assertOwner()
     return result

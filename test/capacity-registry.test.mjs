@@ -25,6 +25,7 @@ import {
   createCapacityRegistry,
   readCapacityAttempts,
   readCapacityRegistry,
+  resolveProcessIdentity,
   withCapacityRegistryLock,
 } from '../src/capacity-registry-store.mjs'
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -406,6 +407,83 @@ test('a PID-reused owner is reclaimable only when its process start identity dif
       acquiredFence = lease.fence
     }, { now, waitMs: 5_000, leaseMs: 1_000 })
     assert.ok(acquiredFence > 5_000)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('process identity fails closed when Linux boot identity cannot be read', async () => {
+  const read = async path => {
+    if (path === '/proc/123/stat') return `(node) S ${Array.from({ length: 19 }, () => '1').join(' ')}`
+    const error = Object.assign(new Error('boot identity missing'), { code: 'ENOENT' })
+    throw error
+  }
+  await assert.rejects(resolveProcessIdentity(123, { platform: 'linux', readFile: read }), /boot identity|boot id|ENOENT/)
+})
+
+test('process identity fails closed when macOS ps is missing', async () => {
+  const runCommand = async () => {
+    throw Object.assign(new Error('ps missing'), { code: 'ENOENT' })
+  }
+  await assert.rejects(resolveProcessIdentity(123, { platform: 'darwin', runCommand }), /ps|missing|unavailable/i)
+})
+
+test('process identity returns null only when Windows reports the target PID absent', async () => {
+  const runCommand = async () => {
+    throw new Error('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe exited with code 3: target absent')
+  }
+  assert.equal(await resolveProcessIdentity(123, {
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    runCommand,
+  }), null)
+})
+
+test('process identity bounds a hung macOS probe', { timeout: 5_000 }, async () => {
+  const started = Date.now()
+  const runCommand = async (_command, _args, options) => {
+    assert.equal(options.timeoutMs, 1_000)
+    return new Promise(() => {})
+  }
+  await assert.rejects(resolveProcessIdentity(123, { platform: 'darwin', runCommand }), /timed out/)
+  assert.ok(Date.now() - started < 4_000)
+})
+
+test('process identity bounds a hung Windows probe through the injectable seam', { timeout: 5_000 }, async () => {
+  const runCommand = async (_command, _args, options) => {
+    assert.equal(options.timeoutMs, 1_000)
+    return new Promise(() => {})
+  }
+  await assert.rejects(resolveProcessIdentity(123, {
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    runCommand,
+  }), /timed out/)
+})
+
+test('identity probe timeout fails acquisition without reclaiming the old gate', { timeout: 5_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-identity-timeout-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    await mkdir(paths.directory, { recursive: true })
+    await mkdir(paths.lockPath)
+    await writeFile(join(paths.lockPath, 'registry-owner.probe.json'), `${JSON.stringify({
+      version: 1,
+      ownerToken: 'probe',
+      fence: 10,
+      pid: process.pid,
+      processIdentity: 'wrong-process-start',
+      acquiredAt: '1970-01-01T00:00:00.000Z',
+      expiresAt: '1970-01-01T00:00:00.500Z',
+    })}\n`, 'utf8')
+    const started = Date.now()
+    await assert.rejects(withCapacityRegistryLock(stateRoot, async () => undefined, {
+      now: 1_000,
+      waitMs: 100,
+      processIdentity: async () => new Promise(() => {}),
+    }), /timed out/)
+    assert.ok(Date.now() - started < 4_000)
+    assert.equal((await readdir(paths.lockPath)).length, 1)
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
