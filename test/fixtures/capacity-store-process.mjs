@@ -5,7 +5,7 @@ const [, , mode, stateRoot, id] = process.argv
 const hash = 'a'.repeat(64)
 const now = Date.parse('2026-08-21T00:00:00.000Z')
 
-if (!stateRoot || !id) throw new Error('usage: append|lock|overlease|release-race|partial|crash|expire <stateRoot> <id>')
+if (!stateRoot || !id) throw new Error('usage: append|lock|overlease|release-race|partial|crash|expire|hang|busy <stateRoot> <id>')
 
 if (mode === 'lock' || mode === 'overlease') {
   const statePath = `${capacityRegistryPaths(stateRoot).directory}/lock-observations.json`
@@ -25,6 +25,34 @@ if (mode === 'lock' || mode === 'overlease') {
     await writeFile(statePath, `${JSON.stringify(state)}\n`, 'utf8')
   }, { waitMs: 60_000, leaseMs: mode === 'overlease' ? 100 : 60_000 })
   process.stdout.write('locked\n')
+  process.exit(0)
+}
+
+if (mode === 'hang') {
+  const paths = capacityRegistryPaths(stateRoot)
+  await withCapacityRegistryLock(stateRoot, async () => {
+    await writeFile(`${paths.directory}/hang.ready`, 'ready\n', 'utf8')
+    while (true) {
+      try {
+        await readFile(`${paths.directory}/hang.go`, 'utf8')
+        break
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+    }
+  }, { waitMs: 5_000, leaseMs: 100 })
+  process.stdout.write('released\n')
+  process.exit(0)
+}
+
+if (mode === 'busy') {
+  try {
+    await withCapacityRegistryLock(stateRoot, async () => undefined, { waitMs: 250, leaseMs: 100 })
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`)
+    process.exit(23)
+  }
   process.exit(0)
 }
 
@@ -71,10 +99,12 @@ if (mode === 'expire') {
     state.calls += 1
     await writeFile(statePath, `${JSON.stringify(state)}\n`, 'utf8')
     await new Promise(resolve => setTimeout(resolve, 250))
+    throw new Error('intentional expired callback failure')
   }, { waitMs: 5_000, leaseMs: 100 })
+  process.exit(0)
 }
 
-if (mode !== 'append') throw new Error('usage: append|lock|overlease|release-race|partial|crash|expire <stateRoot> <id>')
+if (mode !== 'append') throw new Error('usage: append|lock|overlease|release-race|partial|crash|expire|hang|busy <stateRoot> <id>')
 
 await appendCapacityAttempt(stateRoot, createCapacityAttempt({
   attemptId: `attempt-${id}`,

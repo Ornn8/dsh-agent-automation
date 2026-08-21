@@ -386,6 +386,48 @@ test('a live callback remains exclusive after its lease duration', { timeout: 60
   }
 })
 
+test('a PID-reused owner is reclaimable only when its process start identity differs', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-pid-reuse-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    await mkdir(paths.directory, { recursive: true })
+    await mkdir(paths.lockPath)
+    await writeFile(join(paths.lockPath, 'registry-owner.reused-owner.json'), `${JSON.stringify({
+      version: 1,
+      ownerToken: 'reused-owner',
+      fence: 5_000,
+      pid: process.pid,
+      processIdentity: 'linux:reused-boot:0',
+      acquiredAt: new Date(now - 2_000).toISOString(),
+      expiresAt: new Date(now - 1).toISOString(),
+    })}\n`, 'utf8')
+    let acquiredFence = 0
+    await withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
+      acquiredFence = lease.fence
+    }, { now, waitMs: 5_000, leaseMs: 1_000 })
+    assert.ok(acquiredFence > 5_000)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('a suspended owner remains exclusive after its lease duration', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-suspended-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    const owner = startStoreProcess('hang', stateRoot, 'owner')
+    await waitForFile(`${paths.directory}/hang.ready`)
+    await new Promise(resolve => setTimeout(resolve, 150))
+    const contender = await runStoreProcess('busy', stateRoot, 'contender')
+    assert.equal(contender.code, 23, contender.stderr)
+    await writeFile(`${paths.directory}/hang.go`, 'go\n', 'utf8')
+    const result = await waitStoreProcess(owner)
+    assert.equal(result.code, 0, result.stderr)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
 test('owner-addressed release leaves a replacement gate intact', { timeout: 60_000 }, async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-release-race-'))
   try {
@@ -472,8 +514,46 @@ test('an expired operation fails once and is never replayed by the lock layer', 
   try {
     const result = await runStoreProcess('expire', stateRoot, 'expired')
     assert.notEqual(result.code, 0)
+    assert.match(result.stderr, /intentional expired callback failure/)
     const state = JSON.parse(await readFile(join(capacityRegistryPaths(stateRoot).directory, 'expire-observation.json'), 'utf8'))
     assert.equal(state.calls, 1)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('fencing remains above the historical high water mark after a clock rollback', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-fence-rollback-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    await mkdir(paths.lockPath, { recursive: true })
+    await writeFile(join(paths.lockPath, 'registry-owner.old-generation.json'), `${JSON.stringify({
+      version: 1,
+      ownerToken: 'old-generation',
+      fence: 5_000,
+      acquiredAt: '1970-01-01T00:00:00.000Z',
+      expiresAt: '1970-01-01T00:00:00.500Z',
+    })}\n`, 'utf8')
+    let acquiredFence = 0
+    await withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
+      acquiredFence = lease.fence
+    }, { now: 1_000, waitMs: 5_000, leaseMs: 1_000 })
+    assert.ok(acquiredFence > 5_000)
+    const highWater = JSON.parse(await readFile(paths.fencePath, 'utf8'))
+    assert.equal(highWater.fence, acquiredFence)
+    await mkdir(paths.lockPath)
+    await writeFile(join(paths.lockPath, 'registry-owner.late-generation.json'), `${JSON.stringify({
+      version: 1,
+      ownerToken: 'late-generation',
+      fence: 5_001,
+      acquiredAt: '1970-01-01T00:00:00.000Z',
+      expiresAt: '1970-01-01T00:00:00.500Z',
+    })}\n`, 'utf8')
+    let laterFence = 0
+    await withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
+      laterFence = lease.fence
+    }, { now: 1_000, waitMs: 5_000, leaseMs: 1_000 })
+    assert.ok(laterFence > acquiredFence)
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
