@@ -1261,6 +1261,26 @@ test('review uses one controller-owned slot and verifies the exact pair before t
   assert.match(source, /projectCwd: taskProjectCwd/)
 })
 
+test('review production path routes through the controller-owned capacity claim', async () => {
+  const source = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
+  const checkSource = await readFile(new URL('../src/review-check.mjs', import.meta.url), 'utf8')
+  assert.match(source, /createWorkerExecutionClaim/)
+  assert.match(source, /runRoleWorker/)
+  assert.match(source, /trustedTaskSnapshot: \{ workflowStage: stageId \}/)
+  assert.match(source, /subjectStateVersion = createHash/)
+  assert.doesNotMatch(source, /resolveRepositoryWorker|runAgentWorker/)
+  const tryBody = source.slice(source.indexOf('try {'))
+  assert.doesNotMatch(tryBody, /process\.exit\(/)
+  assert.match(source, /trustedDeferredReviewCheckId/)
+  assert.match(source, /startDeferredReviewCheck/)
+  assert.match(source, /if \(workerReceipt\.outcome === 'capacity-deferred'\)/)
+  assert.doesNotMatch(source, /capacity-deferred' \|\| workerReceipt\.outcome === 'replayed'/)
+  assert.match(source, /deferredReviewCheckId \?\? await startDeferredReviewCheck/)
+  assert.doesNotMatch(source, /completeReviewCheck\(\{[\s\S]*conclusion: 'neutral'/)
+  assert.match(checkSource, /status', 'completed'.*conclusion', 'neutral'/s)
+  assert.match(checkSource, /external_id', reviewCheckIdentity/)
+})
+
 test('Codex review waits for its App Server to release workspace handles', async () => {
   const child = new EventEmitter()
   child.exitCode = null

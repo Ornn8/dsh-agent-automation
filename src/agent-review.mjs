@@ -1,15 +1,14 @@
 import { appendFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import {
   authenticatedMarker,
   actionsCredentialEnvironment,
   loadConfig,
   parseJson,
   requiredEnv,
-  resolveRepositoryWorker,
   run,
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
-import { runAgentWorker } from './agent-worker.mjs'
 import { AGENT_REVIEW_SKILL } from './agent-work-result.mjs'
 import {
   githubReviewBody,
@@ -17,7 +16,13 @@ import {
   reviewFindingRoute,
 } from './review-protocol.mjs'
 import { validateReviewFindings } from './review-evidence.mjs'
-import { completeReviewCheck, startReviewCheck } from './review-check.mjs'
+import {
+  completeReviewCheck,
+  startReviewCheck,
+  startDeferredReviewCheck,
+  trustedDeferredReviewCheckId,
+} from './review-check.mjs'
+import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
@@ -39,6 +44,7 @@ const config = await loadConfig()
 const profileId = requiredEnv('PROFILE_ID')
 const workflowId = requiredEnv('WORKFLOW_ID')
 const stageId = requiredEnv('STAGE_ID')
+const runId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
 const runAttempt = Number.parseInt(requiredEnv('GITHUB_RUN_ATTEMPT'), 10)
 const marker = reviewMarker(expectedHead)
 const githubEnvironment = actionsCredentialEnvironment()
@@ -50,6 +56,9 @@ if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
 }
 if (!Number.isSafeInteger(runAttempt) || runAttempt < 1 || String(runAttempt) !== process.env.GITHUB_RUN_ATTEMPT) {
   throw new Error(`Invalid GITHUB_RUN_ATTEMPT: ${process.env.GITHUB_RUN_ATTEMPT}`)
+}
+if (!Number.isSafeInteger(runId) || runId < 1 || String(runId) !== process.env.GITHUB_RUN_ID) {
+  throw new Error(`Invalid GITHUB_RUN_ID: ${process.env.GITHUB_RUN_ID}`)
 }
 
 async function ghJson(args, description) {
@@ -116,7 +125,6 @@ const reviewStage = requireEligibleWorkflowStage(
 if (reviewStage.procedure !== AGENT_REVIEW_SKILL) {
   throw new Error(`Review workflow cannot execute procedure ${reviewStage.procedure}`)
 }
-const workerId = resolveRepositoryWorker(config, repository, reviewStage.role)
 const expectedBaseRef = pullRequest.baseRefName
 const replicaId = await reviewReplicaIdForRunner({
   stateRoot: config.operations.stateRoot,
@@ -167,6 +175,38 @@ const observations = reviewObservations({
   comments: observationComments.flat(),
 })
 
+const deferredReviewCheckId = trustedDeferredReviewCheckId(observationChecks, {
+  repository,
+  head: expectedHead,
+  identity: {
+    workflowId,
+    stageId,
+    definitionHash: profile.definitionHash,
+    runId,
+    runAttempt,
+  },
+})
+const workRequest = Object.freeze({
+  version: 2,
+  requestId: `review-pr-${pullRequestNumber}-${expectedBase}-${expectedHead}`,
+  role: 'review',
+})
+const subjectStateVersion = createHash('sha256').update(JSON.stringify({
+  repository,
+  pullRequestNumber,
+  base: expectedBase,
+  head: expectedHead,
+  definitionHash: profile.definitionHash,
+})).digest('hex')
+const executionClaim = createWorkerExecutionClaim({
+  config,
+  role: 'review',
+  workRequest,
+  subjectStateVersion,
+  trustedTaskSnapshot: { workflowStage: stageId },
+  routingPolicy: config.operations.routing.review,
+})
+
 await run(config.ghExecutable, [
   'pr', 'merge', String(pullRequestNumber), '--repo', repository, '--disable-auto',
 ], { env: githubEnvironment }).catch(() => undefined)
@@ -182,21 +222,6 @@ for (const label of [
     '--remove-label', label,
   ], { env: githubEnvironment }).catch(() => undefined)
 }
-const reviewCheckId = await startReviewCheck({
-  ghExecutable: config.ghExecutable,
-  repository,
-  head: expectedHead,
-  runUrl: requiredEnv('RUN_URL'),
-  runAttempt,
-  identity: {
-    workflowId,
-    stageId,
-    definitionHash: profile.definitionHash,
-  },
-  env: githubEnvironment,
-})
-await writeOutput('review_check_id', reviewCheckId)
-
 const prompt = `Review GitHub PR #${pullRequestNumber} in ${repository} at exact head ${expectedHead} against base ${expectedBase}.
 
 The review checkout is ${reviewCheckout}; inspect it explicitly with read-only git commands.
@@ -231,9 +256,8 @@ End the final answer with this collapsible automation block. Keep it after the c
 
 For PASS, findings must be an empty array. For BLOCK, include at least one finding.`
 
-const workerReceipt = await runAgentWorker({
-  config,
-  workerId,
+const workerReceipt = await runRoleWorker({
+  executionClaim,
   invocation: {
     taskId: `review-${expectedBase}-${expectedHead}`,
     cwd: reviewCheckout,
@@ -245,9 +269,48 @@ const workerReceipt = await runAgentWorker({
   },
   adapters: createAgentAdapters(),
 })
-if (workerReceipt.outcome !== 'completed') {
+if (workerReceipt.outcome === 'capacity-deferred') {
+  const reviewCheckId = deferredReviewCheckId ?? await startDeferredReviewCheck({
+    ghExecutable: config.ghExecutable,
+    repository,
+    head: expectedHead,
+    runUrl: requiredEnv('RUN_URL'),
+    runAttempt,
+    identity: {
+      workflowId,
+      stageId,
+      definitionHash: profile.definitionHash,
+    },
+    summary: 'No review Worker was available because all routed capacity was deferred.',
+    env: githubEnvironment,
+  })
+  await writeOutput('review_check_id', reviewCheckId)
+  await writeOutput('deferred', 'true')
+  process.stdout.write('Review deferred: all routed Workers are unavailable due to capacity.\n')
+  return
+}
+const replayedCompletedReview = workerReceipt.outcome === 'replayed'
+  && workerReceipt.priorOutcome === 'completed'
+  && typeof workerReceipt.output === 'string'
+if (workerReceipt.outcome !== 'completed' && !replayedCompletedReview) {
   throw new Error(`Review worker ended with ${workerReceipt.outcome}: ${workerReceipt.detail}`)
 }
+const reviewCheckId = await startReviewCheck({
+  ghExecutable: config.ghExecutable,
+  repository,
+  head: expectedHead,
+  runUrl: requiredEnv('RUN_URL'),
+  runAttempt,
+  identity: {
+    workflowId,
+    stageId,
+    definitionHash: profile.definitionHash,
+    runId,
+    runAttempt,
+  },
+  env: githubEnvironment,
+})
+await writeOutput('review_check_id', reviewCheckId)
 const review = parseReviewMessage(workerReceipt.output)
 const reviewRoute = review.verdict === 'pass' ? 'pass' : reviewFindingRoute(review.findings)
 await validateReviewFindings(review, {

@@ -3,8 +3,8 @@
 import { createHash } from 'node:crypto'
 
 import { canFailoverCapacityFailure, parseAdapterFailure } from './capacity-failure.mjs'
-import { capacityEligibility } from './capacity-registry.mjs'
-import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry } from './capacity-registry-store.mjs'
+import { capacityEligibility, projectWorkerCapacityIdentity } from './capacity-registry.mjs'
+import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry, parseCapacityAttempt } from './capacity-registry-store.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
 import { createLocalWorkerRoutingExecution } from './worker-routing.mjs'
@@ -140,6 +140,12 @@ async function appendAttempt(provider, attempt) {
 
 /** @param {AnyObject} input @returns {AnyObject} */
 function attemptIdentity(input) {
+  const capacityIdentityHash = stableDigest({
+    capacityGroup: input.capacityGroup,
+    capacityIdentity: input.capacityIdentity,
+    configurationHash: input.configurationHash ?? null,
+    credentialGeneration: input.credentialGeneration ?? null,
+  })
   const capacityGenerationHash = stableDigest({
     capacityGroup: input.capacityGroup,
     generation: input.capacityGeneration,
@@ -152,6 +158,7 @@ function attemptIdentity(input) {
     taskClass: input.taskClass,
     workerId: input.workerId,
     capacityGroup: input.capacityGroup,
+    capacityIdentityHash,
     capacityGeneration: input.capacityGeneration,
     capacityGenerationHash: input.capacityGenerationHash ?? capacityGenerationHash,
   }
@@ -185,6 +192,9 @@ async function prepareAttempt(state, workerId) {
     taskClass: state.execution.routeDecision.taskClass,
     workerId,
     capacityGroup: capacity.capacityGroup,
+    capacityIdentity: projectWorkerCapacityIdentity(workerId, worker),
+    configurationHash: state.config.configurationHash,
+    credentialGeneration: state.config.credentialGeneration,
     capacityGeneration: capacity.generation,
     capacityGenerationHash: capacity.generationHash,
     startState: capacity.state,
@@ -199,9 +209,45 @@ async function prepareAttempt(state, workerId) {
 async function claimAttempt(state, claim) {
   const prepared = ATTEMPT_CLAIMS.get(claim)
   if (!prepared || prepared.state !== state) throw new Error('Worker execution claim is not locally trusted')
-  const result = await state.provider.claimAttempt(journalEntry(prepared.base, { outcome: 'claimed' }))
+  const expected = journalEntry(prepared.base, { outcome: 'claimed' })
+  const result = await state.provider.claimAttempt(expected)
   if (!result || typeof result.claimed !== 'boolean') throw new Error('Durable claimAttempt returned an invalid result')
-  return { ...result, prepared }
+  let attempt
+  try {
+    attempt = parseCapacityAttempt(result.attempt)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`Durable claimAttempt returned an invalid attempt: ${detail}`, { cause: error })
+  }
+  const identityMatches = [
+    ['workRequestId', expected.workRequestId],
+    ['routePolicyHash', expected.routePolicyHash],
+    ['taskClass', expected.taskClass],
+    ['workerId', expected.workerId],
+    ['capacityGroup', expected.capacityGroup],
+    ['capacityGeneration', expected.capacityGeneration],
+    ['capacityGenerationHash', expected.capacityGenerationHash],
+    ['capacityIdentityHash', expected.capacityIdentityHash],
+    ['startState', expected.startState],
+  ].every(([key, value]) => attempt[key] === value)
+  const trustedCrossGenerationReplay = result.claimed === false
+    && result.replayed === true
+    && attempt.attemptId !== expected.attemptId
+    && [
+      ['workRequestId', expected.workRequestId],
+      ['routePolicyHash', expected.routePolicyHash],
+      ['taskClass', expected.taskClass],
+      ['workerId', expected.workerId],
+      ['capacityGroup', expected.capacityGroup],
+      ['capacityIdentityHash', expected.capacityIdentityHash],
+    ].every(([key, value]) => attempt[key] === value)
+  if ((!trustedCrossGenerationReplay && attempt.attemptId !== expected.attemptId) || (!trustedCrossGenerationReplay && !identityMatches)) {
+    throw new Error('Durable claimAttempt returned a conflicting attempt')
+  }
+  if (result.claimed && attempt.result.outcome !== 'claimed') {
+    throw new Error('Durable claimAttempt claimed an attempt with a terminal result')
+  }
+  return { ...result, attempt, prepared }
 }
 
 /** @param {AnyObject} state @param {object} claim @param {AnyObject} result @returns {Promise<void>} */
@@ -341,6 +387,11 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
     const prepared = await prepareAttempt(state, workerId)
     const admission = await claimAttempt(state, prepared.claim)
     if (admission.claimed === false) {
+      const priorOutcome = admission.attempt.result.outcome
+      if (priorOutcome === 'capacity-deferred' || priorOutcome === 'capacity-failure') {
+        unavailable.push(workerId)
+        continue
+      }
       return {
         version: 1,
         outcome: 'replayed',
@@ -351,12 +402,15 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
         taskClass: state.execution.routeDecision.taskClass,
         routingAttemptId: state.execution.routingAttemptId,
         candidates: [...state.candidates],
+        priorOutcome,
+        ...(typeof admission.attempt.result.output === 'string' ? { output: admission.attempt.result.output } : {}),
         detail: 'This trusted routing claim was already durably claimed; no Worker was started.',
       }
     }
     let candidateStarted = false
     let invocationAttempted = false
     let probeFinalized = false
+    let attemptFinalized = false
     try {
       if (!prepared.capacity.eligible) {
         unavailable.push(workerId)
@@ -387,11 +441,21 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
       }
       invocationAttempted = true
       const receipt = await runAgentWorker({ config: state.config, workerId, invocation: candidateInvocation, adapters })
+      await finishAttempt(state, prepared.claim, {
+        outcome: receipt.outcome,
+        ...(receipt.outcome === 'completed' && typeof receipt.output === 'string' ? { output: receipt.output } : {}),
+      })
+      attemptFinalized = true
       await completeCapacityProbe(state, prepared.capacity, 'success')
       probeFinalized = true
-      await finishAttempt(state, prepared.claim, { outcome: receipt.outcome })
       return receipt
     } catch (error) {
+      if (attemptFinalized) {
+        // The durable execution result is authoritative. A capacity projection
+        // failure must not rewrite it or start the Worker again on replay.
+        probeFinalized = true
+        throw error
+      }
       const failureSource = error && typeof error === 'object' && 'adapterFailure' in error
         ? error.adapterFailure
         : error
@@ -432,7 +496,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
         outcome: 'capacity-failure', category: failure.category, reason: failure.reason,
       })
     } finally {
-      if (!probeFinalized) await completeCapacityProbe(state, prepared.capacity, 'abandon')
+      if (!probeFinalized && !attemptFinalized) await completeCapacityProbe(state, prepared.capacity, 'abandon')
     }
   }
 

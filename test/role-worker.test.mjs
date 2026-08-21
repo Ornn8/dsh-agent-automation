@@ -169,7 +169,7 @@ test('local routing rejects a wrong or stale WorkerRouteDecision', async () => {
   }), /provider-owned/)
 })
 
-function attemptProvider({ available = true, generation = 1 } = {}) {
+function attemptProvider({ available = true, generation = 1, replayOutcome = null } = {}) {
   let currentGeneration = generation
   const claims = new Map()
   const records = []
@@ -188,6 +188,9 @@ function attemptProvider({ available = true, generation = 1 } = {}) {
       failures.push(input)
     },
     async claimAttempt(input) {
+      if (replayOutcome) {
+        return { claimed: false, attempt: { ...input, result: { outcome: replayOutcome, category: null, reason: null } } }
+      }
       const existing = claims.get(input.attemptId)
       if (existing) return { claimed: false, attempt: existing }
       claims.set(input.attemptId, input)
@@ -195,6 +198,11 @@ function attemptProvider({ available = true, generation = 1 } = {}) {
     },
     async appendAttempt(input) {
       records.push(input)
+      if (input.attemptId.endsWith('-result')) {
+        const baseAttemptId = input.attemptId.slice(0, -'-result'.length)
+        const existing = claims.get(baseAttemptId)
+        if (existing) claims.set(baseAttemptId, { ...existing, endedAt: input.endedAt, result: input.result })
+      }
       return input
     },
   }
@@ -227,6 +235,7 @@ test('same trusted claim replays without executing and a provider generation exe
 
   assert.equal(first.outcome, 'completed')
   assert.equal(replay.outcome, 'replayed')
+  assert.equal(replay.priorOutcome, 'completed')
   assert.equal(nextGeneration.outcome, 'completed')
   assert.deepEqual(calls, ['first', 'first'])
   assert.equal(provider.claims.size, 2)
@@ -256,11 +265,114 @@ test('the local capacity registry durably claims and replays one execution claim
 
     assert.equal(first.outcome, 'completed')
     assert.equal(replay.outcome, 'replayed')
+    assert.equal(replay.priorOutcome, 'completed')
     assert.equal(calls, 1)
   } finally {
     await rm(stateRoot, { recursive: true, force: true })
   }
 })
+
+test('a successful half-open probe replays the same output after the registry generation advances', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-role-worker-probe-replay-'))
+  try {
+    let now = Date.parse('2026-08-21T00:00:00.000Z')
+    const localConfig = multiScopeConfig(stateRoot)
+    localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+    const registry = createCapacityRegistry({
+      stateRoot,
+      configurationHash: localConfig.configurationHash,
+      credentialGeneration: localConfig.credentialGeneration,
+      workers: localConfig.workers,
+      now: () => now,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'first-group', sourceWorker: 'first', failure: scopedFailure('capacity-group'), now, cooldownMs: 1,
+    })
+    now += 2
+    let calls = 0
+    const run = () => runRoleWorker({
+      executionClaim: createWorkerExecutionClaim({
+        config: localConfig, role: 'change', workRequest: { requestId: 'request-probe-replay', role: 'change' },
+        subjectStateVersion: stateVersion, capacityProvider: registry,
+      }),
+      invocation: invocation(),
+      adapters: { fake: async () => {
+        calls += 1
+        return { sessionId: `review-${calls}`, outcome: 'completed', output: 'review-1' }
+      } },
+    })
+
+    const first = await run()
+    const second = await run()
+
+    assert.equal(first.outcome, 'completed')
+    assert.equal(first.output, 'review-1')
+    assert.equal(second.outcome, 'replayed')
+    assert.equal(second.priorOutcome, 'completed')
+    assert.equal(second.output, 'review-1')
+    assert.equal(calls, 1)
+    const records = await registry.records()
+    const groupKey = capacityRecordKey({ capacityGroup: 'first-group', scope: 'capacity-group' })
+    assert.equal(records[groupKey].state, 'available')
+    assert.ok(records[groupKey].generation > 1)
+    assert.equal((await registry.attempts()).length, 2)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+for (const failurePhase of ['before', 'after']) {
+  test(`a ${failurePhase}-commit capacity projection failure replays the durable Worker result`, async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), `dsh-role-worker-projection-${failurePhase}-`))
+    try {
+      let now = Date.parse('2026-08-21T00:00:00.000Z')
+      const localConfig = multiScopeConfig(stateRoot)
+      localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+      const registry = createCapacityRegistry({
+        stateRoot,
+        configurationHash: localConfig.configurationHash,
+        credentialGeneration: localConfig.credentialGeneration,
+        workers: localConfig.workers,
+        now: () => now,
+      })
+      await registry.recordFailure({
+        capacityGroup: 'first-group', sourceWorker: 'first', failure: scopedFailure('capacity-group'), now, cooldownMs: 1,
+      })
+      now += 2
+      const completeHalfOpenProbe = registry.completeHalfOpenProbe
+      let projectionCalls = 0
+      registry.completeHalfOpenProbe = async input => {
+        projectionCalls += 1
+        if (failurePhase === 'before') throw new Error(`capacity projection failed ${failurePhase}`)
+        await completeHalfOpenProbe(input)
+        throw new Error(`capacity projection failed ${failurePhase}`)
+      }
+      let adapterCalls = 0
+      const run = () => runRoleWorker({
+        executionClaim: createWorkerExecutionClaim({
+          config: localConfig, role: 'change', workRequest: { requestId: `projection-${failurePhase}`, role: 'change' },
+          subjectStateVersion: stateVersion, capacityProvider: registry,
+        }),
+        invocation: invocation(),
+        adapters: { fake: async () => {
+          adapterCalls += 1
+          return { sessionId: 'completed-session', outcome: 'completed', output: 'durable-output' }
+        } },
+      })
+
+      await assert.rejects(run(), new RegExp(`capacity projection failed ${failurePhase}`))
+      const replay = await run()
+
+      assert.equal(replay.outcome, 'replayed')
+      assert.equal(replay.priorOutcome, 'completed')
+      assert.equal(replay.output, 'durable-output')
+      assert.equal(adapterCalls, 1)
+      assert.equal(projectionCalls, 1)
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true })
+    }
+  })
+}
 
 test('forged execution values are rejected before an adapter starts', async () => {
   let calls = 0
@@ -274,7 +386,7 @@ test('forged execution values are rejected before an adapter starts', async () =
   assert.equal(calls, 0)
 })
 
-test('a changed provider generation creates a new attempt identity', async () => {
+test('same trusted claim replays without executing and a provider generation executes', async () => {
   const provider = attemptProvider({ generation: 1 })
   const calls = []
   const input = {
@@ -300,6 +412,34 @@ test('a changed provider generation creates a new attempt identity', async () =>
 
   assert.equal(next.outcome, 'completed')
   assert.deepEqual(calls, ['first', 'first'])
+  assert.equal(provider.claims.size, 2)
+})
+
+test('configuration and Worker identity rotation creates a distinct attempt', async () => {
+  const provider = attemptProvider()
+  const firstConfig = config()
+  firstConfig.configurationHash = 'c'.repeat(64)
+  firstConfig.credentialGeneration = 'credential-1'
+  firstConfig.workers.first.provider = 'provider-1'
+  firstConfig.workers.first.model = 'model-1'
+  const run = (localConfig) => runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-identity-rotation', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async ({ workerId }) => ({ sessionId: `session-${workerId}`, outcome: 'completed' }) },
+  })
+
+  await run(firstConfig)
+  const rotatedConfig = structuredClone(firstConfig)
+  rotatedConfig.configurationHash = 'd'.repeat(64)
+  rotatedConfig.credentialGeneration = 'credential-2'
+  rotatedConfig.workers.first.provider = 'provider-2'
+  rotatedConfig.workers.first.model = 'model-2'
+  const rotated = await run(rotatedConfig)
+
+  assert.equal(rotated.outcome, 'completed')
   assert.equal(provider.claims.size, 2)
 })
 
@@ -392,6 +532,114 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(calls, 0)
   assert.equal(provider.claims.size, 3)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
+})
+
+test('completed Worker output is durably available to a replay', async () => {
+  const provider = attemptProvider()
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'review', workRequest: { requestId: 'request-replay-output', role: 'review' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => ({ sessionId: 'review-session', outcome: 'completed', output: 'machine review result' }) },
+  }
+
+  const first = await runRoleWorker(input)
+  const replay = await runRoleWorker(input)
+
+  assert.equal(first.outcome, 'completed')
+  assert.equal(replay.outcome, 'replayed')
+  assert.equal(replay.priorOutcome, 'completed')
+  assert.equal(replay.output, 'machine review result')
+})
+
+test('all previously capacity-deferred candidates replay as deferred without starting a Worker', async () => {
+  const provider = attemptProvider({ available: false, generation: 3 })
+  let calls = 0
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-deferred-replay', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => { calls += 1; return { sessionId: 'unexpected', outcome: 'completed' } } },
+  }
+
+  const first = await runRoleWorker(input)
+  const replay = await runRoleWorker(input)
+
+  assert.equal(first.outcome, 'capacity-deferred')
+  assert.equal(replay.outcome, 'capacity-deferred')
+  assert.deepEqual(replay.unavailable, ['first', 'second', 'third'])
+  assert.equal(calls, 0)
+  assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
+})
+
+test('previous capacity-failure candidates are skipped before the next admitted Worker', async () => {
+  const provider = attemptProvider({ replayOutcome: 'capacity-failure' })
+  let calls = 0
+  const result = await runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-capacity-failure-replay', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => { calls += 1; return { sessionId: 'unexpected', outcome: 'completed' } } },
+  })
+
+  assert.equal(result.outcome, 'capacity-deferred')
+  assert.deepEqual(result.unavailable, ['first', 'second', 'third'])
+  assert.equal(calls, 0)
+})
+
+test('completed and claimed attempt replays remain terminal and never become neutral capacity deferrals', async () => {
+  for (const priorOutcome of ['completed', 'claimed']) {
+    const provider = attemptProvider({ replayOutcome: priorOutcome })
+    let calls = 0
+    const result = await runRoleWorker({
+      executionClaim: createWorkerExecutionClaim({
+        config: config(), role: 'review', workRequest: { requestId: `request-${priorOutcome}-replay`, role: 'review' },
+        subjectStateVersion: stateVersion, capacityProvider: provider,
+      }),
+      invocation: invocation(),
+      adapters: { fake: async () => { calls += 1; return { sessionId: 'unexpected', outcome: 'completed' } } },
+    })
+
+    assert.equal(result.outcome, 'replayed')
+    assert.equal(result.priorOutcome, priorOutcome)
+    assert.equal(calls, 0)
+  }
+})
+
+test('claim completion wire is parsed and immutable attempt conflicts are rejected', async () => {
+  const malformed = attemptProvider({ replayOutcome: 'completed' })
+  malformed.claimAttempt = async input => ({
+    claimed: false,
+    attempt: { ...input, result: { outcome: 'completed', category: null, reason: null, extra: true } },
+  })
+  await assert.rejects(runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'review', workRequest: { requestId: 'request-malformed-replay', role: 'review' },
+      subjectStateVersion: stateVersion, capacityProvider: malformed,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => ({ sessionId: 'unexpected', outcome: 'completed' }) },
+  }), /unknown field extra/)
+
+  const conflicting = attemptProvider({ replayOutcome: 'completed' })
+  conflicting.claimAttempt = async input => ({
+    claimed: false,
+    attempt: { ...input, workerId: 'other', result: { outcome: 'completed', category: null, reason: null } },
+  })
+  await assert.rejects(runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'review', workRequest: { requestId: 'request-conflicting-replay', role: 'review' },
+      subjectStateVersion: stateVersion, capacityProvider: conflicting,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => ({ sessionId: 'unexpected', outcome: 'completed' }) },
+  }), /conflicting attempt/)
 })
 
 test('real registry claims two expired scopes atomically and closes both on success', async () => {
