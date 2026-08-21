@@ -1,7 +1,7 @@
 // @ts-check
 
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, mkdir, open, readFile, readdir, rm, rename, rmdir } from 'node:fs/promises'
+import { access, lstat, mkdir, open, readFile, readdir, rm, rename, rmdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { run } from './common.mjs'
 import {
@@ -733,11 +733,23 @@ async function boundedProcessIdentity(verifier, pid) {
   }
 }
 
-/** @returns {string} */
-function defaultPowerShellPath() {
+/** @returns {Promise<string>} */
+async function defaultPowerShellPath() {
+  const candidates = []
+  for (const programFiles of [process.env.ProgramW6432, process.env.ProgramFiles]) {
+    if (programFiles && isAbsolute(programFiles)) candidates.push(join(programFiles, 'PowerShell', '7', 'pwsh.exe'))
+  }
   const systemRoot = process.env.SystemRoot
-  if (!systemRoot || !isAbsolute(systemRoot)) throw new Error('Windows process identity requires an absolute SystemRoot')
-  return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  if (systemRoot && isAbsolute(systemRoot)) candidates.push(join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+  for (const candidate of candidates) {
+    try {
+      await access(candidate)
+      return candidate
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') throw error
+    }
+  }
+  throw new Error('Windows process identity requires a trusted absolute PowerShell executable')
 }
 
 /**
@@ -788,7 +800,7 @@ export async function resolveProcessIdentity(pid, options = {}) {
   }
   if (platform === 'win32') {
     const command = `$process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 3 }; $process.StartTime.ToUniversalTime().ToString('o')`
-    const executable = options.powershellPath ?? defaultPowerShellPath()
+    const executable = options.powershellPath ?? await defaultPowerShellPath()
     let result
     try {
       result = await runProcessProbe(executable, ['-NoProfile', '-NonInteractive', '-Command', command], runCommand)
