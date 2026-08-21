@@ -7,3 +7,4 @@
 - Review workspace cleanup remains in `finally`; the deferred path returns normally and does not terminate the process from inside the cleanup scope.
 - Neutral capacity-deferred CheckRuns are reusable only within the same trusted GitHub Actions run and attempt; a later invocation always publishes its own v3 CheckRun.
 - A completed Worker attempt durably retains its bounded machine output, allowing a replay after process interruption to publish the same review without starting another Worker or treating a non-capacity outcome as deferred.
+- Capacity-state generation changes remain available for capacity-only retries, while a completed output is replayed by its stable execution identity; configuration, credential, provider, model, and Worker identity changes produce a new identity.

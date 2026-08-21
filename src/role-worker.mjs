@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 
 import { canFailoverCapacityFailure, parseAdapterFailure } from './capacity-failure.mjs'
-import { capacityEligibility } from './capacity-registry.mjs'
+import { capacityEligibility, projectWorkerCapacityIdentity } from './capacity-registry.mjs'
 import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry, parseCapacityAttempt } from './capacity-registry-store.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
@@ -140,6 +140,12 @@ async function appendAttempt(provider, attempt) {
 
 /** @param {AnyObject} input @returns {AnyObject} */
 function attemptIdentity(input) {
+  const capacityIdentityHash = stableDigest({
+    capacityGroup: input.capacityGroup,
+    capacityIdentity: input.capacityIdentity,
+    configurationHash: input.configurationHash ?? null,
+    credentialGeneration: input.credentialGeneration ?? null,
+  })
   const capacityGenerationHash = stableDigest({
     capacityGroup: input.capacityGroup,
     generation: input.capacityGeneration,
@@ -152,6 +158,7 @@ function attemptIdentity(input) {
     taskClass: input.taskClass,
     workerId: input.workerId,
     capacityGroup: input.capacityGroup,
+    capacityIdentityHash,
     capacityGeneration: input.capacityGeneration,
     capacityGenerationHash: input.capacityGenerationHash ?? capacityGenerationHash,
   }
@@ -185,6 +192,9 @@ async function prepareAttempt(state, workerId) {
     taskClass: state.execution.routeDecision.taskClass,
     workerId,
     capacityGroup: capacity.capacityGroup,
+    capacityIdentity: projectWorkerCapacityIdentity(workerId, worker),
+    configurationHash: state.config.configurationHash,
+    credentialGeneration: state.config.credentialGeneration,
     capacityGeneration: capacity.generation,
     capacityGenerationHash: capacity.generationHash,
     startState: capacity.state,
@@ -217,9 +227,21 @@ async function claimAttempt(state, claim) {
     ['capacityGroup', expected.capacityGroup],
     ['capacityGeneration', expected.capacityGeneration],
     ['capacityGenerationHash', expected.capacityGenerationHash],
+    ['capacityIdentityHash', expected.capacityIdentityHash],
     ['startState', expected.startState],
   ].every(([key, value]) => attempt[key] === value)
-  if (attempt.attemptId !== expected.attemptId || !identityMatches) {
+  const trustedCrossGenerationReplay = result.claimed === false
+    && result.replayed === true
+    && attempt.attemptId !== expected.attemptId
+    && [
+      ['workRequestId', expected.workRequestId],
+      ['routePolicyHash', expected.routePolicyHash],
+      ['taskClass', expected.taskClass],
+      ['workerId', expected.workerId],
+      ['capacityGroup', expected.capacityGroup],
+      ['capacityIdentityHash', expected.capacityIdentityHash],
+    ].every(([key, value]) => attempt[key] === value)
+  if ((!trustedCrossGenerationReplay && attempt.attemptId !== expected.attemptId) || (!trustedCrossGenerationReplay && !identityMatches)) {
     throw new Error('Durable claimAttempt returned a conflicting attempt')
   }
   if (result.claimed && attempt.result.outcome !== 'claimed') {

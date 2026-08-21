@@ -272,6 +272,55 @@ test('the local capacity registry durably claims and replays one execution claim
   }
 })
 
+test('a successful half-open probe replays the same output after the registry generation advances', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-role-worker-probe-replay-'))
+  try {
+    let now = Date.parse('2026-08-21T00:00:00.000Z')
+    const localConfig = multiScopeConfig(stateRoot)
+    localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+    const registry = createCapacityRegistry({
+      stateRoot,
+      configurationHash: localConfig.configurationHash,
+      credentialGeneration: localConfig.credentialGeneration,
+      workers: localConfig.workers,
+      now: () => now,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'first-group', sourceWorker: 'first', failure: scopedFailure('capacity-group'), now, cooldownMs: 1,
+    })
+    now += 2
+    let calls = 0
+    const run = () => runRoleWorker({
+      executionClaim: createWorkerExecutionClaim({
+        config: localConfig, role: 'change', workRequest: { requestId: 'request-probe-replay', role: 'change' },
+        subjectStateVersion: stateVersion, capacityProvider: registry,
+      }),
+      invocation: invocation(),
+      adapters: { fake: async () => {
+        calls += 1
+        return { sessionId: `review-${calls}`, outcome: 'completed', output: 'review-1' }
+      } },
+    })
+
+    const first = await run()
+    const second = await run()
+
+    assert.equal(first.outcome, 'completed')
+    assert.equal(first.output, 'review-1')
+    assert.equal(second.outcome, 'replayed')
+    assert.equal(second.priorOutcome, 'completed')
+    assert.equal(second.output, 'review-1')
+    assert.equal(calls, 1)
+    const records = await registry.records()
+    const groupKey = capacityRecordKey({ capacityGroup: 'first-group', scope: 'capacity-group' })
+    assert.equal(records[groupKey].state, 'available')
+    assert.ok(records[groupKey].generation > 1)
+    assert.equal((await registry.attempts()).length, 2)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
 test('forged execution values are rejected before an adapter starts', async () => {
   let calls = 0
   for (const executionClaim of [1, {}, { generation: 2 }]) {
@@ -284,7 +333,7 @@ test('forged execution values are rejected before an adapter starts', async () =
   assert.equal(calls, 0)
 })
 
-test('a changed provider generation creates a new attempt identity', async () => {
+test('same trusted claim replays without executing and a provider generation executes', async () => {
   const provider = attemptProvider({ generation: 1 })
   const calls = []
   const input = {
@@ -310,6 +359,34 @@ test('a changed provider generation creates a new attempt identity', async () =>
 
   assert.equal(next.outcome, 'completed')
   assert.deepEqual(calls, ['first', 'first'])
+  assert.equal(provider.claims.size, 2)
+})
+
+test('configuration and Worker identity rotation creates a distinct attempt', async () => {
+  const provider = attemptProvider()
+  const firstConfig = config()
+  firstConfig.configurationHash = 'c'.repeat(64)
+  firstConfig.credentialGeneration = 'credential-1'
+  firstConfig.workers.first.provider = 'provider-1'
+  firstConfig.workers.first.model = 'model-1'
+  const run = (localConfig) => runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-identity-rotation', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async ({ workerId }) => ({ sessionId: `session-${workerId}`, outcome: 'completed' }) },
+  })
+
+  await run(firstConfig)
+  const rotatedConfig = structuredClone(firstConfig)
+  rotatedConfig.configurationHash = 'd'.repeat(64)
+  rotatedConfig.credentialGeneration = 'credential-2'
+  rotatedConfig.workers.first.provider = 'provider-2'
+  rotatedConfig.workers.first.model = 'model-2'
+  const rotated = await run(rotatedConfig)
+
+  assert.equal(rotated.outcome, 'completed')
   assert.equal(provider.claims.size, 2)
 })
 
