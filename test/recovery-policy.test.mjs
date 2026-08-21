@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   recordedCiWorkflow,
+  RECOVERABLE_CONCLUSIONS,
   recoveryDecision,
   trustedFailedAgentRun,
 } from '../src/recovery-policy.mjs'
@@ -32,6 +33,7 @@ test('all GitHub terminal infrastructure failures recover with immutable control
   assert.equal(trustedFailedAgentRun({ run: run(), repository, trust }), 'pull-request')
   assert.equal(trustedFailedAgentRun({ run: run({ name: 'Agent PR CI Repair' }), repository, trust }), 'pull-request')
   assert.equal(trustedFailedAgentRun({ run: run({ conclusion: 'cancelled' }), repository, trust }), 'pull-request')
+  assert.equal(trustedFailedAgentRun({ run: run({ conclusion: 'success' }), repository, trust }), null)
   for (const conclusion of ['timed_out', 'startup_failure', 'stale']) {
     assert.equal(trustedFailedAgentRun({ run: run({ conclusion }), repository, trust }), 'pull-request')
   }
@@ -43,6 +45,7 @@ test('all GitHub terminal infrastructure failures recover with immutable control
   assert.equal(trustedFailedAgentRun({ run: run({ referenced_workflows: [{ path: '.github/workflows/dsh-repair.yml', sha }] }), repository, trust }), null)
   assert.equal(trustedFailedAgentRun({ run: run({ referenced_workflows: [{ path: `${controller}/.github/workflows/dsh-repair.yml@${'d'.repeat(40)}`, sha: 'd'.repeat(40) }] }), repository, trust }), null)
   assert.equal(trustedFailedAgentRun({ run: run({ repository: { full_name: 'other/repo' } }), repository, trust }), null)
+  assert.equal(RECOVERABLE_CONCLUSIONS.has('success'), false)
 })
 
 test('recovery binds the failed run to one current PR head and never trusts labels alone', () => {

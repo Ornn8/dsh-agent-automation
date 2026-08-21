@@ -27,6 +27,7 @@ import { controllerMutationMarker } from './controller-mutation-marker.mjs'
 import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 import {
   interruptedRepairMayRetry,
+  recoverableRepairIdentity,
   repairRoutingEvidence,
   recordedRepairState,
 } from './repair-state.mjs'
@@ -35,6 +36,7 @@ import {
   nonBaselineBlockFromReceipt,
   trustedBaselineIssue,
 } from './baseline-issue.mjs'
+import { RECOVERABLE_CONCLUSIONS } from './recovery-policy.mjs'
 import { isReviewRepairRequestId, mergeRepairTransition, parseAgentWorkRequest, reviewRepairTransition } from './work-request.mjs'
 import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
@@ -105,7 +107,8 @@ const explicitRequest = Boolean(ciRequest)
   || reviewObservationId?.startsWith('comment-') === true
   || (!isReviewRepairRequestId(requestId, expectedHead)
     && requestId.startsWith('comment-'))
-const recoveryRequest = /(?:^recovery-|\.recovery-\d+$)/.test(requestId)
+const recoveryRequest = /^recovery-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}$/.test(requestId)
+  || /^ci-run-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}\.recovery-[1-9][0-9]{0,19}$/.test(requestId)
 const repairClass = ciRequest
   ? 'automatic-ci'
   : mergeRequest
@@ -385,6 +388,36 @@ const changedPaths = await pullRequestChangedPaths()
 const priorComments = (await ghJson([
   'api', `repos/${repository}/issues/${pullRequestNumber}/comments?per_page=100`, '--paginate', '--slurp',
 ], 'pull request comments')).flat()
+const recoveryIdentity = recoveryRequest
+  ? recoverableRepairIdentity({
+    requestId,
+    comments: priorComments,
+    controllerSha,
+    expectedHead,
+    markerAuthor,
+    repository,
+  })
+  : { requestId, originalRequestId: requestId, sourceRunId: null, sourceStatus: null }
+const executionRequestId = transportedRequest?.requestId || recoveryIdentity.originalRequestId
+  || requestId || `repair-${pullRequestNumber}-${expectedHead}`
+async function trustedSourceRepairRun(sourceRunId) {
+  const runId = Number.parseInt(sourceRunId, 10)
+  if (!Number.isSafeInteger(runId) || runId < 1) throw new Error('Repair recovery source run is invalid')
+  const sourceRun = await actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], 'repair recovery source run')
+  const workflowReference = `${controllerRepository}/.github/workflows/dsh-repair.yml@${controllerSha}`
+  if (sourceRun?.id !== runId || sourceRun.repository?.full_name !== repository
+    || sourceRun.status !== 'completed'
+    || !RECOVERABLE_CONCLUSIONS.has(sourceRun.conclusion)
+    || !Number.isSafeInteger(sourceRun.run_attempt) || sourceRun.run_attempt < 1
+    || !sourceRun.referenced_workflows?.some(reference => reference.path === workflowReference
+      && reference.sha === controllerSha)) {
+    throw new Error('Repair recovery source run is not a trusted completed dsh-repair run')
+  }
+  return sourceRun
+}
+const sourceRepairRun = recoveryIdentity.sourceRunId
+  ? await trustedSourceRepairRun(recoveryIdentity.sourceRunId)
+  : null
 const governorRecords = await trustedGovernorRecords({
   comments: priorComments,
   trust: governorTrust,
@@ -449,6 +482,48 @@ if (ciRequest && !recoveryRequest) {
     admittedRecord: admission.record,
     attemptRecord: budget.record,
   })
+} else if (ciRequest && recoveryRequest) {
+  if (!sourceRepairRun) throw new Error('CI repair recovery has no trusted source run')
+  const sourceObservationId = `${sourceRepairRun.id}:${sourceRepairRun.run_attempt}`
+  const matchingRecord = (status, transition) => governorRecords.find(record => record.status === status
+    && record.transition === transition
+    && record.subject.type === 'pull-request'
+    && record.subject.number === pullRequestNumber
+    && record.stateVersion === governorStateVersion
+    && record.observationId === sourceObservationId)
+  const existingStarted = matchingRecord('started', governedTransition)
+  if (!existingStarted) {
+    let admittedRecord = matchingRecord('admitted', governedTransition)
+    if (!admittedRecord) {
+      const admission = governorDecision({
+        transition: governedTransition,
+        subject: governorSubject,
+        stateVersion: governorStateVersion,
+        observationId: sourceObservationId,
+        records: governorRecords,
+      })
+      if (admission.action !== 'admit' || !admission.record) {
+        throw new Error(`Cannot rebuild CI repair admission from source observation: ${admission.action}`)
+      }
+      admittedRecord = admission.record
+    }
+    let attemptRecord = matchingRecord('attempt', budgetTransition)
+    if (!attemptRecord) {
+      const budget = governorBudgetDecision({
+        transition: budgetTransition,
+        subject: { type: governorSubject.type, number: governorSubject.number },
+        workIdentity: `branch:${pullRequest.head.ref}`,
+        observationId: sourceObservationId,
+        limit: 3,
+        records: governorRecords,
+      })
+      if (budget.action !== 'attempt' || !budget.record) {
+        throw new Error(`Cannot rebuild CI repair budget attempt from source observation: ${budget.action}`)
+      }
+      attemptRecord = budget.record
+    }
+    governorStartedRecord = createStartedGovernorRecord({ admittedRecord, attemptRecord })
+  }
 } else if (!governorRecords.some(record => ['admitted', 'applied', 'started'].includes(record.status)
   && (record.transition === governedTransition || (recoveryRequest && record.transition === 'workflow-recovery'))
   && record.subject.type === 'pull-request'
@@ -457,7 +532,7 @@ if (ciRequest && !recoveryRequest) {
   throw new Error(`Pull request #${pullRequestNumber} has no current controller-attested repair admission`)
 }
 const executionWorkRequest = transportedRequest ?? Object.freeze({
-  requestId: requestId || `repair-${pullRequestNumber}-${expectedHead}`,
+  requestId: executionRequestId,
   role: repairRole,
 })
 const priorRun = priorComments.find(comment => authenticatedMarker(comment, marker, markerAuthor))

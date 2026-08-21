@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   interruptedRepairMayRetry,
   repairRoutingEvidence,
+  recoverableRepairIdentity,
   recordedRepairStatus,
   recordedRepairState,
 } from '../src/repair-state.mjs'
@@ -113,4 +114,62 @@ test('capacity waiting is re-entrant while terminal repair states remain closed'
       conclusion: 'success',
     }), false)
   }
+})
+
+test('recovery identity restores the exact source WorkRequest and rejects untrusted evidence', () => {
+  const sourceRun = 31775196648
+  const source = [
+    `<!-- dsh-review-repair:${controllerSha}:${'c'.repeat(40)}:ci-run-81-2 -->`,
+    '- Status: **failed**',
+    `- Controller SHA: \`${controllerSha}\``,
+    '- Reviewed head: `' + 'c'.repeat(40) + '`',
+    `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${sourceRun}`,
+  ].join('\n')
+  const comments = [{ user: { login: 'controller' }, body: source }]
+
+  assert.deepEqual(recoverableRepairIdentity({
+    requestId: 'ci-run-81-2.recovery-3',
+    comments,
+    controllerSha,
+    expectedHead: 'c'.repeat(40),
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }), {
+    requestId: 'ci-run-81-2.recovery-3',
+    originalRequestId: 'ci-run-81-2',
+    sourceRunId: String(sourceRun),
+    sourceStatus: 'failed',
+  })
+  assert.deepEqual(recoverableRepairIdentity({
+    requestId: `recovery-${sourceRun}-1`,
+    comments,
+    controllerSha,
+    expectedHead: 'c'.repeat(40),
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }).originalRequestId, 'ci-run-81-2')
+  assert.throws(() => recoverableRepairIdentity({
+    requestId: `recovery-${sourceRun}-1`,
+    comments: [{ user: { login: 'attacker' }, body: source }],
+    controllerSha,
+    expectedHead: 'c'.repeat(40),
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }), /trusted repair source comment/)
+  assert.throws(() => recoverableRepairIdentity({
+    requestId: 'recovery-99-1',
+    comments,
+    controllerSha,
+    expectedHead: 'c'.repeat(40),
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }), /trusted repair source comment/)
+  assert.throws(() => recoverableRepairIdentity({
+    requestId: 'ci-run-81-2.recovery-3',
+    comments: [{ user: { login: 'controller' }, body: source.replace('Reviewed head: `' + 'c'.repeat(40), 'Reviewed head: `' + 'd'.repeat(40)) }],
+    controllerSha,
+    expectedHead: 'c'.repeat(40),
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }), /trusted repair source comment/)
 })

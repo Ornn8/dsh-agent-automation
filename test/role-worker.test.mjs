@@ -7,6 +7,7 @@ import test from 'node:test'
 import { createWorkerExecutionClaim, runRoleWorker } from '../src/role-worker.mjs'
 import { classifyAndCreateWorkerRouteDecision, createLocalWorkerRoutingExecution } from '../src/worker-routing.mjs'
 import { capacityRecordKey, createCapacityRegistry } from '../src/capacity-registry-store.mjs'
+import { recoverableRepairIdentity } from '../src/repair-state.mjs'
 
 const stateVersion = 'a'.repeat(64)
 
@@ -567,6 +568,70 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(committed, 0)
   assert.equal(provider.claims.size, 3)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
+})
+
+test('recovery source identity reaches the original terminal journal and fills its missing commit once', async () => {
+  const head = 'd'.repeat(40)
+  const sourceRun = 31775196648
+  const sourceComments = [{
+    user: { login: 'controller' },
+    body: [
+      `<!-- dsh-review-repair:${'e'.repeat(40)}:${head}:ci-run-81-2 -->`,
+      '- Status: **failed**',
+      `- Controller SHA: \`${'e'.repeat(40)}\``,
+      `- Reviewed head: \`${head}\``,
+      `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${sourceRun}`,
+    ].join('\n'),
+  }]
+  const identity = recoverableRepairIdentity({
+    requestId: `recovery-${sourceRun}-1`,
+    comments: sourceComments,
+    controllerSha: 'e'.repeat(40),
+    expectedHead: head,
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  })
+  for (const outcome of ['completed', 'failed']) {
+    const provider = attemptProvider()
+    let calls = 0
+    let commits = 0
+    const request = { requestId: identity.originalRequestId, role: 'change' }
+    const firstClaim = createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: request,
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    })
+    const firstInput = {
+      executionClaim: firstClaim,
+      invocation: invocation(),
+      adapters: { fake: async () => {
+        calls += 1
+        if (outcome === 'failed') {
+          const error = new Error('durable task failure')
+          error.adapterFailure = {
+            version: 1, category: 'task', reason: 'task-failure', scope: 'worker',
+            phase: 'session', code: 'worker.task-failure', confidence: 'authoritative',
+          }
+          throw error
+        }
+        return { sessionId: 'recovered-source', outcome: 'completed' }
+      } },
+    }
+    if (outcome === 'failed') await assert.rejects(runRoleWorker(firstInput), /durable task failure/)
+    else await runRoleWorker(firstInput)
+    const replay = await runRoleWorker({
+      executionClaim: createWorkerExecutionClaim({
+        config: config(), role: 'change', workRequest: request,
+        subjectStateVersion: stateVersion, capacityProvider: provider,
+      }),
+      invocation: invocation(),
+      onExecutionCommitted: async () => { commits += 1 },
+      adapters: { fake: async () => { throw new Error('recovery replay must not invoke Worker') } },
+    })
+    assert.equal(replay.outcome, 'replayed')
+    assert.equal(replay.priorOutcome, outcome)
+    assert.equal(calls, 1)
+    assert.equal(commits, 1)
+  }
 })
 
 test('capacity deferral leaves the execution commit hook untouched until same-claim reentry starts a Worker', async () => {
