@@ -321,6 +321,59 @@ test('a successful half-open probe replays the same output after the registry ge
   }
 })
 
+for (const failurePhase of ['before', 'after']) {
+  test(`a ${failurePhase}-commit capacity projection failure replays the durable Worker result`, async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), `dsh-role-worker-projection-${failurePhase}-`))
+    try {
+      let now = Date.parse('2026-08-21T00:00:00.000Z')
+      const localConfig = multiScopeConfig(stateRoot)
+      localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+      const registry = createCapacityRegistry({
+        stateRoot,
+        configurationHash: localConfig.configurationHash,
+        credentialGeneration: localConfig.credentialGeneration,
+        workers: localConfig.workers,
+        now: () => now,
+      })
+      await registry.recordFailure({
+        capacityGroup: 'first-group', sourceWorker: 'first', failure: scopedFailure('capacity-group'), now, cooldownMs: 1,
+      })
+      now += 2
+      const completeHalfOpenProbe = registry.completeHalfOpenProbe
+      let projectionCalls = 0
+      registry.completeHalfOpenProbe = async input => {
+        projectionCalls += 1
+        if (failurePhase === 'before') throw new Error(`capacity projection failed ${failurePhase}`)
+        await completeHalfOpenProbe(input)
+        throw new Error(`capacity projection failed ${failurePhase}`)
+      }
+      let adapterCalls = 0
+      const run = () => runRoleWorker({
+        executionClaim: createWorkerExecutionClaim({
+          config: localConfig, role: 'change', workRequest: { requestId: `projection-${failurePhase}`, role: 'change' },
+          subjectStateVersion: stateVersion, capacityProvider: registry,
+        }),
+        invocation: invocation(),
+        adapters: { fake: async () => {
+          adapterCalls += 1
+          return { sessionId: 'completed-session', outcome: 'completed', output: 'durable-output' }
+        } },
+      })
+
+      await assert.rejects(run(), new RegExp(`capacity projection failed ${failurePhase}`))
+      const replay = await run()
+
+      assert.equal(replay.outcome, 'replayed')
+      assert.equal(replay.priorOutcome, 'completed')
+      assert.equal(replay.output, 'durable-output')
+      assert.equal(adapterCalls, 1)
+      assert.equal(projectionCalls, 1)
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true })
+    }
+  })
+}
+
 test('forged execution values are rejected before an adapter starts', async () => {
   let calls = 0
   for (const executionClaim of [1, {}, { generation: 2 }]) {

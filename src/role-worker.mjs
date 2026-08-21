@@ -410,6 +410,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
     let candidateStarted = false
     let invocationAttempted = false
     let probeFinalized = false
+    let attemptFinalized = false
     try {
       if (!prepared.capacity.eligible) {
         unavailable.push(workerId)
@@ -440,14 +441,21 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
       }
       invocationAttempted = true
       const receipt = await runAgentWorker({ config: state.config, workerId, invocation: candidateInvocation, adapters })
-      await completeCapacityProbe(state, prepared.capacity, 'success')
-      probeFinalized = true
       await finishAttempt(state, prepared.claim, {
         outcome: receipt.outcome,
         ...(receipt.outcome === 'completed' && typeof receipt.output === 'string' ? { output: receipt.output } : {}),
       })
+      attemptFinalized = true
+      await completeCapacityProbe(state, prepared.capacity, 'success')
+      probeFinalized = true
       return receipt
     } catch (error) {
+      if (attemptFinalized) {
+        // The durable execution result is authoritative. A capacity projection
+        // failure must not rewrite it or start the Worker again on replay.
+        probeFinalized = true
+        throw error
+      }
       const failureSource = error && typeof error === 'object' && 'adapterFailure' in error
         ? error.adapterFailure
         : error
@@ -488,7 +496,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters } = {
         outcome: 'capacity-failure', category: failure.category, reason: failure.reason,
       })
     } finally {
-      if (!probeFinalized) await completeCapacityProbe(state, prepared.capacity, 'abandon')
+      if (!probeFinalized && !attemptFinalized) await completeCapacityProbe(state, prepared.capacity, 'abandon')
     }
   }
 
