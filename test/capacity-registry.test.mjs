@@ -775,11 +775,52 @@ test('multi-scope recovery claims one atomic probe and remains recoverable after
       failure: capacityFailure(),
     })
     assert.equal((await registry.get(keys[0])).state, 'cooldown')
-    assert.equal((await registry.get(keys[1])).state, 'available')
+    const abandonedWorker = await registry.get(keys[1])
+    assert.equal(abandonedWorker.state, 'cooldown')
+    assert.ok(Date.parse(abandonedWorker.retryAtUtc) > current)
     current += 60_001
-    const recovered = await registry.claimHalfOpenProbe({ keys, leaseId: 'probe-c', owner: 'worker-1' })
+    const recovered = await registry.claimHalfOpenProbe({ keys: [keys[0]], leaseId: 'probe-c', owner: 'worker-1' })
     assert.equal(recovered.probe.leases.length, 1)
     assert.equal(recovered.probe.leases[0].key, keys[0])
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('multi-scope recovery abandons non-matching scopes without losing their own probe eligibility', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-multi-scope-reverse-'))
+  try {
+    let current = now
+    const worker = { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'reverse-group' }
+    const registry = createCapacityRegistry({
+      stateRoot, configurationHash, credentialGeneration, workers: { 'worker-1': worker }, now: () => current,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'reverse-group', sourceWorker: 'worker-1', failure: capacityFailure(), cooldownMs: 1_000,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'reverse-group', sourceWorker: 'worker-1', failure: capacityFailure({ scope: 'worker' }), cooldownMs: 1_000,
+    })
+    current += 60_001
+    const keys = [
+      capacityRecordKey({ capacityGroup: 'reverse-group', scope: 'capacity-group' }),
+      capacityRecordKey({ capacityGroup: 'reverse-group', scope: 'worker', identity: { provider: 'provider-1', model: 'model-1', worker: 'worker-1' } }),
+    ]
+    const claimed = await registry.claimHalfOpenProbe({ keys, leaseId: 'reverse-probe', owner: 'worker-1' })
+    assert.equal(claimed.probe.leases.length, 2)
+    await registry.completeHalfOpenProbe({
+      probe: claimed.probe,
+      outcome: 'failure',
+      failure: capacityFailure({ scope: 'worker' }),
+    })
+    assert.equal((await registry.get(keys[0])).state, 'cooldown')
+    assert.equal((await registry.get(keys[1])).state, 'cooldown')
+    current += 60_001
+    const workerProbe = await registry.claimHalfOpenProbe({
+      keys: [keys[1]], leaseId: 'reverse-worker-probe', owner: 'worker-1',
+    })
+    assert.equal(workerProbe.probe.leases.length, 1)
+    assert.equal(workerProbe.probe.leases[0].key, keys[1])
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }

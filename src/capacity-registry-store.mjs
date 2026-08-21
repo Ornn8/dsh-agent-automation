@@ -1356,7 +1356,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
             ? failure.scope
             : undefined
           const itemFailure = normalizedOutcome === 'failure' && failureScope === current.scope ? failure : undefined
-          const itemOutcome = normalizedOutcome === 'failure' && itemFailure === undefined ? 'success' : normalizedOutcome
+          const itemOutcome = normalizedOutcome === 'failure' && itemFailure === undefined ? 'abandon' : normalizedOutcome
           const next = completeHalfOpenLease(current, {
             leaseId: item.leaseId,
             outcome: itemOutcome,
