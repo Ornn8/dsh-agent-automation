@@ -14,12 +14,14 @@ import {
   CAPACITY_RECORD_SCOPES,
   CAPACITY_RECORD_STATES,
   acquireHalfOpenLease,
+  capacityEligibility,
   createCapacityRecord,
   invalidateCapacityRecord,
   parseCapacityRecord,
   projectWorkerCapacityIdentity,
   recordCapacityFailure,
   completeHalfOpenLease,
+  scopeCapacityIdentity,
 } from './capacity-registry.mjs'
 
 export const CAPACITY_ATTEMPT_RESULTS = Object.freeze([
@@ -56,6 +58,9 @@ const GATE_OWNER_FILE_PATTERN = /^registry-owner\.[A-Za-z0-9._:-]{1,128}\.json$/
 /** @typedef {{key?: string, capacityGroup: string, scope?: string, sourceWorker: string, failure: unknown, now?: number, cooldownMs?: number}} RegistryFailureInput */
 /** @typedef {{key: string, leaseId: string, owner: string, now?: number, leaseMs?: number}} RegistryLeaseInput */
 /** @typedef {{key: string, leaseId: string, outcome: string, failure?: unknown, now?: number, cooldownMs?: number, sourceWorker?: string}} RegistryCompletionInput */
+/** @typedef {{workerId: string, leaseId: string, owner: string, now?: number, leaseMs?: number}} RegistryProbeClaimInput */
+/** @typedef {{workerId: string, capacityGroup: string, identity: CapacityIdentity, leases: {key: string, scope: string, leaseId: string, identity: CapacityIdentity}[]}} RegistryProbe */
+/** @typedef {{probe: RegistryProbe, outcome: string, failure?: unknown, now?: number, cooldownMs?: number}} RegistryProbeCompletionInput */
 
 /** @param {unknown} value @param {string} name @returns {string} */
 function identifier(value, name) {
@@ -1202,6 +1207,56 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
     if (direct) return { workerId: raw, ...direct }
     throw new Error(`Unknown capacity Worker ${raw}`)
   }
+  /** @param {Record<string, any>} document @param {string} workerId @param {number} nowMs */
+  function workerScopeDecision(document, workerId, nowMs) {
+    const snapshot = workerSnapshot(workerId)
+    const entries = []
+    let blocked = null
+    for (const scope of ['capacity-group', 'provider', 'model', 'worker']) {
+      if (scope === 'provider' && snapshot.identity.provider === null) continue
+      if (scope === 'model' && (snapshot.identity.provider === null || snapshot.identity.model === null)) continue
+      const key = capacityRecordKey({ capacityGroup: snapshot.capacityGroup, scope, identity: snapshot.identity })
+      const current = document.records[key]
+      if (!current) continue
+      const refreshed = invalidateCapacityRecord(current, { ...identity, now: nowMs })
+      const decision = capacityEligibility(refreshed, { now: nowMs })
+      const entry = {
+        key,
+        scope,
+        record: decision.record,
+        requiresProbe: decision.requiresProbe === true,
+        identity: decision.record.capacityIdentity,
+      }
+      entries.push(entry)
+      if (!decision.eligible && !blocked) blocked = decision.state
+    }
+    const due = entries.filter(entry => entry.requiresProbe)
+    return {
+      snapshot,
+      entries,
+      due,
+      eligible: blocked === null,
+      startState: blocked ?? (due.length ? 'half-open' : 'available'),
+      capacityGeneration: entries.reduce((highest, entry) => Math.max(highest, entry.record.generation), 0),
+    }
+  }
+
+  /** @param {string} workerId @param {number} nowMs */
+  async function inspectWorkerScopes(workerId, nowMs) {
+    const snapshot = await readRegistrySnapshot(stateRoot)
+    return workerScopeDecision(snapshot.document, workerId, nowMs)
+  }
+
+  /** @param {Record<string, any>} probe @param {Record<string, any>} snapshot @param {string} scope @param {string} key */
+  function assertProbeIdentity(probe, snapshot, scope, key) {
+    const expectedIdentity = scopeCapacityIdentity(scope, snapshot.identity)
+    const expectedKey = capacityRecordKey({ capacityGroup: snapshot.capacityGroup, scope, identity: expectedIdentity })
+    if (probe.key !== expectedKey || probe.scope !== scope || JSON.stringify(probe.identity) !== JSON.stringify(expectedIdentity)) {
+      throw new Error('Capacity probe identity does not match the trusted Worker snapshot')
+    }
+    if (probe.leaseId === undefined) throw new Error('Capacity probe leaseId is required')
+    identifier(probe.leaseId, 'capacity probe leaseId')
+  }
   const identity = { configurationHash, credentialGeneration }
   const clock = typeof now === 'function' ? now : now === undefined ? () => Date.now() : () => now
   return {
@@ -1222,6 +1277,21 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
     async get(key) {
       identifier(key, 'capacity registry key')
       return (await this.records())[key] ?? null
+    },
+    /** Inspect every applicable scope for one trusted Worker without claiming a probe. */
+    /** @param {{workerId: string, now?: number}} input */
+    async inspect({ workerId, now: inspectionTime }) {
+      const decision = await inspectWorkerScopes(workerId, inspectionTime ?? clock())
+      return {
+        workerId,
+        capacityGroup: decision.snapshot.capacityGroup,
+        identity: decision.snapshot.identity,
+        eligible: decision.eligible,
+        startState: decision.startState,
+        capacityGeneration: decision.capacityGeneration,
+        records: decision.entries,
+        probeScopes: decision.due.map(entry => entry.scope),
+      }
     },
     /** @param {RegistryFailureInput} input */
     async recordFailure({ key, capacityGroup, scope, sourceWorker, failure, now: observationTime, cooldownMs }) {
@@ -1252,6 +1322,136 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         document.document.records[key] = acquired.record
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return acquired
+      }, { now: clock })
+    },
+    /** Atomically claim all expired applicable scopes for one trusted Worker. */
+    /** @param {RegistryProbeClaimInput} input */
+    async claimHalfOpenProbe({ workerId, leaseId, owner, now: probeTime, leaseMs }) {
+      const snapshot = workerSnapshot(workerId)
+      identifier(leaseId, 'capacity probe leaseId')
+      identifier(owner, 'capacity probe owner')
+      return withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
+        const nowMs = probeTime ?? clock()
+        const document = await readRegistrySnapshot(stateRoot)
+        const decision = workerScopeDecision(document.document, workerId, nowMs)
+        if (!decision.eligible || !decision.due.length) {
+          if (decision.entries.some(entry => JSON.stringify(document.document.records[entry.key]) !== JSON.stringify(entry.record))) {
+            for (const entry of decision.entries) document.document.records[entry.key] = entry.record
+            await writeCapacityRegistry(stateRoot, document.document, lease)
+          }
+          return {
+            eligible: decision.eligible,
+            startState: decision.startState,
+            capacityGeneration: decision.capacityGeneration,
+            records: decision.entries,
+            probe: null,
+          }
+        }
+        const acquired = []
+        for (const entry of decision.due) {
+          const next = acquireHalfOpenLease(entry.record, {
+            leaseId,
+            owner,
+            now: nowMs,
+            leaseMs,
+          })
+          if (!next) {
+            return {
+              eligible: false,
+              startState: 'half-open',
+              capacityGeneration: decision.capacityGeneration,
+              records: decision.entries,
+              probe: null,
+            }
+          }
+          acquired.push({
+            key: entry.key,
+            scope: entry.scope,
+            leaseId: next.lease.leaseId,
+            identity: entry.identity,
+          })
+          document.document.records[entry.key] = next.record
+        }
+        await writeCapacityRegistry(stateRoot, document.document, lease)
+        return {
+          eligible: true,
+          startState: 'half-open',
+          capacityGeneration: Math.max(decision.capacityGeneration, ...decision.due.map(entry => entry.record.generation + 1)),
+          records: decision.entries.map(entry => ({
+            ...entry,
+            record: document.document.records[entry.key] ?? entry.record,
+          })),
+          probe: { workerId, capacityGroup: snapshot.capacityGroup, identity: snapshot.identity, leases: acquired },
+        }
+      }, { now: clock })
+    },
+    /** Complete or abandon every lease from one trusted multi-scope probe. */
+    /** @param {RegistryProbeCompletionInput} input */
+    async completeHalfOpenProbe({ probe, outcome, failure, now: completionTime, cooldownMs }) {
+      if (!probe || !Array.isArray(probe.leases) || probe.leases.length < 1) return null
+      if (!['success', 'failure', 'abandon'].includes(outcome)) throw new Error('capacity probe outcome must be success, failure, or abandon')
+      const snapshot = workerSnapshot(probe.workerId)
+      if (snapshot.capacityGroup !== probe.capacityGroup || JSON.stringify(snapshot.identity) !== JSON.stringify(probe.identity)) {
+        throw new Error('Capacity probe owner identity does not match the trusted Worker snapshot')
+      }
+      const normalizedFailure = outcome === 'failure' ? parseAdapterFailure(failure) : null
+      return withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
+        const nowMs = completionTime ?? clock()
+        const document = await readRegistrySnapshot(stateRoot)
+        const records = []
+        let matchingFailureClaimed = false
+        for (const item of probe.leases) {
+          assertProbeIdentity(item, snapshot, item.scope, item.key)
+          const current = document.document.records[item.key]
+          if (!current) throw new Error(`Unknown capacity registry key ${item.key}`)
+          if (JSON.stringify(current.capacityIdentity) !== JSON.stringify(item.identity)) {
+            throw new Error('Capacity probe record identity does not match its claimed identity')
+          }
+          const matchingFailure = normalizedFailure && normalizedFailure.scope === current.scope
+            ? normalizedFailure
+            : undefined
+          matchingFailureClaimed ||= matchingFailure !== undefined
+          const itemOutcome = outcome === 'failure' && !matchingFailure ? 'abandon' : outcome
+          const next = completeHalfOpenLease(current, {
+            leaseId: item.leaseId,
+            outcome: itemOutcome,
+            ...(matchingFailure ? { failure: matchingFailure } : {}),
+            now: nowMs,
+            cooldownMs,
+          })
+          document.document.records[item.key] = next
+          records.push({ key: item.key, scope: current.scope, record: next })
+        }
+        if (outcome === 'failure' && normalizedFailure && !matchingFailureClaimed) {
+          const failureIdentity = scopeCapacityIdentity(normalizedFailure.scope, snapshot.identity)
+          const failureKey = capacityRecordKey({
+            capacityGroup: snapshot.capacityGroup,
+            scope: normalizedFailure.scope,
+            identity: failureIdentity,
+          })
+          const current = document.document.records[failureKey]
+          if (current?.state === 'half-open' && current.lease) {
+            throw new Error(`Capacity failure scope ${normalizedFailure.scope} is owned by another probe`)
+          }
+          const seed = current ?? createCapacityRecord({
+            ...identity,
+            capacityGroup: snapshot.capacityGroup,
+            scope: normalizedFailure.scope,
+            sourceWorker: snapshot.workerId,
+            capacityIdentity: failureIdentity,
+            now: nowMs,
+          })
+          const next = recordCapacityFailure(seed, normalizedFailure, {
+            sourceWorker: snapshot.workerId,
+            capacityIdentity: failureIdentity,
+            now: nowMs,
+            cooldownMs,
+          })
+          document.document.records[failureKey] = next
+          records.push({ key: failureKey, scope: normalizedFailure.scope, record: next })
+        }
+        await writeCapacityRegistry(stateRoot, document.document, lease)
+        return records
       }, { now: clock })
     },
     /** @param {RegistryCompletionInput} input */
