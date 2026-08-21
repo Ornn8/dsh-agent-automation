@@ -65,7 +65,7 @@ const config = await loadConfig()
 const role = transportedRequest?.role || requiredEnv('AGENT_ROLE')
 const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
   ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
-  : { route: 'default' }
+  : undefined
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
@@ -376,6 +376,8 @@ const governedTransition = ciRequest
     ? reviewRepairTransition(reviewObservationId)
     : 'review-repair'
 const budgetTransition = ciRequest ? 'ci-repair' : mergeRequest ? 'merge-repair' : 'review-repair'
+let repairBudget = null
+let governorAttemptRecorded = false
 if (ciRequest && !recoveryRequest) {
   const admission = governorDecision({
     transition: governedTransition,
@@ -397,7 +399,7 @@ if (ciRequest && !recoveryRequest) {
     cancellation.dispose()
     process.exit(0)
   }
-  const budget = governorBudgetDecision({
+  repairBudget = governorBudgetDecision({
     transition: budgetTransition,
     subject: { type: governorSubject.type, number: governorSubject.number },
     workIdentity: `branch:${pullRequest.head.ref}`,
@@ -405,11 +407,10 @@ if (ciRequest && !recoveryRequest) {
     limit: 3,
     records: governorRecords,
   })
-  if (budget.record) await writeGovernorRecord(budget.record)
-  if (!budget.execute) {
-    if (budget.action !== 'pause') {
+  if (!repairBudget.execute) {
+    if (repairBudget.action !== 'pause') {
       cancellation.dispose()
-      process.stdout.write(`Governor ${budget.action}; CI repair did not start a model.\n`)
+      process.stdout.write(`Governor ${repairBudget.action}; CI repair did not start a model.\n`)
       process.exit(0)
     }
     await setRepairLabels({ add: ['automation/paused'], remove: ['automation/ci-failed', 'automation/repairing'] })
@@ -417,14 +418,6 @@ if (ciRequest && !recoveryRequest) {
     process.stdout.write(`CI repair budget exhausted for pull request #${pullRequestNumber}; no model was started.\n`)
     process.exit(0)
   }
-  await writeGovernorRecord({
-    version: 1,
-    status: 'applied',
-    transition: governedTransition,
-    subject: { type: governorSubject.type, number: governorSubject.number },
-    stateVersion: governorStateVersion,
-    observationId: governorObservationId,
-  })
 } else if (!governorRecords.some(record => ['admitted', 'applied'].includes(record.status)
   && (record.transition === governedTransition || (recoveryRequest && record.transition === 'workflow-recovery'))
   && record.subject.type === 'pull-request'
@@ -468,6 +461,7 @@ const priorReviewCheckIds = ciRequest || mergeRequest ? null : await reviewCheck
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-repair-${pullRequestNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
+let deferred = false
 
 try {
   await run(config.ghExecutable, [
@@ -496,11 +490,28 @@ try {
     ...(ciRequest ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
   })
 
+  const onCandidateReady = async () => {
+    if (!ciRequest || !repairBudget?.execute || governorAttemptRecorded) return
+    if (repairBudget.record) await writeGovernorRecord(repairBudget.record)
+    await writeGovernorRecord({
+      version: 1,
+      status: 'applied',
+      transition: governedTransition,
+      subject: { type: governorSubject.type, number: governorSubject.number },
+      stateVersion: governorStateVersion,
+      observationId: governorObservationId,
+    })
+    governorAttemptRecorded = true
+  }
+
   const workerReceipt = await runRoleWorker({
     config,
     role,
     workRequest: transportedRequest || { requestId: requestId || `repair-${expectedHead}`, role },
     routeDecision,
+    subjectStateVersion: governorStateVersion,
+    routingPolicy: config.operations.routing?.[role],
+    onCandidateReady,
     invocation: {
       taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
       cwd: checkoutPath,
@@ -518,13 +529,12 @@ try {
     await setRepairLabels({ remove: ['automation/repairing'] })
     await upsertStatus('capacity-deferred', branch, workerReceipt.detail)
     process.stdout.write(`All routed repair Workers are at capacity for PR #${pullRequestNumber}; the repair remains deferred.\n`)
-    process.exit(0)
-  }
-
-  const baselineReference = ciRequest
+    deferred = true
+  } else {
+    const baselineReference = ciRequest
     ? ciBaselineIssueFromReceipt({ receipt: workerReceipt, repository })
     : null
-  if (baselineReference) {
+    if (baselineReference) {
     const baselineIssue = await ghJson([
       'api', `repos/${repository}/issues/${baselineReference.number}`,
     ], 'reported CI baseline Issue')
@@ -544,8 +554,8 @@ try {
     await upsertStatus('blocked-baseline', branch,
       `Session ${workerReceipt.sessionId} verified the separate default-branch baseline Issue: ${baselineReference.url} (${verifiedBaseline.identity.key}).`)
     process.stdout.write(`DSH identified CI baseline Issue #${baselineReference.number}; the pull request remains unchanged.\n`)
-  } else {
-    if (workerReceipt.outcome === 'blocked') {
+    } else {
+      if (workerReceipt.outcome === 'blocked') {
       const blocked = nonBaselineBlockFromReceipt(workerReceipt)
       if (!blocked) throw new Error('DSH reported blocked without a terminal automation result')
       await setRepairLabels({
@@ -555,7 +565,7 @@ try {
       await upsertStatus('blocked', branch,
         `Session ${workerReceipt.sessionId} ended with the valid ${blocked.reason} outcome; no baseline Issue was dispatched.`)
       process.stdout.write(`DSH ended repair for pull request #${pullRequestNumber} with ${blocked.reason}; no retry was scheduled.\n`)
-    } else {
+      } else {
       const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
       const currentCiRun = ciRequest
         ? await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run after repair')
@@ -583,6 +593,7 @@ try {
       } else {
         throw new Error('DSH exited successfully without advancing the head or proving the documented same-head completion')
       }
+      }
     }
   }
 } catch (error) {
@@ -598,3 +609,5 @@ try {
   cancellation.dispose()
   await removeJobDirectory(runnerTemp, jobPath)
 }
+
+if (deferred) process.exitCode = 0

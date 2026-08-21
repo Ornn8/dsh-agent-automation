@@ -19,6 +19,7 @@ import {
 } from '../src/capacity-registry.mjs'
 import {
   appendCapacityAttempt,
+  claimCapacityAttempt,
   capacityRecordKey,
   capacityRegistryPaths,
   createCapacityAttempt,
@@ -116,6 +117,10 @@ test('capacity state machine grants one half-open probe and excludes ordinary fa
   const available = completeHalfOpenLease(acquired.record, { leaseId: 'lease-1', outcome: 'success', now: now + 31_000 })
   assert.equal(available.state, 'available')
   assert.equal(available.lease, null)
+  const abandoned = completeHalfOpenLease(acquired.record, { leaseId: 'lease-1', outcome: 'abandon', now: now + 31_000 })
+  assert.equal(abandoned.state, 'cooldown')
+  assert.equal(abandoned.lease, null)
+  assert.equal(abandoned.reason, cooldown.reason)
   assert.throws(() => recordCapacityFailure(available, {
     version: 1, category: 'protocol', reason: 'protocol-invalid', scope: 'worker',
     phase: 'pre-session', code: 'protocol.invalid', confidence: 'authoritative',
@@ -349,6 +354,20 @@ test('attempt journal is bounded, idempotent, and survives immutable compaction'
     const files = await readdir(capacityRegistryPaths(stateRoot).directory)
     assert.ok(files.some(name => name.startsWith('attempt-base.')))
     assert.ok(files.filter(name => name.startsWith('attempt-event.')).length < 68)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('attempt claims are atomic under the capacity registry lock', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-claim-'))
+  try {
+    const claimed = await Promise.all([
+      claimCapacityAttempt(stateRoot, attempt({ result: { outcome: 'claimed' } }), { waitMs: 60_000 }),
+      claimCapacityAttempt(stateRoot, attempt({ result: { outcome: 'claimed' } }), { waitMs: 60_000 }),
+    ])
+    assert.deepEqual(claimed.map(value => value.claimed).sort(), [false, true])
+    assert.deepEqual((await readCapacityAttempts(stateRoot)).map(value => value.result.outcome), ['claimed'])
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }

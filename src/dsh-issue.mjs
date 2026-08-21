@@ -34,7 +34,7 @@ const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
 const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
   ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
-  : { route: 'default' }
+  : undefined
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
@@ -216,6 +216,7 @@ if (agentWork) {
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-issue-${issueNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
+let deferred = false
 
 try {
   for (const label of ['agent/dsh-blocked', 'agent/dsh-failed']) {
@@ -261,6 +262,8 @@ try {
     role: stage.role,
     workRequest,
     routeDecision,
+    subjectStateVersion: governorStateVersion,
+    routingPolicy: config.operations.routing?.[stage.role],
     invocation: {
       taskId: `issue-${repository}-${issueNumber}-${issueRequestId}`,
       cwd: checkoutPath,
@@ -277,7 +280,7 @@ try {
   if (workerReceipt.outcome === 'capacity-deferred') {
     await upsertStatus(statusBody('capacity-deferred', branch, workerReceipt.detail))
     process.stdout.write(`All routed change Workers are at capacity for Issue #${issueNumber}; the WorkRequest remains deferred.\n`)
-    process.exit(0)
+    deferred = true
   } else if (workerReceipt.outcome === 'blocked') {
     await run(config.ghExecutable, [
       'label', 'create', 'agent/dsh-blocked', '--repo', repository,
@@ -329,3 +332,5 @@ try {
   cancellation.dispose()
   await removeJobDirectory(runnerTemp, jobPath)
 }
+
+if (deferred) process.exitCode = 0

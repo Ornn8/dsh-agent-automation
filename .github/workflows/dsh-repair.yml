@@ -25,6 +25,10 @@ on:
         required: false
         type: string
         default: ''
+      worker_route_decision:
+        required: false
+        type: string
+        default: ''
 concurrency:
   group: dsh-repair-${{ github.repository }}-${{ inputs.pull_request_number }}
   cancel-in-progress: false
@@ -55,6 +59,7 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           REPAIR_REQUEST_ID: ${{ inputs.request_id }}
           WORK_REQUEST_JSON: ${{ inputs.work_request }}
+          WORKER_ROUTE_DECISION_JSON: ${{ inputs.worker_route_decision }}
           CI_WORKFLOW_NAME: ${{ inputs.ci_workflow_name }}
           REPAIR_CAUSE: ${{ inputs.repair_cause }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}

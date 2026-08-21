@@ -2,6 +2,7 @@ import { annotateAdapterFailure, canFailoverCapacityFailure, parseAdapterFailure
 import { capacityEligibility, projectWorkerCapacityIdentity } from './capacity-registry.mjs'
 import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry } from './capacity-registry-store.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
+import { parseWorkerRouteDecision } from './worker-routing.mjs'
 
 const TERMINAL_OUTCOMES = new Set([
   'completed', 'blocked', 'superseded', 'timed-out', 'failed',
@@ -156,6 +157,7 @@ async function workerCapacityState(registry, config, worker, workerId, now, leas
   }
   if (!registry || typeof registry.get !== 'function') return result
   const scopes = ['capacity-group', 'provider', 'model', 'worker']
+  const probes = []
   for (const scope of scopes) {
     if (scope === 'provider' && snapshot.identity.provider === null) continue
     if (scope === 'model' && (snapshot.identity.provider === null || snapshot.identity.model === null)) continue
@@ -175,41 +177,37 @@ async function workerCapacityState(registry, config, worker, workerId, now, leas
       continue
     }
     if (eligibility.requiresProbe) {
-      if (result.probe) {
-        result.eligible = false
-        result.startState = 'half-open'
-        continue
-      }
-      if (typeof registry.acquireHalfOpenLease !== 'function') {
-        result.eligible = false
-        result.startState = 'cooldown'
-        continue
-      }
-      const leaseId = journalIdentifier(`${leaseOwner}-${workerId}-${scope}`, 'capacity-probe')
-      const acquired = await registry.acquireHalfOpenLease({
-        key,
-        leaseId,
-        owner: journalIdentifier(leaseOwner, 'role-worker'),
-        now,
-      })
-      if (!acquired) {
-        result.eligible = false
-        result.startState = 'half-open'
-        continue
-      }
-      result.startState = 'half-open'
-      result.capacityGeneration = Math.max(result.capacityGeneration, acquired.record?.generation ?? record.generation + 1)
-      result.probe = { key, leaseId, scope }
+      probes.push({ key, scope, generation: eligibility.record.generation })
     }
   }
-  if (!result.eligible && result.probe && typeof registry.completeHalfOpenLease === 'function') {
-    await registry.completeHalfOpenLease({
-      key: result.probe.key,
-      leaseId: result.probe.leaseId,
-      outcome: 'success',
+  if (!result.eligible) return result
+  if (probes.length > 1) {
+    result.eligible = false
+    result.startState = 'half-open'
+    return result
+  }
+  if (probes.length === 1) {
+    if (typeof registry.acquireHalfOpenLease !== 'function') {
+      result.eligible = false
+      result.startState = 'cooldown'
+      return result
+    }
+    const [{ key, scope, generation }] = probes
+    const leaseId = journalIdentifier(`${leaseOwner}-${workerId}-${scope}`, 'capacity-probe')
+    const acquired = await registry.acquireHalfOpenLease({
+      key,
+      leaseId,
+      owner: journalIdentifier(leaseOwner, 'role-worker'),
       now,
     })
-    result.probe = null
+    if (!acquired) {
+      result.eligible = false
+      result.startState = 'half-open'
+      return result
+    }
+    result.startState = 'half-open'
+    result.capacityGeneration = Math.max(result.capacityGeneration, acquired.record?.generation ?? generation + 1)
+    result.probe = { key, leaseId, scope }
   }
   return result
 }
@@ -236,10 +234,39 @@ async function completeCapacityProbe(registry, state, failure, now) {
   })
 }
 
+/** @param {object|null} registry @param {Record<string, any>} state @param {number} now */
+async function abandonCapacityProbe(registry, state, now) {
+  if (!state.probe || typeof registry?.completeHalfOpenLease !== 'function') return
+  await registry.completeHalfOpenLease({
+    key: state.probe.key,
+    leaseId: state.probe.leaseId,
+    outcome: 'abandon',
+    now,
+  })
+  state.probe = null
+}
+
 /** @param {object|null} registry @param {Record<string, any>} input @returns {Promise<void>} */
 async function appendRoleAttempt(registry, input) {
   if (typeof registry?.appendAttempt !== 'function') return
   await registry.appendAttempt(createCapacityAttempt(input))
+}
+
+/** @param {object|null} registry @param {Record<string, any>} input @returns {Promise<boolean>} */
+async function claimRoleAttempt(registry, input) {
+  if (typeof registry?.claimAttempt === 'function') {
+    const claimed = await registry.claimAttempt(createCapacityAttempt({
+      ...input,
+      result: { outcome: 'claimed' },
+    }))
+    return claimed?.claimed === true
+  }
+  if (typeof registry?.appendAttempt !== 'function') return true
+  const claimed = await registry.appendAttempt(createCapacityAttempt({
+    ...input,
+    result: { outcome: 'claimed' },
+  }))
+  return claimed?.result?.outcome === 'claimed'
 }
 
 /**
@@ -258,16 +285,31 @@ export async function runRoleWorker({
   adapters,
   capacityRegistry,
   routingAttemptId,
+  subjectStateVersion,
+  routingPolicy,
+  onCandidateReady,
 } = {}) {
-  if (!['change', 'review', 'maintenance'].includes(role)) throw new Error(`Worker routing is not available for ${String(role)}`)
-  const candidates = resolveWorkerCandidates({ config, role, routeDecision })
+  if (!['change', 'review'].includes(role)) throw new Error(`Worker routing is not available for ${String(role)}`)
+  const boundRouteDecision = routeDecision === undefined || routeDecision === null
+    ? undefined
+    : parseWorkerRouteDecision(routeDecision, {
+      workRequest,
+      subjectStateVersion,
+      routingPolicy,
+    })
+  if (boundRouteDecision && !subjectStateVersion) {
+    throw new Error('WorkerRouteDecision execution requires the current subject state version')
+  }
+  const candidates = resolveWorkerCandidates({
+    config,
+    role,
+    routeDecision: boundRouteDecision ? { route: boundRouteDecision.taskClass } : undefined,
+  })
   if (!candidates.length) throw new Error(`Worker route for ${role} has no eligible candidates`)
   const registry = roleCapacityRegistry(config, capacityRegistry)
-  const taskClass = typeof routeDecision === 'object' && routeDecision !== null
-    ? String(routeDecision.taskClass ?? routeDecision.route ?? 'default')
-    : typeof routeDecision === 'string' ? routeDecision : 'default'
-  const routePolicyHash = typeof routeDecision === 'object' && routeDecision !== null && DIGEST.test(routeDecision.policyHash || '')
-    ? routeDecision.policyHash
+  const taskClass = boundRouteDecision?.taskClass || 'default'
+  const routePolicyHash = boundRouteDecision && DIGEST.test(boundRouteDecision.policyHash || '')
+    ? boundRouteDecision.policyHash
     : DIGEST.test(config?.configurationHash || '') ? config.configurationHash : '0'.repeat(64)
   const workRequestId = journalIdentifier(workRequest?.requestId ?? invocation?.taskId, 'role-work')
   const attemptRoot = journalIdentifier(routingAttemptId ?? `${workRequestId}-${role}`, 'routing-attempt')
@@ -285,7 +327,24 @@ export async function runRoleWorker({
       unavailable.push(workerId)
       continue
     }
+    const attemptBase = {
+      attemptId: journalIdentifier(`${attemptRoot}-${workerId}-g${capacity.capacityGeneration}`, 'routing-attempt'),
+      workRequestId,
+      routePolicyHash,
+      taskClass,
+      workerId,
+      capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
+      capacityGeneration: capacity.capacityGeneration,
+      startState: capacity.startState,
+      startedAt,
+    }
+    if (!await claimRoleAttempt(registry, attemptBase)) {
+      unavailable.push(workerId)
+      await abandonCapacityProbe(registry, capacity, Date.now())
+      continue
+    }
     try {
+      await onCandidateReady?.({ workerId, capacity, workRequest, role })
       const candidateInvocation = typeof invocation?.onStarted === 'function'
         ? {
             ...invocation,
@@ -295,15 +354,8 @@ export async function runRoleWorker({
       const receipt = await runAgentWorker({ config, workerId, invocation: candidateInvocation, adapters })
       await completeCapacityProbe(registry, capacity, undefined, Date.now())
       await appendRoleAttempt(registry, {
-        attemptId: journalIdentifier(`${attemptRoot}-${workerId}`, 'routing-attempt'),
-        workRequestId,
-        routePolicyHash,
-        taskClass,
-        workerId,
-        capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
-        capacityGeneration: capacity.capacityGeneration,
-        startState: capacity.startState,
-        startedAt,
+        ...attemptBase,
+        attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
         endedAt: Date.now(),
         result: { outcome: receipt.outcome },
       })
@@ -311,18 +363,12 @@ export async function runRoleWorker({
     } catch (error) {
       const failure = parseAdapterFailure(error?.adapterFailure ?? error)
       const safeCapacityFailover = canFailoverCapacityFailure(failure)
-        && (role === 'review' || failure.phase === 'pre-session')
+        && (role === 'review' || (failure.phase === 'pre-session' && worker.adapter !== 'command-json'))
       if (!safeCapacityFailover) {
+        await abandonCapacityProbe(registry, capacity, Date.now())
         await appendRoleAttempt(registry, {
-          attemptId: journalIdentifier(`${attemptRoot}-${workerId}`, 'routing-attempt'),
-          workRequestId,
-          routePolicyHash,
-          taskClass,
-          workerId,
-          capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
-          capacityGeneration: capacity.capacityGeneration,
-          startState: capacity.startState,
-          startedAt,
+          ...attemptBase,
+          attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
           endedAt: Date.now(),
           result: { outcome: 'failed', category: failure.category, reason: failure.reason },
         })
@@ -339,15 +385,8 @@ export async function runRoleWorker({
       }
       await completeCapacityProbe(registry, capacity, failure, Date.now())
       await appendRoleAttempt(registry, {
-        attemptId: journalIdentifier(`${attemptRoot}-${workerId}`, 'routing-attempt'),
-        workRequestId,
-        routePolicyHash,
-        taskClass,
-        workerId,
-        capacityGroup: capacityWorkerSnapshot(worker, workerId).capacityGroup,
-        capacityGeneration: capacity.capacityGeneration,
-        startState: capacity.startState,
-        startedAt,
+        ...attemptBase,
+        attemptId: journalIdentifier(`${attemptBase.attemptId}-result`, 'routing-attempt'),
         endedAt: Date.now(),
         result: { outcome: 'capacity-failure', category: failure.category, reason: failure.reason },
       })

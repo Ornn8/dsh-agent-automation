@@ -64,6 +64,7 @@ jobs:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-issue.yml@{{CONTROLLER_SHA}}
     with:
       work_request: ${{ toJSON(github.event.client_payload.work_request) }}
+      worker_route_decision: ${{ github.event.client_payload.worker_route_decision || '' }}
 
   reconcile-reviews:
     if: >-

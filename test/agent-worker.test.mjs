@@ -8,6 +8,7 @@ import { createAgentAdapters } from '../src/agent-adapters.mjs'
 import { parseClaudeCodeOutput } from '../src/claude-code-cli.mjs'
 import { parseOpenCodeRunOutput } from '../src/opencode-cli.mjs'
 import { capacityRecordKey, createCapacityRegistry } from '../src/capacity-registry-store.mjs'
+import { classifyAndCreateWorkerRouteDecision } from '../src/worker-routing.mjs'
 
 test('a controller invokes any configured worker through one interface', async () => {
   const invocations = []
@@ -89,6 +90,16 @@ function capacityError(phase = 'pre-session') {
   return error
 }
 
+const routePolicy = { routes: { default: {} } }
+
+function durableRouteDecision(workRequest, stateVersion = 'c'.repeat(64)) {
+  return classifyAndCreateWorkerRouteDecision({
+    workRequest,
+    subjectStateVersion: stateVersion,
+    routingPolicy: routePolicy,
+  })
+}
+
 function fakeRegistry({ closed = false, failures = [], attempts = [] } = {}) {
   return {
     async get(key) {
@@ -122,7 +133,6 @@ test('runRoleWorker fails over a review capacity error within one exact invocati
   const result = await runRoleWorker({
     config: roleConfig('review'),
     role: 'review',
-    routeDecision: { route: 'default' },
     invocation: roleInvocation(),
     capacityRegistry: fakeRegistry({ failures, attempts }),
     adapters: {
@@ -140,14 +150,17 @@ test('runRoleWorker fails over a review capacity error within one exact invocati
   assert.equal(calls[0].invocation.cwd, calls[1].invocation.cwd)
   assert.equal(failures.length, 1)
   assert.equal(failures[0].sourceWorker, 'primary')
-  assert.deepEqual(attempts.map(attempt => attempt.result.outcome), ['capacity-failure', 'completed'])
+  assert.deepEqual(
+    attempts.filter(attempt => attempt.result.outcome !== 'claimed').map(attempt => attempt.result.outcome),
+    ['capacity-failure', 'completed'],
+  )
 })
 
 test('runRoleWorker permits only pre-session change failover', async () => {
   const calls = []
   let first = true
   const result = await runRoleWorker({
-    config: roleConfig('change'), role: 'change', routeDecision: { route: 'default' },
+    config: roleConfig('change'), role: 'change',
     invocation: roleInvocation(), capacityRegistry: fakeRegistry(),
     adapters: {
       fake: async input => {
@@ -162,7 +175,7 @@ test('runRoleWorker permits only pre-session change failover', async () => {
 
   first = true
   await assert.rejects(runRoleWorker({
-    config: roleConfig('change'), role: 'change', routeDecision: { route: 'default' },
+    config: roleConfig('change'), role: 'change',
     invocation: roleInvocation(), capacityRegistry: fakeRegistry(),
     adapters: {
       fake: async ({ invocation }) => {
@@ -179,7 +192,7 @@ test('runRoleWorker permits only pre-session change failover', async () => {
 
 test('runRoleWorker returns structured capacity-deferred when every candidate is closed', async () => {
   const result = await runRoleWorker({
-    config: roleConfig('change'), role: 'change', routeDecision: { route: 'default' },
+    config: roleConfig('change'), role: 'change',
     invocation: roleInvocation(), capacityRegistry: fakeRegistry({ closed: true }),
     adapters: { fake: async () => { throw new Error('must not invoke a closed candidate') } },
   })
@@ -202,7 +215,6 @@ test('runRoleWorker closes a shared capacity group before considering its next c
     const result = await runRoleWorker({
       config,
       role: 'change',
-      routeDecision: { route: 'default' },
       invocation: roleInvocation(),
       adapters: {
         fake: async () => {
@@ -229,11 +241,200 @@ test('runRoleWorker closes a shared capacity group before considering its next c
 test('runRoleWorker keeps non-capacity failures on the original recovery path', async () => {
   const calls = []
   await assert.rejects(runRoleWorker({
-    config: roleConfig('review'), role: 'review', routeDecision: { route: 'default' },
+    config: roleConfig('review'), role: 'review',
     invocation: roleInvocation(), capacityRegistry: fakeRegistry(),
     adapters: { fake: async ({ workerId }) => { calls.push(workerId); throw new Error('task failed') } },
   }), /task failed/)
   assert.deepEqual(calls, ['primary'])
+})
+
+test('runRoleWorker executes a controller decision only under the current routing policy', async () => {
+  const workRequest = { requestId: 'role-work-policy', role: 'change' }
+  const decision = durableRouteDecision(workRequest)
+  const receipt = await runRoleWorker({
+    config: roleConfig(), role: 'change', workRequest,
+    routeDecision: decision, subjectStateVersion: 'c'.repeat(64), routingPolicy: routePolicy,
+    invocation: roleInvocation(), adapters: {
+      fake: async ({ workerId }) => ({ sessionId: `session-${workerId}`, outcome: 'completed' }),
+    },
+  })
+  assert.equal(receipt.workerId, 'primary')
+  await assert.rejects(runRoleWorker({
+    config: roleConfig(), role: 'change', workRequest,
+    routeDecision: { ...decision, policyHash: 'd'.repeat(64) },
+    subjectStateVersion: 'c'.repeat(64), routingPolicy: routePolicy,
+    invocation: roleInvocation(), adapters: {
+      fake: async () => ({ sessionId: 'never', outcome: 'completed' }),
+    },
+  }), /policyHash does not match routingPolicy/)
+})
+
+test('runRoleWorker rejects arbitrary, stale, or wrong WorkRequest route decisions', async () => {
+  const workRequest = { requestId: 'role-work-1', role: 'change' }
+  await assert.rejects(runRoleWorker({
+    config: roleConfig(), role: 'change', workRequest,
+    routeDecision: { route: 'default' }, subjectStateVersion: 'c'.repeat(64),
+    invocation: roleInvocation(), adapters: { fake: async () => ({ sessionId: 'never', outcome: 'completed' }) },
+  }), /unknown field route/)
+  const decision = durableRouteDecision(workRequest)
+  await assert.rejects(runRoleWorker({
+    config: roleConfig(), role: 'change', workRequest,
+    routeDecision: { ...decision, workRequestId: 'other-work' }, subjectStateVersion: 'c'.repeat(64),
+    invocation: roleInvocation(), adapters: { fake: async () => ({ sessionId: 'never', outcome: 'completed' }) },
+  }), /does not match the WorkRequest/)
+  await assert.rejects(runRoleWorker({
+    config: roleConfig(), role: 'change', workRequest,
+    routeDecision: decision, subjectStateVersion: 'd'.repeat(64),
+    invocation: roleInvocation(), adapters: { fake: async () => ({ sessionId: 'never', outcome: 'completed' }) },
+  }), /does not match the subject/)
+})
+
+test('runRoleWorker claims each candidate before one sequential or concurrent invocation', async () => {
+  const claims = new Map()
+  const calls = []
+  const registry = {
+    async get() { return null },
+    async claimAttempt(input) {
+      const existing = claims.get(input.attemptId)
+      if (existing) return { claimed: false, attempt: existing }
+      claims.set(input.attemptId, input)
+      return { claimed: true, attempt: input }
+    },
+  }
+  const adapters = {
+    fake: async ({ workerId }) => {
+      calls.push(workerId)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      return { sessionId: `session-${workerId}`, outcome: 'completed', output: 'done' }
+    },
+  }
+  const first = await runRoleWorker({
+    config: roleConfig(), role: 'change', routingAttemptId: 'attempt-one',
+    workRequest: { requestId: 'role-work-1', role: 'change' }, invocation: roleInvocation(),
+    capacityRegistry: registry, adapters,
+  })
+  const [second, third] = await Promise.all([
+    runRoleWorker({
+      config: roleConfig(), role: 'change', routingAttemptId: 'attempt-two',
+      workRequest: { requestId: 'role-work-1', role: 'change' }, invocation: roleInvocation(),
+      capacityRegistry: registry, adapters,
+    }),
+    runRoleWorker({
+      config: roleConfig(), role: 'change', routingAttemptId: 'attempt-two',
+      workRequest: { requestId: 'role-work-1', role: 'change' }, invocation: roleInvocation(),
+      capacityRegistry: registry, adapters,
+    }),
+  ])
+  assert.equal(first.workerId, 'primary')
+  assert.equal(second.outcome, 'completed')
+  assert.equal(third.outcome, 'completed')
+  assert.equal(calls.length, 3)
+})
+
+test('runRoleWorker allows a new capacity generation but does not switch command-json mutation', async () => {
+  let generation = 1
+  const calls = []
+  const claims = new Map()
+  const registry = {
+    async get() {
+      return {
+        version: 1, capacityGroup: 'group-primary', scope: 'capacity-group', state: 'available',
+        reason: null, code: null, observedAt: new Date().toISOString(), retryAtUtc: null,
+        sourceWorker: null, capacityIdentity: { provider: null, model: null, worker: null },
+        configurationHash: 'a'.repeat(64), credentialGeneration: 'generation-1', generation, lease: null,
+      }
+    },
+    async appendAttempt(input) {
+      if (claims.has(input.attemptId)) return claims.get(input.attemptId)
+      claims.set(input.attemptId, input)
+      return input
+    },
+  }
+  const config = roleConfig()
+  const first = await runRoleWorker({
+    config, role: 'change', routingAttemptId: 'new-generation',
+    workRequest: { requestId: 'role-work-1', role: 'change' }, invocation: roleInvocation(),
+    capacityRegistry: registry, adapters: { fake: async ({ workerId }) => { calls.push(workerId); return { sessionId: workerId, outcome: 'completed' } } },
+  })
+  generation += 1
+  const second = await runRoleWorker({
+    config, role: 'change', routingAttemptId: 'new-generation',
+    workRequest: { requestId: 'role-work-1', role: 'change' }, invocation: roleInvocation(),
+    capacityRegistry: registry, adapters: { fake: async ({ workerId }) => { calls.push(workerId); return { sessionId: workerId, outcome: 'completed' } } },
+  })
+  assert.equal(first.outcome, 'completed')
+  assert.equal(second.outcome, 'completed')
+  assert.deepEqual(calls, ['primary', 'primary'])
+
+  const commandConfig = roleConfig()
+  commandConfig.workers.primary.adapter = 'command-json'
+  let fallbackCalls = 0
+  const commandResult = await assert.rejects(runRoleWorker({
+    config: commandConfig, role: 'change', workRequest: { requestId: 'role-work-command', role: 'change' },
+    invocation: roleInvocation(), capacityRegistry: fakeRegistry(), adapters: {
+      'command-json': async ({ invocation }) => {
+        await invocation.onStarted({ sessionId: 'mutation-turn' })
+        throw capacityError('session')
+      },
+      fake: async () => { fallbackCalls += 1; return { sessionId: 'fallback', outcome: 'completed' } },
+    },
+  }), error => error.adapterFailure?.phase === 'session')
+  assert.equal(commandResult, undefined)
+  assert.equal(fallbackCalls, 0)
+})
+
+test('runRoleWorker abandons a zero-invocation half-open probe and leaves deferred budget untouched', async () => {
+  const outcomes = []
+  const claims = new Map([['routing-attempt-primary-g2', {
+    result: { outcome: 'claimed' },
+  }], ['routing-attempt-fallback-g0', {
+    result: { outcome: 'claimed' },
+  }]])
+  let firstScope = true
+  const registry = {
+    async get() {
+      if (!firstScope) return null
+      firstScope = false
+      return {
+        version: 1, capacityGroup: 'group-primary', scope: 'capacity-group', state: 'cooldown',
+        reason: 'rate-limited', code: 'provider.rate-limit', observedAt: new Date(Date.now() - 5_000).toISOString(),
+        retryAtUtc: new Date(Date.now() - 1_000).toISOString(), sourceWorker: null,
+        capacityIdentity: { provider: null, model: null, worker: null }, configurationHash: 'a'.repeat(64),
+        credentialGeneration: 'generation-1', generation: 1, lease: null,
+      }
+    },
+    async acquireHalfOpenLease({ key, leaseId }) {
+      return { record: { generation: 2 }, lease: { key, leaseId } }
+    },
+    async completeHalfOpenLease({ outcome }) { outcomes.push(outcome) },
+    async claimAttempt(input) {
+      const existing = claims.get(input.attemptId)
+      return existing ? { claimed: false, attempt: existing } : (claims.set(input.attemptId, input), { claimed: true, attempt: input })
+    },
+  }
+  let invocations = 0
+  let budgetWrites = 0
+  const result = await runRoleWorker({
+    config: roleConfig(), role: 'change', routingAttemptId: 'routing-attempt',
+    workRequest: { requestId: 'role-work-1', role: 'change' }, invocation: roleInvocation(),
+    capacityRegistry: registry, onCandidateReady: async () => { budgetWrites += 1 },
+    adapters: { fake: async () => { invocations += 1; return { sessionId: 'never', outcome: 'completed' } } },
+  })
+  assert.equal(result.outcome, 'capacity-deferred')
+  assert.equal(invocations, 0)
+  assert.equal(budgetWrites, 0)
+  assert.deepEqual(outcomes, ['abandon'])
+})
+
+test('deferred role scripts keep checkout cleanup in finally before returning', async () => {
+  for (const script of ['dsh-issue.mjs', 'dsh-repair.mjs']) {
+    const source = await readFile(new URL(`../src/${script}`, import.meta.url), 'utf8')
+    const jobStart = source.indexOf('const jobPath')
+    assert.ok(jobStart >= 0, `${script} must create a tracked job directory`)
+    const jobBody = source.slice(jobStart)
+    assert.doesNotMatch(jobBody, /process\.exit\(0\)/)
+    assert.match(jobBody, /finally \{[\s\S]*removeJobDirectory/)
+  }
 })
 
 test('worker configuration accepts explicit adapters and rejects removed legacy fields', () => {

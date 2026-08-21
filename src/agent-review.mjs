@@ -23,6 +23,8 @@ import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { reviewMarker } from './review-authority.mjs'
 import { reviewObservations } from './review-observations.mjs'
 import { agentFailureCode, classifyAgentFailure } from './failure-classification.mjs'
+import { subjectStateVersion } from './governor-policy.mjs'
+import { pullRequestGovernorSubject } from './governor-state.mjs'
 import {
   acquireReviewWorkspace,
   prepareReviewWorkspace,
@@ -96,7 +98,7 @@ async function writeOutput(key, value) {
 async function reviewPullRequest() {
 const pullRequest = await ghJson([
   'pr', 'view', String(pullRequestNumber), '--repo', repository,
-  '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,title,url',
+  '--json', 'number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,title,url,labels',
 ], 'pull request')
 if (pullRequest.state !== 'OPEN') throw new Error(`Pull request #${pullRequestNumber} is not open`)
 if (pullRequest.isDraft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
@@ -117,8 +119,20 @@ if (reviewStage.procedure !== AGENT_REVIEW_SKILL) {
 }
 const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
   ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
-  : { route: 'default' }
+  : undefined
 const expectedBaseRef = pullRequest.baseRefName
+const reviewWorkRequest = {
+  requestId: `review-pr-${pullRequestNumber}-${expectedBase}-${expectedHead}`,
+  role: reviewStage.role,
+}
+const reviewSubjectStateVersion = subjectStateVersion(pullRequestGovernorSubject({
+  number: pullRequest.number,
+  state: pullRequest.state.toLowerCase(),
+  draft: pullRequest.isDraft,
+  base: { sha: pullRequest.baseRefOid },
+  head: { sha: pullRequest.headRefOid },
+  labels: pullRequest.labels,
+}))
 const replicaId = await reviewReplicaIdForRunner({
   stateRoot: config.operations.stateRoot,
   runnerName: requiredEnv('RUNNER_NAME'),
@@ -235,11 +249,10 @@ For PASS, findings must be an empty array. For BLOCK, include at least one findi
 const workerReceipt = await runRoleWorker({
   config,
   role: reviewStage.role,
-  workRequest: {
-    requestId: `review-pr-${pullRequestNumber}-${expectedBase}-${expectedHead}`,
-    role: reviewStage.role,
-  },
+  workRequest: reviewWorkRequest,
   routeDecision,
+  subjectStateVersion: reviewSubjectStateVersion,
+  routingPolicy: config.operations.routing?.[reviewStage.role],
   invocation: {
     taskId: `review-${expectedBase}-${expectedHead}`,
     cwd: reviewCheckout,

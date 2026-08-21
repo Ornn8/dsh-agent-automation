@@ -23,7 +23,7 @@ import {
 } from './capacity-registry.mjs'
 
 export const CAPACITY_ATTEMPT_RESULTS = Object.freeze([
-  'completed', 'blocked', 'capacity-failure', 'capacity-deferred', 'failed', 'timed-out',
+  'claimed', 'completed', 'blocked', 'capacity-failure', 'capacity-deferred', 'failed', 'timed-out',
 ])
 
 const STATE_SET = new Set(CAPACITY_RECORD_STATES)
@@ -479,10 +479,29 @@ async function appendAttemptUnlocked(stateRoot, attempt, options = {}) {
   return normalized
 }
 
+/** @param {string} stateRoot @param {Record<string, any>} attempt @param {{fence?: number, assertOwner?: () => Promise<void>}} [options] @returns {Promise<{claimed: boolean, attempt: Record<string, any>}>} */
+async function claimAttemptUnlocked(stateRoot, attempt, options = {}) {
+  const normalized = parseCapacityAttempt(attempt)
+  const current = await readAttemptSnapshot(stateRoot)
+  const existing = current.attempts.find(item => item.attemptId === normalized.attemptId)
+  if (existing) {
+    if (JSON.stringify(existing) !== JSON.stringify(normalized)) throw new Error(`Capacity attempt ${normalized.attemptId} conflicts with the existing journal entry`)
+    return { claimed: false, attempt: existing }
+  }
+  return { claimed: true, attempt: await appendAttemptUnlocked(stateRoot, normalized, options) }
+}
+
 /** @param {string} stateRoot @param {Record<string, any>} attempt @param {{waitMs?: number, leaseMs?: number}} [options] */
 export async function appendCapacityAttempt(stateRoot, attempt, options = {}) {
   const normalized = parseCapacityAttempt(attempt)
   return withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, normalized, lease), options)
+}
+
+/** Atomically claim one immutable attempt id before invoking a Worker. */
+/** @param {string} stateRoot @param {Record<string, any>} attempt @param {{waitMs?: number, leaseMs?: number}} [options] @returns {Promise<{claimed: boolean, attempt: Record<string, any>}>} */
+export async function claimCapacityAttempt(stateRoot, attempt, options = {}) {
+  const normalized = parseCapacityAttempt(attempt)
+  return withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, normalized, lease), options)
 }
 
 /** @param {unknown} value @returns {{version: 1, ownerToken: string, fence: number, acquiredAt: string, expiresAt: string, pid?: number, processIdentity?: string}} */
@@ -1239,6 +1258,10 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
     /** @param {Record<string, any>} attempt */
     async appendAttempt(attempt) {
       return withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, attempt, lease), { now: clock })
+    },
+    /** @param {Record<string, any>} attempt */
+    async claimAttempt(attempt) {
+      return withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, attempt, lease), { now: clock })
     },
     async attempts() {
       return readCapacityAttempts(stateRoot)

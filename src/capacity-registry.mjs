@@ -388,6 +388,17 @@ export function completeHalfOpenLease(record, input) {
   const nowMs = input.now ?? Date.now()
   if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new Error('capacity completion time is invalid')
   if (Date.parse(current.lease.expiresAt) <= nowMs) throw new Error('capacity half-open lease has expired')
+  if (input.outcome === 'abandon') {
+    if (!current.reason) throw new Error('capacity probe abandonment requires the prior failure reason')
+    return parseCapacityRecord({
+      ...current,
+      state: 'cooldown',
+      retryAtUtc: new Date(nowMs + DEFAULT_COOLDOWN_MS).toISOString(),
+      observedAt: new Date(nowMs).toISOString(),
+      generation: current.generation + 1,
+      lease: null,
+    })
+  }
   if (input.outcome === 'success') {
     return parseCapacityRecord({
       ...current,
