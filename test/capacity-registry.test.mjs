@@ -27,7 +27,7 @@ import {
   readCapacityRegistry,
   withCapacityRegistryLock,
 } from '../src/capacity-registry-store.mjs'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -321,7 +321,138 @@ test('attempt journal is bounded, idempotent, and survives immutable compaction'
   }
 })
 
-test('three real processes contend through owner-addressed leases and retain every attempt', { timeout: 60_000 }, async () => {
+test('24 real processes have one canonical owner and one callback each', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-mutex-'))
+  try {
+    const results = await Promise.all(Array.from({ length: 24 }, (_, index) => runStoreProcess('lock', stateRoot, `worker-${index}`)))
+    assert.ok(results.every(result => result.code === 0), results.map(result => `${result.code}:${result.stderr}`).join('\n'))
+    const state = JSON.parse(await readFile(join(capacityRegistryPaths(stateRoot).directory, 'lock-observations.json'), 'utf8'))
+    assert.equal(state.maxActive, 1)
+    assert.equal(Object.keys(state.calls).length, 24)
+    assert.ok(Object.values(state.calls).every(count => count === 1))
+    const files = await readdir(capacityRegistryPaths(stateRoot).directory)
+    assert.equal(files.filter(name => name === 'registry.lock' || name === 'registry.lock.reclaim' || name === 'registry.lock.quarantine').length, 0)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('a crashed owner is reclaimed once without deleting the replacement owner', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-crash-'))
+  try {
+    const crashed = await runStoreProcess('crash', stateRoot, 'crashed')
+    assert.equal(crashed.code, 17)
+    await new Promise(resolve => setTimeout(resolve, 150))
+    const replacement = await runStoreProcess('lock', stateRoot, 'replacement')
+    assert.equal(replacement.code, 0, replacement.stderr)
+    const files = await readdir(capacityRegistryPaths(stateRoot).directory)
+    assert.deepEqual(files.filter(name => name.startsWith('registry.lock')), [])
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('successful acquisition bounds stale legacy leases without deleting active leases', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-legacy-cleanup-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    await mkdir(paths.directory, { recursive: true })
+    const current = Date.now()
+    const lease = (ownerToken, fence, expiresAt) => ({
+      version: 1,
+      ownerToken,
+      fence,
+      acquiredAt: new Date(current - 1_000).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    })
+    await writeFile(join(paths.directory, 'registry-lease.crashed-owner.json'), `${JSON.stringify(lease('crashed-owner', 2, current - 1))}\n`, 'utf8')
+    await writeFile(join(paths.directory, 'registry-lease.live-owner.json'), `${JSON.stringify(lease('live-owner', 3, current + 60_000))}\n`, 'utf8')
+    await withCapacityRegistryLock(stateRoot, async () => undefined, { now: current, waitMs: 5_000, leaseMs: 5_000 })
+    await assert.rejects(readFile(join(paths.directory, 'registry-lease.crashed-owner.json'), 'utf8'), error => error.code === 'ENOENT')
+    assert.equal(JSON.parse(await readFile(join(paths.directory, 'registry-lease.live-owner.json'), 'utf8')).ownerToken, 'live-owner')
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('an expired operation fails once and is never replayed by the lock layer', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-expire-'))
+  try {
+    const result = await runStoreProcess('expire', stateRoot, 'expired')
+    assert.notEqual(result.code, 0)
+    const state = JSON.parse(await readFile(join(capacityRegistryPaths(stateRoot).directory, 'expire-observation.json'), 'utf8'))
+    assert.equal(state.calls, 1)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('stale reclaim markers are recovered through one fixed quarantine path', { timeout: 60_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-reclaim-'))
+  try {
+    const paths = capacityRegistryPaths(stateRoot)
+    await mkdir(paths.directory, { recursive: true })
+    const stale = {
+      version: 1,
+      ownerToken: 'stale-reclaimer',
+      fence: 10,
+      acquiredAt: '2020-01-01T00:00:00.000Z',
+      expiresAt: '2020-01-01T00:01:00.000Z',
+    }
+    await writeFile(paths.reclaimPath, `${JSON.stringify(stale)}\n`, 'utf8')
+    await writeFile(paths.lockPath, `${JSON.stringify({ ...stale, ownerToken: 'stale-owner' })}\n`, 'utf8')
+    const results = await Promise.all(['a', 'b', 'c'].map(id => runStoreProcess('append', stateRoot, id)))
+    assert.ok(results.every(result => result.code === 0), results.map(result => result.stderr).join('\n'))
+    const files = await readdir(paths.directory)
+    assert.ok(files.length < 20)
+    assert.equal(files.filter(name => name === 'registry.lock' || name === 'registry.lock.reclaim' || name === 'registry.lock.quarantine').length, 0)
+    assert.deepEqual((await readCapacityAttempts(stateRoot)).map(item => item.attemptId).sort(), ['attempt-a', 'attempt-b', 'attempt-c'])
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('registry clock defaults to live time and accepts an injected clock for cooldown probes', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-clock-'))
+  try {
+    let current = now
+    const registry = createCapacityRegistry({
+      stateRoot, configurationHash, credentialGeneration,
+      workers: { 'worker-1': { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'clock-group' } },
+      now: () => current,
+    })
+    const failure = capacityFailure({ scope: 'capacity-group' })
+    const record = await registry.recordFailure({ capacityGroup: 'clock-group', sourceWorker: 'worker-1', failure, cooldownMs: 1_000 })
+    const key = capacityRecordKey({ capacityGroup: 'clock-group', scope: 'capacity-group', identity: { provider: 'provider-1', model: 'model-1', worker: 'worker-1' } })
+    assert.equal(record.state, 'cooldown')
+    assert.equal(await registry.acquireHalfOpenLease({ key, leaseId: 'probe-before', owner: 'worker-1' }), null)
+    current += 1_001
+    const probe = await registry.acquireHalfOpenLease({ key, leaseId: 'probe-after', owner: 'worker-1' })
+    assert.ok(probe)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('registry default clock is evaluated for each decision', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-live-clock-'))
+  try {
+    const registry = createCapacityRegistry({
+      stateRoot, configurationHash, credentialGeneration,
+      workers: { 'worker-1': { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'live-clock-group' } },
+    })
+    const failure = capacityFailure({ scope: 'capacity-group' })
+    const record = await registry.recordFailure({ capacityGroup: 'live-clock-group', sourceWorker: 'worker-1', failure, cooldownMs: 30 })
+    const key = capacityRecordKey({ capacityGroup: 'live-clock-group', scope: 'capacity-group' })
+    assert.equal(record.state, 'cooldown')
+    await new Promise(resolve => setTimeout(resolve, 60))
+    assert.ok(await registry.acquireHalfOpenLease({ key, leaseId: 'live-probe', owner: 'worker-1' }))
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('three real processes contend through canonical leases and retain every attempt', { timeout: 60_000 }, async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-processes-'))
   try {
     const results = await Promise.all(['a', 'b', 'c'].map(id => runStoreProcess('append', stateRoot, id)))
