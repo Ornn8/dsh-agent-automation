@@ -10,7 +10,6 @@ import {
   parseJson,
   processCancellationSignal,
   removeJobDirectory,
-  resolveRepositoryWorker,
   requiredEnv,
   run,
   trustedAssociation,
@@ -25,7 +24,7 @@ import {
 } from './dispatch-policy.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { controllerMutationMarker } from './controller-mutation-marker.mjs'
-import { runAgentWorker } from './agent-worker.mjs'
+import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 import {
   interruptedRepairMayRetry,
   recordedRepairState,
@@ -63,7 +62,8 @@ const ciWorkflowName = process.env.CI_WORKFLOW_NAME?.trim() || ''
 const repairCause = process.env.REPAIR_CAUSE?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const workerId = resolveRepositoryWorker(config, repository, transportedRequest?.role || requiredEnv('AGENT_ROLE'))
+const repairRole = transportedRequest?.role || requiredEnv('AGENT_ROLE')
+if (repairRole !== 'change') throw new Error(`Pull-request repair must use the change role, received ${repairRole}`)
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
@@ -447,6 +447,27 @@ if (priorRun) {
 const branch = pullRequest.head.ref
 const baseBranch = pullRequest.base.ref
 if (baseBranch !== defaultBranch) throw new Error(`Pull request base ${baseBranch} is not the configured default branch ${defaultBranch}`)
+const executionWorkRequest = transportedRequest ?? Object.freeze({
+  requestId: requestId || `repair-${pullRequestNumber}-${expectedHead}`,
+  role: repairRole,
+})
+const executionClaim = createWorkerExecutionClaim({
+  config,
+  role: repairRole,
+  workRequest: executionWorkRequest,
+  subjectStateVersion: governorStateVersion,
+  trustedTaskSnapshot: {
+    workflowStage: transportedRequest?.stageId || 'repair',
+    labels: pullRequest.labels,
+    title: pullRequest.title,
+    body: pullRequest.body,
+    failureEvidence: {
+      class: repairClass,
+      code: ciWorkflowName || repairCause || 'review-repair',
+    },
+  },
+  routingPolicy: config.operations.routing.change,
+})
 await upsertStatus('running', branch, explicitRequest
   ? ciRequest
     ? `Failed CI request ${requestId} started a fresh DSH repair session.`
@@ -494,26 +515,36 @@ try {
     ...(ciRequest ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
   })
 
-  const workerReceipt = await runAgentWorker({
-    config,
-    workerId,
+  const workerReceipt = await runRoleWorker({
+    executionClaim,
     invocation: {
       taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
       cwd: checkoutPath,
-      title: `[Agent: ${workerId}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
+      title: `修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
       prompt,
       requiredSkill: repairProcedure,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
-      onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible ${workerId} session: ${sessionId}.`),
+      onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible change Worker session: ${sessionId}.`),
     },
     adapters: createAgentAdapters(),
   })
+  const replayedCompleted = workerReceipt.outcome === 'replayed' && workerReceipt.priorOutcome === 'completed'
+  if (workerReceipt.outcome === 'replayed' && !replayedCompleted) {
+    throw new Error(`Durable repair execution replayed a non-completed outcome: ${workerReceipt.priorOutcome}`)
+  }
+  const effectiveReceipt = replayedCompleted
+    ? { ...workerReceipt, outcome: 'completed' }
+    : workerReceipt
 
   const baselineReference = ciRequest
-    ? ciBaselineIssueFromReceipt({ receipt: workerReceipt, repository })
+    ? ciBaselineIssueFromReceipt({ receipt: effectiveReceipt, repository })
     : null
-  if (baselineReference) {
+  if (effectiveReceipt.outcome === 'capacity-deferred') {
+    await upsertStatus('capacity-waiting', branch,
+      'All admitted change Workers are currently unavailable due to verified capacity state; the original repair WorkRequest remains eligible.')
+    process.stdout.write(`Pull request #${pullRequestNumber} repair is waiting for an available change Worker; no product failure was recorded.\n`)
+  } else if (baselineReference) {
     const baselineIssue = await ghJson([
       'api', `repos/${repository}/issues/${baselineReference.number}`,
     ], 'reported CI baseline Issue')
@@ -531,18 +562,18 @@ try {
       remove: ['automation/ci-failed', 'automation/repairing', 'automation/repair-blocked', 'agent/dsh-failed'],
     })
     await upsertStatus('blocked-baseline', branch,
-      `Session ${workerReceipt.sessionId} verified the separate default-branch baseline Issue: ${baselineReference.url} (${verifiedBaseline.identity.key}).`)
+      `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} verified the separate default-branch baseline Issue: ${baselineReference.url} (${verifiedBaseline.identity.key}).`)
     process.stdout.write(`DSH identified CI baseline Issue #${baselineReference.number}; the pull request remains unchanged.\n`)
   } else {
-    if (workerReceipt.outcome === 'blocked') {
-      const blocked = nonBaselineBlockFromReceipt(workerReceipt)
+    if (effectiveReceipt.outcome === 'blocked') {
+      const blocked = nonBaselineBlockFromReceipt(effectiveReceipt)
       if (!blocked) throw new Error('DSH reported blocked without a terminal automation result')
       await setRepairLabels({
         add: ['automation/repair-blocked'],
         remove: ['automation/ci-failed', 'automation/repairing', 'agent/dsh-failed'],
       })
       await upsertStatus('blocked', branch,
-        `Session ${workerReceipt.sessionId} ended with the valid ${blocked.reason} outcome; no baseline Issue was dispatched.`)
+        `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} ended with the valid ${blocked.reason} outcome; no baseline Issue was dispatched.`)
       process.stdout.write(`DSH ended repair for pull request #${pullRequestNumber} with ${blocked.reason}; no retry was scheduled.\n`)
     } else {
       const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
@@ -552,7 +583,7 @@ try {
       if (current.head.sha !== expectedHead) {
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
+        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
         process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
       } else if (ciRequest && trustedCiRerunSuccess({
         priorRun: ciRun,
@@ -562,13 +593,13 @@ try {
         workflowName: ciWorkflowName,
       })) {
         await setRepairLabels({ remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
-        process.stdout.write(`${workerId} repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
+        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
+        process.stdout.write(`The change Worker repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
       } else if (!ciRequest && !mergeRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
-        process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
+        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} posted a technical rebuttal and requested one same-head review.`)
+        process.stdout.write(`The change Worker requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
       } else {
         throw new Error('DSH exited successfully without advancing the head or proving the documented same-head completion')
       }

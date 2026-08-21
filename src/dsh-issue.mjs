@@ -9,7 +9,6 @@ import {
   parseJson,
   processCancellationSignal,
   removeJobDirectory,
-  resolveRepositoryWorker,
   requiredEnv,
   run,
   trustedAssociation,
@@ -17,7 +16,6 @@ import {
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { controllerMutationMarker } from './controller-mutation-marker.mjs'
-import { runAgentWorker } from './agent-worker.mjs'
 import { agentWorkPrompt } from './agent-work-result.mjs'
 import { openAgentWorkDependencies, resolveAgentWorkDispatch } from './agent-work.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
@@ -26,6 +24,7 @@ import { GOVERNOR_WORKFLOW_PATHS, issueGovernorSubject, trustedGovernorRecords }
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseAgentWorkRequest } from './work-request.mjs'
+import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
@@ -150,7 +149,7 @@ const stage = resolveWorkflowStage(
 )
 requireEligibleWorkflowStage(profile.definition, workRequest.workflowId, workRequest.stageId, [])
 if (stage.role !== workRequest.role) throw new Error('WorkRequest role does not match the trusted Stage')
-const workerId = resolveRepositoryWorker(config, repository, stage.role)
+if (stage.role !== 'change') throw new Error('Issue implementation must use the change role')
 const admissionComments = (await ghJson([
   'api', `repos/${repository}/issues/${issueNumber}/comments?per_page=100`, '--paginate', '--slurp',
 ], 'Issue governor records')).flat()
@@ -255,23 +254,46 @@ try {
     ...(agentWork ? { work: agentWork } : {}),
   })
 
-  const workerReceipt = await runAgentWorker({
+  const executionClaim = createWorkerExecutionClaim({
     config,
-    workerId,
+    role: stage.role,
+    workRequest,
+    subjectStateVersion: governorStateVersion,
+    trustedTaskSnapshot: {
+      workflowStage: workRequest.stageId,
+      labels: issue.labels,
+      title: issue.title,
+      body: issue.body,
+    },
+    routingPolicy: config.operations.routing.change,
+  })
+  const workerReceipt = await runRoleWorker({
+    executionClaim,
     invocation: {
       taskId: `issue-${repository}-${issueNumber}-${issueRequestId}`,
       cwd: checkoutPath,
-      title: `[Agent: ${workerId}] 执行 Issue #${issueNumber}`,
+      title: `执行 Issue #${issueNumber}`,
       prompt,
       requiredSkill: stage.procedure,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
-      onStarted: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible ${workerId} session: ${sessionId}.`)),
+      onStarted: ({ sessionId }) => upsertStatus(statusBody('running', branch, `Visible change Worker session: ${sessionId}.`)),
     },
     adapters: createAgentAdapters(),
   })
+  const replayedCompleted = workerReceipt.outcome === 'replayed' && workerReceipt.priorOutcome === 'completed'
+  if (workerReceipt.outcome === 'replayed' && !replayedCompleted) {
+    throw new Error(`Durable change execution replayed a non-completed outcome: ${workerReceipt.priorOutcome}`)
+  }
+  const effectiveReceipt = replayedCompleted
+    ? { ...workerReceipt, outcome: 'completed' }
+    : workerReceipt
 
-  if (workerReceipt.outcome === 'blocked') {
+  if (effectiveReceipt.outcome === 'capacity-deferred') {
+    await upsertStatus(statusBody('capacity-waiting', branch,
+      'All admitted change Workers are currently unavailable due to verified capacity state; the original WorkRequest remains eligible.'))
+    process.stdout.write(`Issue #${issueNumber} is waiting for an available change Worker; no product failure was recorded.\n`)
+  } else if (workerReceipt.outcome === 'blocked' || effectiveReceipt.outcome === 'blocked') {
     await run(config.ghExecutable, [
       'label', 'create', 'agent/dsh-blocked', '--repo', repository,
       '--description', 'DSH reached a valid terminal block without producing a pull request', '--color', 'B60205',
@@ -281,11 +303,11 @@ try {
       '--remove-label', 'agent/dsh', '--add-label', 'agent/dsh-blocked',
     ], { env: hostCredentialEnvironment() })
     await upsertStatus(statusBody('blocked', branch,
-      `Session ${workerReceipt.sessionId} reached a valid terminal block: ${workerReceipt.detail}`))
-    process.stdout.write(`${workerId} ended Issue #${issueNumber} as blocked; no retry was scheduled.\n`)
+      `Session ${effectiveReceipt.sessionId} reached a valid terminal block: ${effectiveReceipt.detail}`))
+    process.stdout.write(`The change Worker ended Issue #${issueNumber} as blocked; no retry was scheduled.\n`)
   } else {
-    if (workerReceipt.outcome !== 'completed') {
-      throw new Error(`DSH worker ended Issue #${issueNumber} with ${workerReceipt.outcome}`)
+    if (effectiveReceipt.outcome !== 'completed') {
+      throw new Error(`DSH worker ended Issue #${issueNumber} with ${effectiveReceipt.outcome}`)
     }
     const pullRequests = await ghJson([
       'pr', 'list', '--repo', repository, '--state', 'open', '--head', branch,
@@ -305,8 +327,8 @@ try {
       throw new Error(`Pull request head ${pullRequest.headRefOid} does not match remote branch head ${remoteHead || '<missing>'}`)
     }
 
-    await upsertStatus(statusBody('complete', branch, `Session ${workerReceipt.sessionId} produced a pull request for independent review: ${pullRequest.url}`))
-    process.stdout.write(`${workerId} produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
+    await upsertStatus(statusBody('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} produced a pull request for independent review: ${pullRequest.url}`))
+    process.stdout.write(`The change Worker produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
   }
 } catch (error) {
   const failureClass = classifyAgentFailure(error)

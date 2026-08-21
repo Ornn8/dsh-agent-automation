@@ -1281,6 +1281,20 @@ test('review production path routes through the controller-owned capacity claim'
   assert.match(checkSource, /external_id', reviewCheckIdentity/)
 })
 
+test('change and repair production paths share role routing and capacity admission', async () => {
+  for (const name of ['dsh-issue.mjs', 'dsh-repair.mjs']) {
+    const source = await readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
+    assert.match(source, /createWorkerExecutionClaim/)
+    assert.match(source, /runRoleWorker/)
+    assert.match(source, /trustedTaskSnapshot/)
+    assert.doesNotMatch(source, /resolveRepositoryWorker|runAgentWorker/)
+    assert.match(source, /capacity-deferred/)
+    assert.match(source, /capacity-waiting/)
+    assert.match(source, /replayedCompleted/)
+    assert.match(source, /non-completed outcome/)
+  }
+})
+
 test('Codex review waits for its App Server to release workspace handles', async () => {
   const child = new EventEmitter()
   child.exitCode = null
