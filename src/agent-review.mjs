@@ -22,6 +22,7 @@ import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { reviewMarker } from './review-authority.mjs'
 import { reviewObservations } from './review-observations.mjs'
+import { createWorkerRoutingExecution } from './worker-routing.mjs'
 import { agentFailureCode, classifyAgentFailure } from './failure-classification.mjs'
 import { subjectStateVersion } from './governor-policy.mjs'
 import { pullRequestGovernorSubject } from './governor-state.mjs'
@@ -117,8 +118,8 @@ const reviewStage = requireEligibleWorkflowStage(
 if (reviewStage.procedure !== AGENT_REVIEW_SKILL) {
   throw new Error(`Review workflow cannot execute procedure ${reviewStage.procedure}`)
 }
-const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
-  ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
+let routingExecution = process.env.WORKER_ROUTING_EXECUTION_JSON?.trim()
+  ? parseJson(process.env.WORKER_ROUTING_EXECUTION_JSON, 'Worker routing execution')
   : undefined
 const expectedBaseRef = pullRequest.baseRefName
 const reviewWorkRequest = {
@@ -133,6 +134,19 @@ const reviewSubjectStateVersion = subjectStateVersion(pullRequestGovernorSubject
   head: { sha: pullRequest.headRefOid },
   labels: pullRequest.labels,
 }))
+if (!routingExecution) {
+  routingExecution = createWorkerRoutingExecution({
+    routingAttemptId: `review-${pullRequestNumber}-${expectedBase}-${expectedHead}`,
+    workRequest: reviewWorkRequest,
+    subjectStateVersion: reviewSubjectStateVersion,
+    routingPolicy: config.operations.routing?.[reviewStage.role],
+    trustedTaskSnapshot: {
+      title: pullRequest.title,
+      labels: pullRequest.labels,
+      workflowStage: stageId,
+    },
+  })
+}
 const replicaId = await reviewReplicaIdForRunner({
   stateRoot: config.operations.stateRoot,
   runnerName: requiredEnv('RUNNER_NAME'),
@@ -250,9 +264,10 @@ const workerReceipt = await runRoleWorker({
   config,
   role: reviewStage.role,
   workRequest: reviewWorkRequest,
-  routeDecision,
+  routingExecution,
   subjectStateVersion: reviewSubjectStateVersion,
   routingPolicy: config.operations.routing?.[reviewStage.role],
+  requireRoutingExecution: true,
   invocation: {
     taskId: `review-${expectedBase}-${expectedHead}`,
     cwd: reviewCheckout,

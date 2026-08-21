@@ -14,6 +14,7 @@ import {
   CAPACITY_RECORD_SCOPES,
   CAPACITY_RECORD_STATES,
   acquireHalfOpenLease,
+  capacityEligibility,
   createCapacityRecord,
   invalidateCapacityRecord,
   parseCapacityRecord,
@@ -56,6 +57,9 @@ const GATE_OWNER_FILE_PATTERN = /^registry-owner\.[A-Za-z0-9._:-]{1,128}\.json$/
 /** @typedef {{key?: string, capacityGroup: string, scope?: string, sourceWorker: string, failure: unknown, now?: number, cooldownMs?: number}} RegistryFailureInput */
 /** @typedef {{key: string, leaseId: string, owner: string, now?: number, leaseMs?: number}} RegistryLeaseInput */
 /** @typedef {{key: string, leaseId: string, outcome: string, failure?: unknown, now?: number, cooldownMs?: number, sourceWorker?: string}} RegistryCompletionInput */
+/** @typedef {{keys: string[], leaseId: string, owner: string, now?: number, leaseMs?: number}} RegistryProbeClaimInput */
+/** @typedef {{leaseId: string, leases: {key: string, scope: string, leaseId: string}[]}} RegistryProbe */
+/** @typedef {{probe: RegistryProbe, outcome: string, failure?: unknown, now?: number, cooldownMs?: number}} RegistryProbeCompletionInput */
 
 /** @param {unknown} value @param {string} name @returns {string} */
 function identifier(value, name) {
@@ -485,7 +489,10 @@ async function claimAttemptUnlocked(stateRoot, attempt, options = {}) {
   const current = await readAttemptSnapshot(stateRoot)
   const existing = current.attempts.find(item => item.attemptId === normalized.attemptId)
   if (existing) {
-    if (JSON.stringify(existing) !== JSON.stringify(normalized)) throw new Error(`Capacity attempt ${normalized.attemptId} conflicts with the existing journal entry`)
+    const immutable = ['version', 'attemptId', 'workRequestId', 'routePolicyHash', 'taskClass', 'workerId', 'capacityGroup', 'capacityGeneration', 'startState']
+    if (immutable.some(key => existing[key] !== normalized[key])) {
+      throw new Error(`Capacity attempt ${normalized.attemptId} conflicts with the existing immutable identity`)
+    }
     return { claimed: false, attempt: existing }
   }
   return { claimed: true, attempt: await appendAttemptUnlocked(stateRoot, normalized, options) }
@@ -1241,6 +1248,115 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         document.document.records[key] = acquired.record
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return acquired
+      }, { now: clock })
+    },
+    /** Atomically inspect all candidate scopes and claim one shared half-open probe transaction. */
+    /** @param {RegistryProbeClaimInput} input */
+    async claimHalfOpenProbe({ keys, leaseId, owner, now: probeTime, leaseMs }) {
+      if (!Array.isArray(keys) || keys.length < 1) throw new Error('capacity probe keys must be a non-empty array')
+      const normalizedKeys = [...new Set(keys)].sort()
+      normalizedKeys.forEach(key => identifier(key, 'capacity registry key'))
+      return withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
+        const nowMs = probeTime ?? clock()
+        const document = await readRegistrySnapshot(stateRoot)
+        const entries = []
+        let changed = false
+        let eligible = true
+        for (const key of normalizedKeys) {
+          const current = document.document.records[key]
+          if (!current) continue
+          const refreshed = invalidateCapacityRecord(current, { ...identity, now: nowMs })
+          changed ||= JSON.stringify(refreshed) !== JSON.stringify(current)
+          const decision = capacityEligibility(refreshed, { now: nowMs })
+          entries.push({ key, scope: refreshed.scope, record: decision.record, requiresProbe: decision.requiresProbe === true })
+          if (!decision.eligible) eligible = false
+        }
+        const capacityGeneration = entries.reduce((highest, entry) => Math.max(highest, entry.record.generation), 0)
+        if (!eligible) {
+          if (changed) {
+            for (const entry of entries) document.document.records[entry.key] = entry.record
+            await writeCapacityRegistry(stateRoot, document.document, lease)
+          }
+          return {
+            eligible: false,
+            startState: entries.find(entry => entry.record.state !== 'available')?.record.state || 'available',
+            capacityGeneration,
+            records: entries,
+            probe: null,
+          }
+        }
+        const due = entries.filter(entry => entry.requiresProbe)
+        if (!due.length) {
+          if (changed) {
+            for (const entry of entries) document.document.records[entry.key] = entry.record
+            await writeCapacityRegistry(stateRoot, document.document, lease)
+          }
+          return { eligible: true, startState: 'available', capacityGeneration, records: entries, probe: null }
+        }
+        const sharedLeaseId = identifier(leaseId, 'capacity probe leaseId')
+        const sharedOwner = identifier(owner, 'capacity probe owner')
+        const acquired = []
+        for (const entry of due) {
+          const next = acquireHalfOpenLease(entry.record, {
+            leaseId: sharedLeaseId, owner: sharedOwner, now: nowMs, leaseMs,
+          })
+          if (!next) {
+            return {
+              eligible: false,
+              startState: 'half-open',
+              capacityGeneration,
+              records: entries,
+              probe: null,
+            }
+          }
+          acquired.push({ key: entry.key, scope: entry.scope, leaseId: next.lease.leaseId })
+          document.document.records[entry.key] = next.record
+        }
+        await writeCapacityRegistry(stateRoot, document.document, lease)
+        return {
+          eligible: true,
+          startState: 'half-open',
+          capacityGeneration: Math.max(capacityGeneration, ...due.map(entry => entry.record.generation + 1)),
+          records: entries.map(entry => ({
+            ...entry,
+            record: document.document.records[entry.key] ?? entry.record,
+          })),
+          probe: { leaseId: sharedLeaseId, owner: sharedOwner, leases: acquired },
+        }
+      }, { now: clock })
+    },
+    /** Complete one shared half-open probe transaction in one registry lock. */
+    /** @param {RegistryProbeCompletionInput} input */
+    async completeHalfOpenProbe({ probe, outcome, failure, now: completionTime, cooldownMs }) {
+      if (!probe || !Array.isArray(probe.leases) || probe.leases.length < 1) return null
+      const normalizedOutcome = outcome === 'failure' || outcome === 'success' || outcome === 'abandon' ? outcome : null
+      if (!normalizedOutcome) throw new Error('capacity probe outcome must be success, failure, or abandon')
+      return withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
+        const nowMs = completionTime ?? clock()
+        const document = await readRegistrySnapshot(stateRoot)
+        const records = []
+        for (const item of probe.leases) {
+          identifier(item.key, 'capacity probe key')
+          identifier(item.leaseId, 'capacity probe leaseId')
+          const current = document.document.records[item.key]
+          if (!current) throw new Error(`Unknown capacity registry key ${item.key}`)
+          const failureScope = failure && typeof failure === 'object' && !Array.isArray(failure) && 'scope' in failure
+            ? failure.scope
+            : undefined
+          const itemFailure = normalizedOutcome === 'failure' && failureScope === current.scope ? failure : undefined
+          const itemOutcome = normalizedOutcome === 'failure' && itemFailure === undefined ? 'success' : normalizedOutcome
+          const next = completeHalfOpenLease(current, {
+            leaseId: item.leaseId,
+            outcome: itemOutcome,
+            ...(itemFailure ? { failure: itemFailure } : {}),
+            now: nowMs,
+            cooldownMs,
+          })
+          document.document.records[item.key] = next
+          records.push({ key: item.key, record: next })
+        }
+        await writeCapacityRegistry(stateRoot, document.document, lease)
+        return records
       }, { now: clock })
     },
     /** @param {RegistryCompletionInput} input */

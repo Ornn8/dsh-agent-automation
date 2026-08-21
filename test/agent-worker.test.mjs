@@ -326,9 +326,43 @@ test('runRoleWorker claims each candidate before one sequential or concurrent in
     }),
   ])
   assert.equal(first.workerId, 'primary')
-  assert.equal(second.outcome, 'completed')
-  assert.equal(third.outcome, 'completed')
-  assert.equal(calls.length, 3)
+  assert.deepEqual([second.outcome, third.outcome].sort(), ['capacity-deferred', 'completed'])
+  assert.equal(calls.length, 2)
+})
+
+test('real registry claim makes same routing generation idempotent and accepts a new generation', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'dsh-role-attempt-identity-'))
+  const config = roleConfig()
+  config.operations.stateRoot = stateRoot
+  config.configurationHash = 'a'.repeat(64)
+  config.credentialGeneration = 'generation-1'
+  const calls = []
+  const adapters = {
+    fake: async ({ workerId }) => {
+      calls.push(workerId)
+      return { sessionId: `session-${calls.length}`, outcome: 'completed' }
+    },
+  }
+  try {
+    const first = await runRoleWorker({
+      config, role: 'change', routingAttemptId: 'same-generation', workRequest: { requestId: 'role-work-identity', role: 'change' },
+      invocation: roleInvocation(), adapters,
+    })
+    const replay = await runRoleWorker({
+      config, role: 'change', routingAttemptId: 'same-generation', workRequest: { requestId: 'role-work-identity', role: 'change' },
+      invocation: roleInvocation(), adapters,
+    })
+    const recovered = await runRoleWorker({
+      config, role: 'change', routingAttemptId: 'new-generation', workRequest: { requestId: 'role-work-identity', role: 'change' },
+      invocation: roleInvocation(), adapters,
+    })
+    assert.equal(first.outcome, 'completed')
+    assert.equal(replay.outcome, 'capacity-deferred')
+    assert.equal(recovered.outcome, 'completed')
+    assert.deepEqual(calls, ['primary', 'primary'])
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true })
+  }
 })
 
 test('runRoleWorker allows a new capacity generation but does not switch command-json mutation', async () => {

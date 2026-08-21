@@ -25,6 +25,7 @@ import { GOVERNOR_WORKFLOW_PATHS, issueGovernorSubject, trustedGovernorRecords }
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseAgentWorkRequest } from './work-request.mjs'
+import { createWorkerRoutingExecution } from './worker-routing.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
@@ -32,8 +33,8 @@ const issueNumber = workRequest.subject.number
 const issueRequestId = workRequest.requestId
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
-  ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
+let routingExecution = process.env.WORKER_ROUTING_EXECUTION_JSON?.trim()
+  ? parseJson(process.env.WORKER_ROUTING_EXECUTION_JSON, 'Worker routing execution')
   : undefined
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
@@ -162,6 +163,20 @@ const governorRecords = await trustedGovernorRecords({
 })
 const governorSubject = issueGovernorSubject(issue)
 const governorStateVersion = subjectStateVersion(governorSubject)
+if (!routingExecution) {
+  routingExecution = createWorkerRoutingExecution({
+    routingAttemptId: issueRequestId,
+    workRequest,
+    subjectStateVersion: governorStateVersion,
+    routingPolicy: config.operations.routing?.[stage.role],
+    trustedTaskSnapshot: {
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+      workflowStage: workRequest.stageId,
+    },
+  })
+}
 if (!governorRecords.some(record => record.status === 'applied'
   && record.transition === workflowStageTransition(workRequest)
   && record.subject.type === 'issue'
@@ -261,9 +276,10 @@ try {
     config,
     role: stage.role,
     workRequest,
-    routeDecision,
+    routingExecution,
     subjectStateVersion: governorStateVersion,
     routingPolicy: config.operations.routing?.[stage.role],
+    requireRoutingExecution: true,
     invocation: {
       taskId: `issue-${repository}-${issueNumber}-${issueRequestId}`,
       cwd: checkoutPath,

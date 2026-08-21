@@ -4,7 +4,9 @@ import {
   classifyAndCreateWorkerRouteDecision,
   classifyWorkRequest,
   createWorkerRouteDecision,
+  createWorkerRoutingExecution,
   parseWorkerRouteDecision,
+  parseWorkerRoutingExecution,
   parseWorkerRouteDecisionBody,
   serializeWorkerRouteDecision,
   workerRouteDecisionBody,
@@ -309,6 +311,29 @@ test('WorkerRouteDecision v1 binds request id, role, exact state, class, and has
     }),
     /Exact subject state version inputs must agree/,
   )
+})
+
+test('controller-owned routing execution binds a non-default decision and generation', () => {
+  const execution = createWorkerRoutingExecution({
+    routingAttemptId: 'review-generation-7',
+    workRequest,
+    subjectStateVersion: stateVersion,
+    routingPolicy,
+    trustedTaskSnapshot: { labels: ['ui'] },
+  })
+  assert.equal(execution.version, 1)
+  assert.equal(execution.routingAttemptId, 'review-generation-7')
+  assert.equal(execution.routeDecision.taskClass, 'frontend')
+  assert.deepEqual(parseWorkerRoutingExecution(execution, {
+    workRequest,
+    subjectStateVersion: stateVersion,
+    routingPolicy,
+  }), execution)
+  assert.throws(() => parseWorkerRoutingExecution({
+    ...execution,
+    routeDecision: { ...execution.routeDecision, workRequestId: 'other-request' },
+  }, { workRequest, subjectStateVersion: stateVersion, routingPolicy }), /does not match the WorkRequest/)
+  assert.throws(() => parseWorkerRoutingExecution({ ...execution, routingAttemptId: 'bad id' }), /routingAttemptId/)
 })
 
 test('durable decision serialization and body parsing remain strict', () => {

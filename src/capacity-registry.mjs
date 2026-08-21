@@ -429,5 +429,8 @@ export function capacityEligibility(record, input = {}) {
   if (current.state === 'cooldown' && current.retryAtUtc && Date.parse(current.retryAtUtc) <= nowMs) {
     return { eligible: true, state: 'half-open', requiresProbe: true, record: current }
   }
+  if (current.state === 'half-open' && current.lease && Date.parse(current.lease.expiresAt) <= nowMs) {
+    return { eligible: true, state: 'half-open', requiresProbe: true, record: current }
+  }
   return { eligible: false, state: current.state, record: current }
 }

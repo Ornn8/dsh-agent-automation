@@ -373,6 +373,19 @@ test('attempt claims are atomic under the capacity registry lock', async () => {
   }
 })
 
+test('same generation attempt claims are idempotent across timestamps', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-claim-identity-'))
+  try {
+    const first = await claimCapacityAttempt(stateRoot, attempt({ result: { outcome: 'claimed' }, startedAt: now, endedAt: now + 1 }), { waitMs: 60_000 })
+    const replay = await claimCapacityAttempt(stateRoot, attempt({ result: { outcome: 'claimed' }, startedAt: now + 10_000, endedAt: now + 10_001 }), { waitMs: 60_000 })
+    assert.equal(first.claimed, true)
+    assert.equal(replay.claimed, false)
+    assert.equal(replay.attempt.attemptId, first.attempt.attemptId)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
 test('24 real processes have one canonical owner and one callback each', { timeout: 60_000 }, async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-mutex-'))
   try {
@@ -725,6 +738,48 @@ test('registry clock defaults to live time and accepts an injected clock for coo
     current += 1_001
     const probe = await registry.acquireHalfOpenLease({ key, leaseId: 'probe-after', owner: 'worker-1' })
     assert.ok(probe)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('multi-scope recovery claims one atomic probe and remains recoverable after a verified failure', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-multi-scope-'))
+  try {
+    let current = now
+    const worker = { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'multi-group' }
+    const registry = createCapacityRegistry({
+      stateRoot, configurationHash, credentialGeneration, workers: { 'worker-1': worker }, now: () => current,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'multi-group', sourceWorker: 'worker-1', failure: capacityFailure(), cooldownMs: 1_000,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'multi-group', sourceWorker: 'worker-1', failure: capacityFailure({ scope: 'worker' }), cooldownMs: 1_000,
+    })
+    current += 60_001
+    const keys = [
+      capacityRecordKey({ capacityGroup: 'multi-group', scope: 'capacity-group' }),
+      capacityRecordKey({ capacityGroup: 'multi-group', scope: 'worker', identity: { provider: 'provider-1', model: 'model-1', worker: 'worker-1' } }),
+    ]
+    const [first, second] = await Promise.all([
+      registry.claimHalfOpenProbe({ keys, leaseId: 'probe-a', owner: 'worker-1' }),
+      registry.claimHalfOpenProbe({ keys, leaseId: 'probe-b', owner: 'worker-2' }),
+    ])
+    assert.equal([first, second].filter(result => result.eligible && result.probe).length, 1)
+    const claimed = first.probe ? first : second
+    assert.equal(claimed.probe.leases.length, 2)
+    await registry.completeHalfOpenProbe({
+      probe: claimed.probe,
+      outcome: 'failure',
+      failure: capacityFailure(),
+    })
+    assert.equal((await registry.get(keys[0])).state, 'cooldown')
+    assert.equal((await registry.get(keys[1])).state, 'available')
+    current += 60_001
+    const recovered = await registry.claimHalfOpenProbe({ keys, leaseId: 'probe-c', owner: 'worker-1' })
+    assert.equal(recovered.probe.leases.length, 1)
+    assert.equal(recovered.probe.leases[0].key, keys[0])
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }

@@ -21,6 +21,8 @@ const ROUTE_DECISION_TRAILER = '<!-- /worker-route-decision:v1 -->'
 const DECISION_FIELDS = new Set([
   'version', 'workRequestId', 'role', 'stateVersion', 'taskClass', 'policyHash', 'evidenceHash',
 ])
+const ROUTING_EXECUTION_FIELDS = new Set(['version', 'routingAttemptId', 'routeDecision'])
+const ROUTING_ATTEMPT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/
 const CLASSIFICATION_SOURCES = new Set([
   'trusted-route', 'deterministic-rules', 'optional-classifier', 'default',
 ])
@@ -556,6 +558,35 @@ export function parseWorkerRouteDecision(value, { workRequest, subjectState, sub
     taskClass: value.taskClass,
     policyHash: value.policyHash,
     evidenceHash: value.evidenceHash,
+  }
+}
+
+/** Create the controller-owned routing execution envelope transported to a Worker. */
+/** @param {AnyObject} options @returns {AnyObject} */
+export function createWorkerRoutingExecution({ routingAttemptId, ...options } = {}) {
+  if (typeof routingAttemptId !== 'string' || !ROUTING_ATTEMPT_ID.test(routingAttemptId)) {
+    throw new Error('routingAttemptId must be a bounded identifier')
+  }
+  return {
+    version: 1,
+    routingAttemptId,
+    routeDecision: classifyAndCreateWorkerRouteDecision(options),
+  }
+}
+
+/** Parse and bind a controller-owned routing execution envelope to the live WorkRequest and subject. */
+/** @param {AnyValue} value @param {AnyObject} options @returns {AnyObject} */
+export function parseWorkerRoutingExecution(value, options = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Worker routing execution must be an object')
+  for (const key of Object.keys(value)) if (!ROUTING_EXECUTION_FIELDS.has(key)) throw new Error(`Worker routing execution has unknown field ${key}`)
+  for (const key of ROUTING_EXECUTION_FIELDS) if (!Object.hasOwn(value, key)) throw new Error(`Worker routing execution is missing required field ${key}`)
+  if (value.version !== 1 || typeof value.routingAttemptId !== 'string' || !ROUTING_ATTEMPT_ID.test(value.routingAttemptId)) {
+    throw new Error('Worker routing execution version or routingAttemptId is invalid')
+  }
+  return {
+    version: 1,
+    routingAttemptId: value.routingAttemptId,
+    routeDecision: parseWorkerRouteDecision(value.routeDecision, options),
   }
 }
 

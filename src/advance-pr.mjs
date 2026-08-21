@@ -21,6 +21,7 @@ import { parseReviewCheckIdentity } from './review-check.mjs'
 import { terminalReviewSource, trustedReviewRunProfile } from './advancement-source.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { trustedWorkerIdentity } from './workflow-identity.mjs'
+import { createWorkerRoutingExecution } from './worker-routing.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
@@ -44,6 +45,9 @@ const environment = actionsCredentialEnvironment()
 const landScript = fileURLToPath(new URL('./land-pr.mjs', import.meta.url))
 const governorWorkflowPath = requiredEnv('GOVERNOR_WORKFLOW_PATH')
 const runId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
+const routingPolicy = process.env.WORKER_ROUTING_POLICY_JSON?.trim()
+  ? parseJson(process.env.WORKER_ROUTING_POLICY_JSON, 'worker routing policy')
+  : { version: 1, defaultRoute: 'default', routes: { default: {} } }
 
 if (!Number.isSafeInteger(requestedNumber) || requestedNumber < 0) throw new Error('Invalid PR_NUMBER')
 if (!Number.isSafeInteger(sourceRunId) || sourceRunId < 0
@@ -349,6 +353,21 @@ async function writeGovernorRecord(record) {
 
 const result = await consumePullRequestAdvancement(request, {
   requestReview: async value => {
+    const reviewWorkRequest = {
+      requestId: `review-pr-${pullRequest.number}-${snapshot.pair.base}-${snapshot.pair.head}`,
+      role: 'review',
+    }
+    const routingExecution = createWorkerRoutingExecution({
+      routingAttemptId: value.transitionIdentity,
+      workRequest: reviewWorkRequest,
+      subjectStateVersion: request.stateVersion,
+      routingPolicy,
+      trustedTaskSnapshot: {
+        title: pullRequest.title,
+        labels: pullRequest.labels,
+        workflowStage: snapshot.workflow.stageId,
+      },
+    })
     await dispatchWithReceipt({
       executable: githubExecutable, environment, repository, workflowFile: 'agent-pr-review.yml',
       payload: {
@@ -361,12 +380,25 @@ const result = await consumePullRequestAdvancement(request, {
           workflow_id: snapshot.workflow.workflowId,
           stage_id: snapshot.workflow.stageId,
           request_id: value.transitionIdentity,
+          worker_routing_execution: routingExecution,
         },
       },
       requestId: value.transitionIdentity,
     })
   },
   requestRepair: async value => {
+    const routingExecution = createWorkerRoutingExecution({
+      routingAttemptId: value.transitionIdentity,
+      workRequest: { requestId: value.transitionIdentity, role: 'change' },
+      subjectStateVersion: request.stateVersion,
+      routingPolicy,
+      trustedTaskSnapshot: {
+        title: pullRequest.title,
+        labels: pullRequest.labels,
+        workflowStage: 'change',
+        failureEvidence: { class: value.repair?.cause || 'repair' },
+      },
+    })
     await dispatchWithReceipt({
       executable: githubExecutable, environment, repository, workflowFile: 'agent-pr-rework.yml',
       payload: {
@@ -379,6 +411,7 @@ const result = await consumePullRequestAdvancement(request, {
           workflow_id: snapshot.workflow.workflowId,
           request_id: value.transitionIdentity,
           repair_cause: value.repair?.cause || '',
+          worker_routing_execution: routingExecution,
         },
       },
       requestId: value.transitionIdentity,

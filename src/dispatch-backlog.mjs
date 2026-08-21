@@ -27,6 +27,7 @@ import {
 import { agentWorkRequestId } from './agent-work.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflow } from './workflow-profile.mjs'
 import { createIssueImplementationRequest, repositoryDispatchBody } from './work-request.mjs'
+import { createWorkerRoutingExecution } from './worker-routing.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
@@ -48,6 +49,9 @@ const governorWriterTrust = {
   workflowPath: '.github/workflows/dispatch-backlog.yml',
 }
 const observationId = `${requiredEnv('GITHUB_RUN_ID')}:${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+const routingPolicy = process.env.WORKER_ROUTING_POLICY_JSON?.trim()
+  ? parseJson(process.env.WORKER_ROUTING_POLICY_JSON, 'worker routing policy')
+  : { version: 1, defaultRoute: 'default', routes: { default: {} } }
 const requestedIssueNumber = (() => {
   const value = process.env.REQUESTED_ISSUE_NUMBER?.trim() || '0'
   if (!/^\d+$/.test(value)) throw new Error('REQUESTED_ISSUE_NUMBER must be a non-negative integer')
@@ -284,16 +288,40 @@ if (work.type === 'issue') {
 
 const admission = await admittedWork(work, pullRequests, issues)
 if (!admission) process.exit(0)
+const admittedSource = work.type === 'repair'
+  ? pullRequests.find(candidate => candidate.number === work.number)
+  : issues.find(candidate => candidate.number === work.number)
+if (!admittedSource) throw new Error(`Governor subject #${work.number} disappeared before dispatch`)
 
 if (work.type === 'repair') {
   await recordApplied(work, admission)
+  const routingExecution = createWorkerRoutingExecution({
+    routingAttemptId: `repair-${work.number}-${work.head}`,
+    workRequest: { requestId: 'backlog', role: 'change' },
+    subjectStateVersion: admission.stateVersion,
+    routingPolicy,
+    trustedTaskSnapshot: {
+      title: admittedSource.title,
+      body: admittedSource.body,
+      labels: admittedSource.labels,
+      workflowStage: 'change',
+      failureEvidence: { class: 'repair' },
+    },
+  })
   await run(githubExecutable, [
-    'api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=dsh-repair',
-    '-F', `client_payload[pr_number]=${work.number}`,
-    '-f', `client_payload[head_sha]=${work.head}`,
-    '-f', 'client_payload[request_id]=backlog',
-  ], { env: githubEnvironment })
+    'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
+  ], {
+    env: githubEnvironment,
+    input: JSON.stringify({
+      event_type: 'dsh-repair',
+      client_payload: {
+        pr_number: work.number,
+        head_sha: work.head,
+        request_id: 'backlog',
+        worker_routing_execution: routingExecution,
+      },
+    }),
+  })
   process.stdout.write(`Dispatched blocked pull request #${work.number} at ${work.head}.\n`)
 } else {
   await run(githubExecutable, [
@@ -302,7 +330,17 @@ if (work.type === 'repair') {
   try {
     await run(githubExecutable, [
       'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
-    ], { env: githubEnvironment, input: JSON.stringify(repositoryDispatchBody(work.request)) })
+    ], { env: githubEnvironment, input: JSON.stringify(repositoryDispatchBody(work.request, {
+      routingAttemptId: work.request.requestId,
+      subjectStateVersion: admission.stateVersion,
+      routingPolicy,
+      trustedTaskSnapshot: {
+        title: admittedSource.title,
+        body: admittedSource.body,
+        labels: admittedSource.labels,
+        workflowStage: work.request.stageId,
+      },
+    })) })
   } catch (error) {
     await run(githubExecutable, [
       'issue', 'edit', String(work.number), '--repo', repository, '--remove-label', 'agent/dsh',

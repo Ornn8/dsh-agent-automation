@@ -2,7 +2,7 @@ import { annotateAdapterFailure, canFailoverCapacityFailure, parseAdapterFailure
 import { capacityEligibility, projectWorkerCapacityIdentity } from './capacity-registry.mjs'
 import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry } from './capacity-registry-store.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
-import { parseWorkerRouteDecision } from './worker-routing.mjs'
+import { parseWorkerRouteDecision, parseWorkerRoutingExecution } from './worker-routing.mjs'
 
 const TERMINAL_OUTCOMES = new Set([
   'completed', 'blocked', 'superseded', 'timed-out', 'failed',
@@ -157,6 +157,25 @@ async function workerCapacityState(registry, config, worker, workerId, now, leas
   }
   if (!registry || typeof registry.get !== 'function') return result
   const scopes = ['capacity-group', 'provider', 'model', 'worker']
+  const keys = scopes.flatMap(scope => {
+    if (scope === 'provider' && snapshot.identity.provider === null) return []
+    if (scope === 'model' && (snapshot.identity.provider === null || snapshot.identity.model === null)) return []
+    return [capacityRecordKey({ capacityGroup: snapshot.capacityGroup, scope, identity: snapshot.identity })]
+  })
+  if (typeof registry.claimHalfOpenProbe === 'function') {
+    const inspected = await registry.claimHalfOpenProbe({
+      keys,
+      leaseId: journalIdentifier(`${leaseOwner}-${workerId}`, 'capacity-probe'),
+      owner: journalIdentifier(leaseOwner, 'role-worker'),
+      now,
+    })
+    result.eligible = inspected.eligible
+    result.startState = inspected.startState
+    result.capacityGeneration = inspected.capacityGeneration
+    result.records = inspected.records.map(entry => ({ key: entry.key, record: entry.record }))
+    result.probe = inspected.probe
+    return result
+  }
   const probes = []
   for (const scope of scopes) {
     if (scope === 'provider' && snapshot.identity.provider === null) continue
@@ -214,7 +233,16 @@ async function workerCapacityState(registry, config, worker, workerId, now, leas
 
 /** @param {object|null} registry @param {Record<string, any>} state @param {Record<string, any>|undefined} failure @param {number} now */
 async function completeCapacityProbe(registry, state, failure, now) {
-  if (!state.probe || typeof registry?.completeHalfOpenLease !== 'function') return
+  if (!state.probe || (typeof registry?.completeHalfOpenLease !== 'function' && typeof registry?.completeHalfOpenProbe !== 'function')) return
+  if (typeof registry.completeHalfOpenProbe === 'function' && Array.isArray(state.probe.leases)) {
+    await registry.completeHalfOpenProbe({
+      probe: state.probe,
+      outcome: failure ? 'failure' : 'success',
+      ...(failure ? { failure } : {}),
+      now,
+    })
+    return
+  }
   const sameScope = failure && failure.scope === state.probe.scope
   if (failure && !sameScope) {
     await registry.completeHalfOpenLease({
@@ -236,7 +264,12 @@ async function completeCapacityProbe(registry, state, failure, now) {
 
 /** @param {object|null} registry @param {Record<string, any>} state @param {number} now */
 async function abandonCapacityProbe(registry, state, now) {
-  if (!state.probe || typeof registry?.completeHalfOpenLease !== 'function') return
+  if (!state.probe || (typeof registry?.completeHalfOpenLease !== 'function' && typeof registry?.completeHalfOpenProbe !== 'function')) return
+  if (typeof registry.completeHalfOpenProbe === 'function' && Array.isArray(state.probe.leases)) {
+    await registry.completeHalfOpenProbe({ probe: state.probe, outcome: 'abandon', now })
+    state.probe = null
+    return
+  }
   await registry.completeHalfOpenLease({
     key: state.probe.key,
     leaseId: state.probe.leaseId,
@@ -259,14 +292,14 @@ async function claimRoleAttempt(registry, input) {
       ...input,
       result: { outcome: 'claimed' },
     }))
-    return claimed?.claimed === true
+    return { claimed: claimed?.claimed === true, duplicate: claimed?.claimed === false }
   }
-  if (typeof registry?.appendAttempt !== 'function') return true
+  if (typeof registry?.appendAttempt !== 'function') return { claimed: true, duplicate: false }
   const claimed = await registry.appendAttempt(createCapacityAttempt({
     ...input,
     result: { outcome: 'claimed' },
   }))
-  return claimed?.result?.outcome === 'claimed'
+  return { claimed: claimed?.result?.outcome === 'claimed', duplicate: false }
 }
 
 /**
@@ -281,6 +314,7 @@ export async function runRoleWorker({
   role,
   workRequest,
   routeDecision,
+  routingExecution,
   invocation,
   adapters,
   capacityRegistry,
@@ -288,17 +322,37 @@ export async function runRoleWorker({
   subjectStateVersion,
   routingPolicy,
   onCandidateReady,
+  requireRoutingExecution = false,
 } = {}) {
   if (!['change', 'review'].includes(role)) throw new Error(`Worker routing is not available for ${String(role)}`)
-  const boundRouteDecision = routeDecision === undefined || routeDecision === null
+  const boundExecution = routingExecution === undefined || routingExecution === null
+    ? undefined
+    : parseWorkerRoutingExecution(routingExecution, {
+      workRequest,
+      subjectStateVersion,
+      routingPolicy,
+    })
+  if (boundExecution && routingAttemptId !== undefined && routingAttemptId !== boundExecution.routingAttemptId) {
+    throw new Error('routingAttemptId does not match the controller routing execution')
+  }
+  const boundRouteDecision = boundExecution?.routeDecision || (routeDecision === undefined || routeDecision === null
     ? undefined
     : parseWorkerRouteDecision(routeDecision, {
       workRequest,
       subjectStateVersion,
       routingPolicy,
-    })
+    }))
   if (boundRouteDecision && !subjectStateVersion) {
     throw new Error('WorkerRouteDecision execution requires the current subject state version')
+  }
+  if (requireRoutingExecution && !boundExecution && !boundRouteDecision) {
+    const compatibilityCandidates = resolveWorkerCandidates({ config, role })
+    const rolePolicy = config?.operations?.routing?.[role]
+    const onlyDefaultRoute = rolePolicy?.routes && Object.keys(rolePolicy.routes).length === 1
+      && Object.hasOwn(rolePolicy.routes, 'default')
+    if (!onlyDefaultRoute || compatibilityCandidates.length !== 1) {
+      throw new Error('Controller routing execution is required for this multi-Worker route')
+    }
   }
   const candidates = resolveWorkerCandidates({
     config,
@@ -312,7 +366,7 @@ export async function runRoleWorker({
     ? boundRouteDecision.policyHash
     : DIGEST.test(config?.configurationHash || '') ? config.configurationHash : '0'.repeat(64)
   const workRequestId = journalIdentifier(workRequest?.requestId ?? invocation?.taskId, 'role-work')
-  const attemptRoot = journalIdentifier(routingAttemptId ?? `${workRequestId}-${role}`, 'routing-attempt')
+  const attemptRoot = journalIdentifier(boundExecution?.routingAttemptId ?? routingAttemptId ?? `${workRequestId}-${role}`, 'routing-attempt')
   const startedAt = Date.now()
   const unavailable = []
   const seen = new Set()
@@ -338,9 +392,25 @@ export async function runRoleWorker({
       startState: capacity.startState,
       startedAt,
     }
-    if (!await claimRoleAttempt(registry, attemptBase)) {
+    const claim = await claimRoleAttempt(registry, attemptBase)
+    if (!claim.claimed) {
       unavailable.push(workerId)
       await abandonCapacityProbe(registry, capacity, Date.now())
+      if (claim.duplicate) {
+        return {
+          version: 1,
+          outcome: 'capacity-deferred',
+          category: 'capacity',
+          reason: 'capacity-deferred',
+          workRequestId,
+          role,
+          taskClass,
+          routePolicyHash,
+          candidates: [...candidates],
+          unavailable,
+          detail: 'This routing generation has already been claimed by another Worker process.',
+        }
+      }
       continue
     }
     try {

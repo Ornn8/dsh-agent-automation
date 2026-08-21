@@ -29,4 +29,4 @@ jobs:
       profile_id: ${{ github.event.client_payload.profile_id || 'github-pr-cycle' }}
       workflow_id: ${{ github.event.client_payload.workflow_id || 'default' }}
       stage_id: ${{ github.event.client_payload.stage_id || 'review' }}
-      worker_route_decision: ${{ github.event.client_payload.worker_route_decision || '' }}
+      worker_routing_execution: ${{ toJSON(github.event.client_payload.worker_routing_execution) || '' }}

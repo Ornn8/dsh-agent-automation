@@ -1168,10 +1168,25 @@ test('WorkRequest repository dispatch uses one extensible payload envelope', asy
   assert.match(reconcileSource, /const admitted = records\.find/)
   assert.match(reconcileSource, /pendingTransition === 'workflow-recovery' \? 3/)
   assert.ok(
-    reconcileSource.indexOf('JSON.stringify(repositoryDispatchBody(request))')
+    reconcileSource.indexOf('JSON.stringify(repositoryDispatchBody(request,')
       < reconcileSource.lastIndexOf('await markGovernorApplied(pullRequest, pendingTransition, governed)'),
     'the durable applied record must follow successful dispatch',
   )
+})
+
+test('Controller dispatch paths create and transport the trusted routing execution generation', async () => {
+  const backlogSource = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
+  const advanceSource = await readFile(new URL('../src/advance-pr.mjs', import.meta.url), 'utf8')
+  const reviewSource = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
+  const repairSource = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')
+  assert.match(backlogSource, /repositoryDispatchBody\(work\.request, \{[\s\S]*routingAttemptId: work\.request\.requestId/)
+  assert.match(backlogSource, /createWorkerRoutingExecution\([\s\S]*routingAttemptId: `repair-/)
+  assert.match(advanceSource, /createWorkerRoutingExecution\([\s\S]*routingAttemptId: value\.transitionIdentity/)
+  assert.match(advanceSource, /worker_routing_execution: routingExecution/)
+  assert.match(reviewSource, /WORKER_ROUTING_EXECUTION_JSON/)
+  assert.match(reviewSource, /requireRoutingExecution: true/)
+  assert.match(repairSource, /WORKER_ROUTING_EXECUTION_JSON/)
+  assert.match(repairSource, /requireRoutingExecution: true/)
 })
 
 test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {
@@ -1451,7 +1466,7 @@ test('Codex review results do not depend on task metadata housekeeping', async (
 
 test('backlog Issue dispatch is not lost to GitHub token recursion suppression', async () => {
   const source = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
-  assert.match(source, /repositoryDispatchBody\(work\.request\)/)
+  assert.match(source, /repositoryDispatchBody\(work\.request,/)
   assert.match(source, /event_type: 'agent_backlog_reconcile'/)
   assert.match(source, /client_payload: \{ issue_number: number \}/)
   assert.doesNotMatch(source, /event_type=dsh-issue/)

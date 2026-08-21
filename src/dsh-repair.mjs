@@ -47,6 +47,7 @@ import {
 } from './governor-state.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
+import { createWorkerRoutingExecution } from './worker-routing.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -63,8 +64,8 @@ const repairCause = process.env.REPAIR_CAUSE?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
 const role = transportedRequest?.role || requiredEnv('AGENT_ROLE')
-const routeDecision = process.env.WORKER_ROUTE_DECISION_JSON?.trim()
-  ? parseJson(process.env.WORKER_ROUTE_DECISION_JSON, 'Worker route decision')
+let routingExecution = process.env.WORKER_ROUTING_EXECUTION_JSON?.trim()
+  ? parseJson(process.env.WORKER_ROUTING_EXECUTION_JSON, 'Worker routing execution')
   : undefined
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
@@ -365,6 +366,21 @@ const governorRecords = await trustedGovernorRecords({
 })
 const governorSubject = pullRequestGovernorSubject(pullRequest)
 const governorStateVersion = subjectStateVersion(governorSubject)
+if (!routingExecution) {
+  routingExecution = createWorkerRoutingExecution({
+    routingAttemptId: requestId || `repair-${expectedHead}`,
+    workRequest: transportedRequest || { requestId: requestId || `repair-${expectedHead}`, role },
+    subjectStateVersion: governorStateVersion,
+    routingPolicy: config.operations.routing?.[role],
+    trustedTaskSnapshot: {
+      title: pullRequest.title,
+      body: pullRequest.body,
+      labels: pullRequest.labels,
+      workflowStage: 'change',
+      failureEvidence: { class: repairClass },
+    },
+  })
+}
 if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
   throw new Error(`Pull request #${pullRequestNumber} is paused and requires an authorized resume`)
 }
@@ -508,9 +524,10 @@ try {
     config,
     role,
     workRequest: transportedRequest || { requestId: requestId || `repair-${expectedHead}`, role },
-    routeDecision,
+    routingExecution,
     subjectStateVersion: governorStateVersion,
     routingPolicy: config.operations.routing?.[role],
+    requireRoutingExecution: true,
     onCandidateReady,
     invocation: {
       taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
