@@ -13,6 +13,7 @@ import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { repairObservationIdFromGovernorRecord } from './advancement-runtime.mjs'
 import { baseReconcileTransition, needsDefaultBranchUpdate, needsExactReview } from './reconciliation-policy.mjs'
 import { hasTrustedExactReviewInvocation, hasTrustedExactReviewRun, reviewRunIdFromCheckRun } from './landing-policy.mjs'
+import { parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
 import { trustedReviewRunProfile } from './advancement-source.mjs'
 import {
@@ -28,8 +29,9 @@ import {
   trustedGovernorRecords,
 } from './governor-state.mjs'
 import { createReviewRepairRequest, repositoryDispatchBody, resolveRepairEntryStage } from './work-request.mjs'
-import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
+import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { trustedWorkerIdentity } from './workflow-identity.mjs'
+import { createLocalWorkerRoutingExecution } from './worker-routing.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
@@ -240,6 +242,45 @@ async function requestAdvancement(pullRequest, reviewConfiguration = null) {
   })
 }
 
+async function requestCapacityReviewResume(pullRequest, projection) {
+  if (projection.revision.base !== pullRequest.base.sha || projection.revision.head !== pullRequest.head.sha) {
+    throw new Error(`Capacity wait review projection is stale for pull request #${pullRequest.number}`)
+  }
+  const profile = await targetProfile(projection.profileId, pullRequest.base.sha)
+  if (profile.definitionHash !== projection.definitionHash) {
+    throw new Error(`Capacity wait review Profile is stale for pull request #${pullRequest.number}`)
+  }
+  const stage = resolveWorkflowStage(profile.definition, projection.workflowId, projection.stageId, 'worker')
+  if (stage.role !== 'review') throw new Error(`Capacity wait review Stage is no longer a review Stage for pull request #${pullRequest.number}`)
+  createLocalWorkerRoutingExecution({
+    routeDecision: projection.routeDecision,
+    workRequest: { requestId: projection.workRequestId, role: 'review' },
+    subjectStateVersion: projection.subject.stateVersion,
+    trustedTaskSnapshot: { workflowStage: projection.stageId },
+    routingPolicy: config.operations.routing.review,
+  })
+  const dispatchRequestId = `capacity-resume:${projection.observationId}`
+  await dispatchWithReceipt({
+    executable: githubExecutable,
+    environment: actionsEnvironment,
+    repository,
+    workflowFile: 'agent-pr-review.yml',
+    payload: {
+      event_type: 'agent-review',
+      client_payload: {
+        pull_request_number: pullRequest.number,
+        base_sha: projection.revision.base,
+        head_sha: projection.revision.head,
+        profile_id: projection.profileId,
+        workflow_id: projection.workflowId,
+        stage_id: projection.stageId,
+        request_id: dispatchRequestId,
+      },
+    },
+    requestId: dispatchRequestId,
+  })
+}
+
 async function waitForUpdatedPair(pullRequest) {
   for (let attempt = 1; attempt <= updatePollAttempts; attempt += 1) {
     const current = await ghJson([
@@ -304,6 +345,8 @@ for (const summary of summaries.flat()) {
   const checkRuns = checkRunPages.flatMap(page => page.check_runs || [])
   let reviewProof = null
   let reviewConfiguration = null
+  let capacityProjection = null
+  let reviewInProgress = false
   for (const checkRun of checkRuns) {
     const runId = reviewRunIdFromCheckRun(checkRun, repository)
     if (!runId || checkRun.name !== 'agent/review') continue
@@ -312,6 +355,7 @@ for (const summary of summaries.flat()) {
     if (!hasTrustedExactReviewInvocation({ pullRequest: landingPullRequest, reviewProof: proof, trustedReview })) {
       continue
     }
+    if (String(checkRun.status).toUpperCase() !== 'COMPLETED') reviewInProgress = true
     const identity = parseReviewCheckIdentity(checkRun)
     let profile = null
     try {
@@ -330,6 +374,25 @@ for (const summary of summaries.flat()) {
     reviewConfiguration = identity && profile
       ? { profileId: profile.profileId, workflowId: identity.workflowId }
       : null
+    if (identity && profile
+      && String(checkRun.status).toUpperCase() === 'COMPLETED'
+      && String(checkRun.conclusion).toUpperCase() === 'NEUTRAL') {
+      try {
+        const candidate = parseCapacityWaitStatus(checkRun.output?.summary)
+        if (candidate.subject.type === 'pull-request'
+          && candidate.subject.number === pullRequest.number
+          && candidate.workRequestId === candidate.routeDecision.workRequestId
+          && candidate.role === 'review'
+          && candidate.profileId === profile.profileId
+          && candidate.workflowId === identity.workflowId
+          && candidate.stageId === identity.stageId
+          && candidate.definitionHash === profile.definitionHash) {
+          capacityProjection = candidate
+        }
+      } catch {
+        // A neutral review without the strict capacity projection is not resumable.
+      }
+    }
     const passed = ['SUCCESS', 'success'].includes(checkRun.conclusion)
       && workflowRun.conclusion === 'success'
     const blocked = ['FAILURE', 'failure'].includes(checkRun.conclusion)
@@ -416,6 +479,11 @@ for (const summary of summaries.flat()) {
       continue
     }
     if (governed.action !== 'noop') continue
+  }
+  if (capacityProjection && !reviewProof && !reviewInProgress) {
+    await requestCapacityReviewResume(pullRequest, capacityProjection)
+    reconciled += 1
+    continue
   }
   if (reviewConfiguration && !reviewProof) continue
   if (!needsExactReview({ repository, defaultBranch, pullRequest, reviewProof })) continue

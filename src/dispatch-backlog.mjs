@@ -8,8 +8,11 @@ import {
   activeWorkflowIssueNumbers,
   independentIssueObservationNumber,
   selectBacklogWork,
+  selectCapacityWaitingWork,
   trustedBlockedReviewProof,
 } from './dispatch-policy.mjs'
+import { parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
+import { trustedControllerMutation } from './controller-mutation-marker.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import {
   governorBudgetDecision,
@@ -26,7 +29,7 @@ import {
 } from './governor-state.mjs'
 import { agentWorkRequestId } from './agent-work.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflow } from './workflow-profile.mjs'
-import { createIssueImplementationRequest, repositoryDispatchBody } from './work-request.mjs'
+import { createIssueImplementationRequest, createStageWorkRequest, repositoryDispatchBody } from './work-request.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
@@ -57,6 +60,24 @@ const requestedIssueNumber = (() => {
   }
   return number === 0 ? null : number
 })()
+const capacityResumeOnly = (() => {
+  const value = process.env.CAPACITY_RESUME_ONLY?.trim() || 'false'
+  if (value !== 'true' && value !== 'false') throw new Error('CAPACITY_RESUME_ONLY must be true or false')
+  return value === 'true'
+})()
+const capacityRotatingPage = (() => {
+  if (!capacityResumeOnly) return 1
+  const value = process.env.GITHUB_RUN_NUMBER?.trim() || '1'
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error('GITHUB_RUN_NUMBER must be a positive integer')
+  const runNumber = Number.parseInt(value, 10)
+  if (!Number.isSafeInteger(runNumber) || runNumber < 1) throw new Error('GITHUB_RUN_NUMBER must be a positive safe integer')
+  return ((runNumber - 1) % 16) + 1
+})()
+const capacityPageSize = 100
+const trustedControllerLogin = requiredEnv('TRUSTED_CONTROLLER_LOGIN')
+if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(trustedControllerLogin)) {
+  throw new Error('TRUSTED_CONTROLLER_LOGIN is invalid')
+}
 
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) {
   throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
@@ -137,6 +158,96 @@ async function governorRecords(number) {
     trust: governorTrust,
     loadRun: runId => ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `governor workflow run ${runId}`),
   })
+}
+
+const CAPACITY_ISSUE_URL = /^https:\/\/api\.github\.com\/repos\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)$/
+
+function capacityCommentReference(comment) {
+  const match = CAPACITY_ISSUE_URL.exec(String(comment?.issue_url || ''))
+  if (!match || match[1] !== repository) return null
+  return Number.parseInt(match[2], 10)
+}
+
+async function currentCapacitySubject(projection, number) {
+  const endpoint = projection.subject.type === 'pull-request' ? 'pulls' : 'issues'
+  const candidate = await ghJson(
+    ['api', `repos/${repository}/${endpoint}/${number}`],
+    `current capacity subject ${projection.subject.type} #${number}`,
+  )
+  if (candidate?.number !== number || candidate.state !== 'open') return null
+  if (projection.subject.type === 'issue' && candidate.pull_request) return null
+  return candidate
+}
+
+async function capacityComments() {
+  const pages = [1]
+  if (capacityRotatingPage > 1) pages.push(capacityRotatingPage)
+  const comments = []
+  for (const page of pages) {
+    const pageComments = await ghJson([
+      'api', `repos/${repository}/issues/comments?sort=updated&direction=desc&per_page=${capacityPageSize}&page=${page}`,
+    ], `bounded capacity wait comments page ${page}`)
+    if (!Array.isArray(pageComments)) throw new Error('Bounded capacity wait comments response is invalid')
+    const seenCommentIds = new Set(comments.map(comment => comment?.id).filter(id => Number.isSafeInteger(id)))
+    for (const comment of pageComments) {
+      if (Number.isSafeInteger(comment?.id) && seenCommentIds.has(comment.id)) continue
+      if (Number.isSafeInteger(comment?.id)) seenCommentIds.add(comment.id)
+      comments.push(comment)
+    }
+  }
+  return comments
+}
+
+async function capacitySnapshot() {
+  const comments = await capacityComments()
+  const waits = []
+  const pullRequests = []
+  const issues = []
+  const seenNumbers = new Set()
+  for (const status of comments.filter(comment => comment?.user?.login === trustedControllerLogin
+    && /^- Status: \*\*capacity-waiting\*\*$/m.test(String(comment.body || '')))) {
+    const number = capacityCommentReference(status)
+    if (number === null || seenNumbers.has(number)) continue
+    seenNumbers.add(number)
+    let projection
+    try {
+      projection = parseCapacityWaitStatus(status.body)
+    } catch {
+      continue
+    }
+    if (projection.role !== 'change' || projection.subject.number !== number) continue
+    let candidate
+    try {
+      candidate = await currentCapacitySubject(projection, number)
+    } catch {
+      continue
+    }
+    if (!candidate || (projection.subject.type === 'pull-request' && candidate.draft)) continue
+    const expectedSubject = { type: projection.subject.type, number }
+    let mutation
+    try {
+      mutation = await trustedControllerMutation({
+        comment: status,
+        expectedControllerLogin: trustedControllerLogin,
+        expectedRepository: repository,
+        expectedSubject,
+        loadRun: runId => ghJson(
+          ['api', `repos/${repository}/actions/runs/${runId}`],
+          `capacity wait worker run ${runId}`,
+        ),
+      })
+    } catch {
+      continue
+    }
+    if (mutation.operation !== (expectedSubject.type === 'pull-request' ? 'repair-worker' : 'change-worker')) continue
+    const subject = expectedSubject.type === 'pull-request'
+      ? pullRequestGovernorSubject(candidate)
+      : issueGovernorSubject(candidate)
+    waits.push({ repository, projection, currentStateVersion: subjectStateVersion(subject) })
+    if (expectedSubject.type === 'pull-request') pullRequests.push(candidate)
+    else issues.push(candidate)
+  }
+  return { waits, pullRequests, issues }
 }
 
 async function writeGovernorRecord(number, record) {
@@ -233,17 +344,28 @@ async function recordApplied(work, admission) {
   })
 }
 
-const pullRequests = await ghPages(`repos/${repository}/pulls?state=open&per_page=100`, 'open pull requests')
-const issues = (await ghPages(`repos/${repository}/issues?state=all&per_page=100`, 'Issues'))
-  .filter(issue => !issue.pull_request)
-const work = selectBacklogWork({
-  repository,
-  pullRequests,
-  issues,
-  trustedBlockedRepairNumbers: await trustedBlockedRepairNumbers(pullRequests),
-  includeRepairs: false,
-  requestedIssueNumber,
-})
+const capacity = capacityResumeOnly ? await capacitySnapshot() : null
+const pullRequests = capacityResumeOnly
+  ? capacity.pullRequests
+  : await ghPages(`repos/${repository}/pulls?state=open&per_page=${capacityPageSize}`, 'open pull requests')
+const issues = capacityResumeOnly
+  ? capacity.issues
+  : (await ghPages(`repos/${repository}/issues?state=all&per_page=${capacityPageSize}`, 'Issues'))
+    .filter(issue => !issue.pull_request)
+const work = capacityResumeOnly
+  ? selectCapacityWaitingWork({
+    pullRequests,
+    issues,
+    capacityWaits: capacity.waits,
+  })
+  : selectBacklogWork({
+    repository,
+    pullRequests,
+    issues,
+    trustedBlockedRepairNumbers: await trustedBlockedRepairNumbers(pullRequests),
+    includeRepairs: false,
+    requestedIssueNumber,
+  })
 
 if (!work) {
   process.stdout.write('No eligible DSH backlog work is ready.\n')
@@ -258,28 +380,73 @@ if (work.type === 'issue') {
     'api', `repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`,
   ], `default branch ${defaultBranch}`)
   if (!/^[0-9a-f]{40}$/.test(baseCommit?.sha || '')) throw new Error('Default branch head is not a full SHA')
-  const profile = await targetProfile(work.work.profile, baseCommit.sha)
-  const workflow = resolveWorkflow(profile.definition, work.work.workflow)
+  if (capacityResumeOnly && work.projection.revision.base !== baseCommit.sha) {
+    throw new Error('Capacity wait Issue WorkRequest revision is stale')
+  }
+  const profile = await targetProfile(
+    capacityResumeOnly ? work.projection.profileId : work.work.profile,
+    capacityResumeOnly ? work.projection.revision.base : baseCommit.sha,
+  )
+  const workflowId = capacityResumeOnly ? work.projection.workflowId : work.work.workflow
+  const workflow = resolveWorkflow(profile.definition, workflowId)
   const active = activeWorkflowIssueNumbers({
     issues,
     pullRequests,
     profileId: profile.definition.profileId,
-    workflowId: work.work.workflow,
+    workflowId,
     excludeIssueNumber: requestedIssueNumber === work.number ? work.number : null,
   })
-  if (active.size >= workflow.coordination.limit) {
-    process.stdout.write(`Workflow ${profile.definition.profileId}/${work.work.workflow} is at its coordination limit ${workflow.coordination.limit}.\n`)
+  if (!capacityResumeOnly && active.size >= workflow.coordination.limit) {
+    process.stdout.write(`Workflow ${profile.definition.profileId}/${workflowId} is at its coordination limit ${workflow.coordination.limit}.\n`)
     process.exit(0)
   }
-  const requestId = agentWorkRequestId(work.work, profile.definitionHash)
-  work.request = createIssueImplementationRequest({
-    ...profile,
-    workflowId: work.work.workflow,
-    repository,
-    issueNumber: work.number,
-    base: baseCommit.sha,
-    requestId,
+  if (capacityResumeOnly) {
+    if (profile.definitionHash !== work.projection.definitionHash) throw new Error('Capacity wait Profile is stale')
+    const stage = workflow.stages.find(candidate => candidate.id === work.projection.stageId)
+    if (!stage || stage.uses !== 'worker' || stage.role !== work.projection.role) {
+      throw new Error('Capacity wait Stage is no longer eligible')
+    }
+    work.request = createStageWorkRequest({
+      ...profile,
+      workflowId,
+      stageId: work.projection.stageId,
+      repository,
+      subject: { type: 'issue', number: work.number },
+      revision: work.projection.revision,
+      coordinationKey: `${repository}:${profile.definition.profileId}:${workflowId}`,
+      requestId: work.projection.workRequestId,
+    })
+  } else {
+    const requestId = agentWorkRequestId(work.work, profile.definitionHash)
+    work.request = createIssueImplementationRequest({
+      ...profile,
+      workflowId,
+      repository,
+      issueNumber: work.number,
+      base: baseCommit.sha,
+      requestId,
+    })
+  }
+}
+
+if (capacityResumeOnly) {
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
+  ], {
+    env: githubEnvironment,
+    input: work.type === 'repair'
+      ? JSON.stringify({
+          event_type: 'dsh-repair',
+          client_payload: {
+            pr_number: work.number,
+            head_sha: work.projection.subject.head,
+            request_id: work.projection.workRequestId,
+          },
+        })
+      : JSON.stringify(repositoryDispatchBody(work.request)),
   })
+  process.stdout.write(`Resumed capacity-waiting ${work.type === 'repair' ? 'pull request' : 'Issue'} #${work.number}.\n`)
+  process.exit(0)
 }
 
 const admission = await admittedWork(work, pullRequests, issues)

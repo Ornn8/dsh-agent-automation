@@ -15,6 +15,9 @@ permissions:
 jobs:
   backlog:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dispatch-backlog.yml@{{CONTROLLER_SHA}}
+    with:
+      capacity_resume_only: ${{ github.event_name == 'schedule' }}
+      controller_login: ${{ vars.AGENT_AUTOMATION_CONTROLLER_LOGIN }}
 
   review-reconcile:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/reconcile-reviews.yml@{{CONTROLLER_SHA}}

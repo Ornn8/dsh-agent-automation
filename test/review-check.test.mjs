@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { capacityWaitStatusLine } from '../src/capacity-wait-projection.mjs'
 import {
   completeReviewCheck,
   failReviewCheck,
@@ -11,6 +12,7 @@ import {
   startDeferredReviewCheck,
   trustedReviewCheckIds,
   trustedDeferredReviewCheckId,
+  trustedDeferredReviewProjection,
 } from '../src/review-check.mjs'
 
 const repository = 'owner/repository'
@@ -22,6 +24,29 @@ const identity = {
   definitionHash: 'b'.repeat(64),
 }
 const identityWithRun = { ...identity, runId: 17, runAttempt: 2 }
+const capacityProjection = {
+  version: 1,
+  workRequestId: `review-pr-12-${'a'.repeat(40)}-${head}`,
+  role: 'review',
+  profileId: 'github-pr-cycle',
+  workflowId: 'repair',
+  stageId: 'review',
+  definitionHash: identity.definitionHash,
+  revision: { base: 'a'.repeat(40), head },
+  subject: {
+    type: 'pull-request', number: 12, stateVersion: 'c'.repeat(64),
+    base: 'a'.repeat(40), head,
+  },
+  routeDecision: {
+    version: 1,
+    workRequestId: `review-pr-12-${'a'.repeat(40)}-${head}`,
+    role: 'review', stateVersion: 'c'.repeat(64), taskClass: 'default',
+    policyHash: 'd'.repeat(64), evidenceHash: 'e'.repeat(64),
+  },
+  capacityGenerationHash: 'f'.repeat(64),
+  observationId: '17:2',
+}
+const capacitySummary = `No review Worker was available because all routed capacity was deferred.\n${capacityWaitStatusLine(capacityProjection)}`
 
 function recorder(stdout = '{}') {
   const calls = []
@@ -57,7 +82,7 @@ test('capacity-deferred creates one neutral exact-head CheckRun and recognizes a
   const created = recorder('{"id":91}')
   await startDeferredReviewCheck({
     ghExecutable: 'gh', repository, head, runUrl, runAttempt: 2, identity,
-    summary: 'No review Worker was available because all routed capacity was deferred.',
+    summary: 'No review Worker was available because all routed capacity was deferred.', capacityProjection,
     execute: created.execute,
   })
   assert.deepEqual(created.calls[0][1], [
@@ -65,19 +90,19 @@ test('capacity-deferred creates one neutral exact-head CheckRun and recognizes a
     '-f', `name=${REVIEW_CHECK_NAME}`, '-f', `head_sha=${head}`, '-f', 'status=completed', '-f', 'conclusion=neutral', `-f`, `details_url=${runUrl}`,
     '-f', `external_id=${reviewCheckIdentity(identityWithRun)}`,
     '-f', 'output[title]=Agent review neutral',
-    '-f', 'output[summary]=No review Worker was available because all routed capacity was deferred.',
+    `-f`, `output[summary]=${capacitySummary}`,
   ])
   const response = {
     total_count: 4,
     check_runs: [
       { id: 90, name: REVIEW_CHECK_NAME, head_sha: head, status: 'completed', conclusion: 'neutral',
-        details_url: runUrl, app: { id: 15368 }, output: { title: 'Agent review neutral' }, external_id: reviewCheckIdentity({ ...identityWithRun, runId: 16 }) },
+        details_url: runUrl, app: { id: 15368 }, output: { title: 'Agent review neutral', summary: 'old' }, external_id: reviewCheckIdentity({ ...identityWithRun, runId: 16 }) },
       { id: 91, name: REVIEW_CHECK_NAME, head_sha: head, status: 'completed', conclusion: 'neutral',
-        details_url: runUrl, app: { id: 15368 }, output: { title: 'Agent review neutral' }, external_id: reviewCheckIdentity(identityWithRun) },
+        details_url: runUrl, app: { id: 15368 }, output: { title: 'Agent review neutral', summary: capacitySummary }, external_id: reviewCheckIdentity(identityWithRun) },
       { id: 92, name: REVIEW_CHECK_NAME, head_sha: head, status: 'completed', conclusion: 'neutral',
         details_url: runUrl, app: { id: 15368 }, output: { title: 'Agent review neutral' }, external_id: 'agent-review-v2:repair:review:' + 'b'.repeat(64) + ':17:2' },
       { id: 93, name: REVIEW_CHECK_NAME, head_sha: head, status: 'completed', conclusion: 'neutral',
-        details_url: runUrl, app: { id: 15368 }, output: { title: 'Agent review neutral' }, external_id: reviewCheckIdentity({ ...identityWithRun, workflowId: 'other' }) },
+        details_url: runUrl, app: { id: 1 }, output: { title: 'Agent review neutral' }, external_id: reviewCheckIdentity({ ...identityWithRun, workflowId: 'other' }) },
     ],
   }
   const replay = recorder('{"id":94}')
@@ -88,6 +113,26 @@ test('capacity-deferred creates one neutral exact-head CheckRun and recognizes a
       execute: replay.execute,
     })
   assert.equal(replayId, 91)
+  const trustedProjection = { isTrustedReviewCheck: check => [91, 94].includes(check.id) }
+  assert.deepEqual(trustedDeferredReviewProjection(response, { repository, head, ...trustedProjection }), capacityProjection)
+  assert.equal(trustedDeferredReviewProjection({
+    total_count: 5,
+    check_runs: [...response.check_runs, {
+      id: 94, name: REVIEW_CHECK_NAME, head_sha: head, status: 'completed', conclusion: 'neutral',
+      details_url: runUrl, app: { id: 15368 }, output: { title: 'Agent review neutral' },
+      external_id: reviewCheckIdentity(identityWithRun),
+    }],
+  }, { repository, head, ...trustedProjection }), null, 'a newer malformed neutral projection must fail closed')
+  assert.equal(trustedDeferredReviewProjection(response, { repository, head }), null, 'a projection without exact Actions provenance must not authorize resume')
+  assert.deepEqual(trustedDeferredReviewProjection({
+    total_count: 5,
+    check_runs: [...response.check_runs, {
+      id: 95, name: REVIEW_CHECK_NAME, head_sha: head, status: 'completed', conclusion: 'neutral',
+      details_url: runUrl, app: { id: 15368 }, output: { title: 'Agent review neutral', summary: capacitySummary },
+      external_id: reviewCheckIdentity({ ...identityWithRun, workflowId: 'other' }),
+    }],
+  }, { repository, head, isTrustedReviewCheck: check => check.id !== 95 && [91, 94].includes(check.id) }), capacityProjection,
+  'an untrusted newer neutral must not hide an older trusted projection')
   assert.equal(replay.calls.length, 0, 'trusted neutral replay must not create another CheckRun')
   assert.equal(trustedDeferredReviewCheckId({ ...response, check_runs: response.check_runs.map(check => ({ ...check, conclusion: 'failure' })) }, { repository, head, identity: identityWithRun }), null)
   assert.equal(trustedDeferredReviewCheckId({ ...response, check_runs: response.check_runs.map(check => ({ ...check, external_id: undefined })) }, { repository, head, identity: identityWithRun }), null)

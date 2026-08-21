@@ -9,6 +9,7 @@ import {
   run,
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
+import { createCapacityWaitProjection } from './capacity-wait-projection.mjs'
 import { AGENT_REVIEW_SKILL } from './agent-work-result.mjs'
 import {
   githubReviewBody,
@@ -21,7 +22,10 @@ import {
   startReviewCheck,
   startDeferredReviewCheck,
   trustedDeferredReviewCheckId,
+  trustedDeferredReviewProjection,
+  REVIEW_CHECK_NAME,
 } from './review-check.mjs'
+import { hasTrustedExactReviewInvocation, reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 import { loadTrustedWorkflowProfile } from './workflow-profile.mjs'
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
@@ -46,6 +50,11 @@ const workflowId = requiredEnv('WORKFLOW_ID')
 const stageId = requiredEnv('STAGE_ID')
 const runId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
 const runAttempt = Number.parseInt(requiredEnv('GITHUB_RUN_ATTEMPT'), 10)
+const trustedReview = {
+  controllerRepository: requiredEnv('CONTROLLER_REPOSITORY'),
+  controllerSha: requiredEnv('CONTROLLER_SHA'),
+  workflowPath: '.github/workflows/agent-review.yml',
+}
 const marker = reviewMarker(expectedHead)
 const githubEnvironment = actionsCredentialEnvironment()
 const reviewTimeoutMs = 60 * 60 * 1000
@@ -175,6 +184,31 @@ const observations = reviewObservations({
   comments: observationComments.flat(),
 })
 
+const reviewSubject = {
+  number: pullRequest.number,
+  repository,
+  state: String(pullRequest.state).toUpperCase(),
+  isDraft: pullRequest.isDraft,
+  baseRefName: pullRequest.baseRefName,
+  baseRefOid: pullRequest.baseRefOid,
+  headRefOid: pullRequest.headRefOid,
+  mergeStateStatus: 'UNKNOWN',
+  mergeable: null,
+}
+const trustedReviewRuns = new Map()
+for (const check of observationChecks.check_runs || []) {
+  if (check?.name !== REVIEW_CHECK_NAME || check.head_sha !== expectedHead) continue
+  const reviewRunId = reviewRunIdFromCheckRun(check, repository)
+  if (!reviewRunId) continue
+  try {
+    trustedReviewRuns.set(check.id, await ghJson([
+      'api', `repos/${repository}/actions/runs/${reviewRunId}`,
+    ], `review workflow run ${reviewRunId}`))
+  } catch {
+    // An unresolvable CheckRun cannot authorize or block a capacity resume.
+  }
+}
+
 const deferredReviewCheckId = trustedDeferredReviewCheckId(observationChecks, {
   repository,
   head: expectedHead,
@@ -185,6 +219,15 @@ const deferredReviewCheckId = trustedDeferredReviewCheckId(observationChecks, {
     runId,
     runAttempt,
   },
+})
+const priorCapacityProjection = trustedDeferredReviewProjection(observationChecks, {
+  repository,
+  head: expectedHead,
+  isTrustedReviewCheck: check => hasTrustedExactReviewInvocation({
+    pullRequest: reviewSubject,
+    reviewProof: { checkRun: check, run: trustedReviewRuns.get(check.id) },
+    trustedReview,
+  }),
 })
 const workRequest = Object.freeze({
   version: 2,
@@ -198,10 +241,26 @@ const subjectStateVersion = createHash('sha256').update(JSON.stringify({
   head: expectedHead,
   definitionHash: profile.definitionHash,
 })).digest('hex')
+if (priorCapacityProjection && (priorCapacityProjection.workRequestId !== workRequest.requestId
+  || priorCapacityProjection.role !== workRequest.role
+  || priorCapacityProjection.profileId !== profile.definition.profileId
+  || priorCapacityProjection.workflowId !== workflowId
+  || priorCapacityProjection.stageId !== stageId
+  || priorCapacityProjection.definitionHash !== profile.definitionHash
+  || priorCapacityProjection.revision.base !== expectedBase
+  || priorCapacityProjection.revision.head !== expectedHead
+  || priorCapacityProjection.subject.type !== 'pull-request'
+  || priorCapacityProjection.subject.number !== pullRequestNumber
+  || priorCapacityProjection.subject.stateVersion !== subjectStateVersion
+  || priorCapacityProjection.subject.base !== expectedBase
+  || priorCapacityProjection.subject.head !== expectedHead)) {
+  throw new Error('Capacity wait projection is stale for the current review WorkRequest')
+}
 const executionClaim = createWorkerExecutionClaim({
   config,
   role: 'review',
   workRequest,
+  routeDecision: priorCapacityProjection?.routeDecision,
   subjectStateVersion,
   trustedTaskSnapshot: { workflowStage: stageId },
   routingPolicy: config.operations.routing.review,
@@ -270,6 +329,25 @@ const workerReceipt = await runRoleWorker({
   adapters: createAgentAdapters(),
 })
 if (workerReceipt.outcome === 'capacity-deferred') {
+  const capacityProjection = createCapacityWaitProjection({
+    workRequestId: workRequest.requestId,
+    role: workRequest.role,
+    profileId: profile.definition.profileId,
+    workflowId,
+    stageId,
+    definitionHash: profile.definitionHash,
+    revision: { base: expectedBase, head: expectedHead },
+    subject: {
+      type: 'pull-request',
+      number: pullRequestNumber,
+      stateVersion: subjectStateVersion,
+      base: expectedBase,
+      head: expectedHead,
+    },
+    routeDecision: workerReceipt.routeDecision,
+    capacityGenerationHash: workerReceipt.capacityGenerationHash,
+    observationId: `${runId}:${runAttempt}`,
+  })
   const reviewCheckId = deferredReviewCheckId ?? await startDeferredReviewCheck({
     ghExecutable: config.ghExecutable,
     repository,
@@ -282,6 +360,7 @@ if (workerReceipt.outcome === 'capacity-deferred') {
       definitionHash: profile.definitionHash,
     },
     summary: 'No review Worker was available because all routed capacity was deferred.',
+    capacityProjection,
     env: githubEnvironment,
   })
   await writeOutput('review_check_id', reviewCheckId)

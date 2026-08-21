@@ -387,6 +387,7 @@ export function createWorkerExecutionClaim(options = {}) {
     workRequestId: boundedId(workRequest.requestId, 'role-work'),
     executionCommitNotified: false,
     executionCommitPromise: null,
+    capacityObservations: [],
   }
   EXECUTION_CLAIMS.add(token)
   EXECUTION_STATES.set(token, state)
@@ -419,6 +420,12 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
     if (attempted.has(workerId)) continue
     attempted.add(workerId)
     const prepared = await prepareAttempt(state, workerId)
+    state.capacityObservations.push({
+      eligible: prepared.capacity.eligible,
+      generation: prepared.capacity.generation,
+      generationHash: prepared.capacity.generationHash,
+      state: prepared.capacity.state,
+    })
     const admission = await claimAttempt(state, prepared.claim)
     if (admission.claimed === false) {
       const priorOutcome = admission.attempt.result.outcome
@@ -548,6 +555,15 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
     taskClass: state.execution.routeDecision.taskClass,
     routingAttemptId: state.execution.routingAttemptId,
     candidates: [...state.candidates],
+    routeDecision: { ...state.execution.routeDecision },
+    capacityGenerationHash: stableDigest(state.capacityObservations
+      .map(/** @param {AnyObject} observation */ observation => ({
+        eligible: observation.eligible,
+        generation: observation.generation,
+        generationHash: observation.generationHash,
+        state: observation.state,
+      }))
+      .sort(/** @param {AnyObject} left @param {AnyObject} right */ (left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))),
     unavailable,
     detail: 'All routed Workers are currently unavailable due to capacity.',
   }

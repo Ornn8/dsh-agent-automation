@@ -1,4 +1,5 @@
 import { parseJson, run } from './common.mjs'
+import { capacityWaitStatusLine, parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
 import { REVIEW_CHECK_NAME } from './review-authority.mjs'
 
 export { REVIEW_CHECK_NAME }
@@ -74,19 +75,57 @@ export function trustedDeferredReviewCheckId(response, { repository, head, ident
     .sort((left, right) => right - left)[0] ?? null
 }
 
+/** Return the newest exact-head capacity projection after the caller proves its Actions provenance. */
+export function trustedDeferredReviewProjection(response, { repository, head, isTrustedReviewCheck } = {}) {
+  if (!Array.isArray(response?.check_runs)) throw new Error('Invalid review CheckRun response')
+  if (response.total_count > response.check_runs.length) {
+    throw new Error('Review CheckRun snapshot is incomplete')
+  }
+  const trusted = check => {
+    try {
+      return typeof isTrustedReviewCheck === 'function' && isTrustedReviewCheck(check) === true
+    } catch {
+      return false
+    }
+  }
+  const check = response.check_runs
+    .filter(check => check?.name === REVIEW_CHECK_NAME
+      && check.head_sha === head
+      && check.status === 'completed'
+      && check.conclusion === 'neutral'
+      && check.output?.title === 'Agent review neutral'
+      && check.app?.id === GITHUB_ACTIONS_APP_ID
+      && Number.isSafeInteger(check.id)
+      && check.id > 0
+      && isRepositoryRunUrl(check.details_url, repository)
+      && parseReviewCheckIdentity(check)
+      && trusted(check))
+    .sort((left, right) => right.id - left.id)
+    [0]
+  if (!check) return null
+  try {
+    return parseCapacityWaitStatus(check.output?.summary)
+  } catch {
+    return null
+  }
+}
+
 /** Create one completed neutral exact-head CheckRun for a capacity-deferred review. */
 export async function startDeferredReviewCheck({
-  ghExecutable, repository, head, runUrl, runAttempt, identity, summary, env, execute = run,
+  ghExecutable, repository, head, runUrl, runAttempt, identity, summary, capacityProjection, env, execute = run,
 }) {
   const match = ACTIONS_RUN_URL.exec(runUrl)
   const runId = Number.parseInt(match?.[2] || '', 10)
   if (!match || match[1] !== repository || !Number.isSafeInteger(runId) || runId < 1) {
     throw new Error('Agent review run URL does not identify the target repository Actions run')
   }
+  const outputSummary = capacityProjection
+    ? `${summary}\n${capacityWaitStatusLine(capacityProjection)}`
+    : summary
   const result = await execute(ghExecutable, checkArguments('POST', repository, undefined, [
     ['name', REVIEW_CHECK_NAME], ['head_sha', head], ['status', 'completed'], ['conclusion', 'neutral'], ['details_url', runUrl],
     ['external_id', reviewCheckIdentity({ ...identity, runId, runAttempt })],
-    ['output[title]', 'Agent review neutral'], ['output[summary]', summary],
+    ['output[title]', 'Agent review neutral'], ['output[summary]', outputSummary],
   ]), { env })
   const check = parseJson(result.stdout, 'created deferred Agent review CheckRun')
   if (!Number.isSafeInteger(check?.id) || check.id < 1) throw new Error('GitHub did not return a deferred Agent review CheckRun id')

@@ -30,6 +30,7 @@ import {
   recoverableRepairIdentity,
   repairRoutingEvidence,
   recordedRepairState,
+  trustedRepairSourceComment,
 } from './repair-state.mjs'
 import {
   ciBaselineIssueFromReceipt,
@@ -56,6 +57,7 @@ import {
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { githubPages } from './supervision-github.mjs'
+import { capacityWaitStatusLine, createCapacityWaitProjection, parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -100,7 +102,7 @@ const marker = requestId
 const ciRequest = ciRepairRequest(requestId)
 const recoveryRequest = /^recovery-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}$/.test(requestId)
   || /^ci-run-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}\.recovery-[1-9][0-9]{0,19}$/.test(requestId)
-let mergeRequest = repairCause === 'merge-conflict'
+let mergeRequest = repairCause === 'merge-conflict' || /^merge-repair:/.test(requestId)
 if (!recoveryRequest && repairCause && !mergeRequest) throw new Error(`Unsupported repair cause ${repairCause}`)
 let reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
   ? transportedRequest.requestId.slice(`review-repair-${expectedHead}-`.length)
@@ -208,7 +210,7 @@ if (pullRequestNumber === 0) {
   pullRequestNumber = matches[0].number
 }
 
-async function upsertStatus(status, branch, detail, failureClass) {
+async function upsertStatus(status, branch, detail, failureClass, capacityProjection = null) {
   const runUrl = requiredEnv('RUN_URL')
   const body = [
     marker,
@@ -229,6 +231,7 @@ async function upsertStatus(status, branch, detail, failureClass) {
     `- Branch: \`${branch}\``,
     `- Run: ${runUrl}`,
     ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
+    ...(capacityProjection ? [capacityWaitStatusLine(capacityProjection)] : []),
     `- Detail: ${detail}`,
     '',
     '_DSH owns the technical response and any implementation changes._',
@@ -431,10 +434,65 @@ if (recoveryRequest) {
     ? executionRequestId.slice(`review-repair-${expectedHead}-`.length)
     : null
 }
+const capacityStatusComment = priorComments.slice().reverse().find(comment => {
+  if (comment?.user?.login !== markerAuthor || !/^- Status: \*\*capacity-waiting\*\*$/m.test(String(comment.body || ''))) return false
+  if (!recoveryRequest) return authenticatedMarker(comment, marker, markerAuthor)
+  return Boolean(trustedRepairSourceComment(comment, {
+    controllerSha,
+    expectedHead,
+    sourceRunId: recoveryIdentity.sourceRunId,
+    markerAuthor,
+    repository,
+  })?.requestId === executionRequestId)
+})
+const priorCapacityProjection = capacityStatusComment
+  ? parseCapacityWaitStatus(capacityStatusComment.body)
+  : null
+if (priorCapacityProjection && (priorCapacityProjection.workRequestId !== executionRequestId
+  || priorCapacityProjection.role !== repairRole
+  || priorCapacityProjection.revision.base !== pullRequest.base.sha
+  || priorCapacityProjection.revision.head !== expectedHead
+  || priorCapacityProjection.subject.type !== 'pull-request'
+  || priorCapacityProjection.subject.number !== pullRequestNumber
+  || priorCapacityProjection.subject.base !== pullRequest.base.sha
+  || priorCapacityProjection.subject.head !== expectedHead)) {
+  throw new Error('Capacity wait projection is stale for the current pull-request repair')
+}
+if (priorCapacityProjection) effectiveWorkflowStage = priorCapacityProjection.stageId
+const capacityProfileId = transportedRequest?.profileId || priorCapacityProjection?.profileId || 'github-pr-cycle'
+const capacityWorkflowId = transportedRequest?.workflowId || priorCapacityProjection?.workflowId || 'repair'
+const capacityStageId = transportedRequest?.stageId || priorCapacityProjection?.stageId || effectiveWorkflowStage
+const capacityProfile = transportedProfile || await targetProfile({
+  profileId: capacityProfileId,
+  revision: pullRequest.base.sha,
+})
+if (priorCapacityProjection && (priorCapacityProjection.profileId !== capacityProfile.definition.profileId
+  || priorCapacityProjection.workflowId !== capacityWorkflowId
+  || priorCapacityProjection.stageId !== capacityStageId
+  || priorCapacityProjection.definitionHash !== capacityProfile.definitionHash)) {
+  throw new Error('Capacity wait projection no longer matches the trusted repair Profile')
+}
+if (priorCapacityProjection) {
+  const capacityStage = resolveWorkflowStage(
+    capacityProfile.definition,
+    capacityWorkflowId,
+    capacityStageId,
+    'worker',
+  )
+  if (capacityStage.role !== repairRole || capacityStage.procedure !== AGENT_REPAIR_SKILL) {
+    throw new Error('Capacity wait Stage is no longer an eligible pull-request repair Stage')
+  }
+  repairProcedure = capacityStage.procedure
+}
+if (transportedRequest && (capacityProfile.definitionHash !== transportedRequest.definitionHash
+  || capacityProfile.definition.profileId !== transportedRequest.profileId)) {
+  throw new Error('Transported WorkRequest does not match the capacity wait Profile')
+}
 let ciRun
 if (ciRequest) {
-  if (!effectiveCiWorkflowName) throw new Error('CI_WORKFLOW_NAME is required for a CI repair request')
   ciRun = await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run')
+  if (!effectiveCiWorkflowName) effectiveCiWorkflowName = ciRun.name
+  if (!effectiveCiWorkflowName) throw new Error('CI_WORKFLOW_NAME is required for a CI repair request')
   if (ciRun.run_attempt !== ciRequest.attempt) throw new Error('CI workflow run attempt changed')
   if (!trustedCiFailure({
     run: ciRun, pullRequestNumber, expectedHead, workflowName: effectiveCiWorkflowName,
@@ -464,6 +522,9 @@ const governorRecords = await trustedGovernorRecords({
 })
 const governorSubject = pullRequestGovernorSubject(pullRequest)
 const governorStateVersion = subjectStateVersion(governorSubject)
+if (priorCapacityProjection && priorCapacityProjection.subject.stateVersion !== governorStateVersion) {
+  throw new Error('Capacity wait projection is stale for the current pull-request state')
+}
 if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
   throw new Error(`Pull request #${pullRequestNumber} is paused and requires an authorized resume`)
 }
@@ -476,7 +537,7 @@ const governedTransition = repairClass === 'automatic-ci'
     : 'review-repair'
 const budgetTransition = repairClass === 'automatic-ci' ? 'ci-repair' : mergeRequest ? 'merge-repair' : 'review-repair'
 let governorStartedRecord = null
-if (ciRequest && !recoveryRequest) {
+if (ciRequest && !recoveryRequest && !priorCapacityProjection) {
   const admission = governorDecision({
     transition: governedTransition,
     subject: governorSubject,
@@ -519,6 +580,30 @@ if (ciRequest && !recoveryRequest) {
   }
   governorStartedRecord = createStartedGovernorRecord({
     admittedRecord: admission.record,
+    attemptRecord: budget.record,
+  })
+} else if (ciRequest && !recoveryRequest && priorCapacityProjection) {
+  const matchingAdmission = governorRecords.find(record => record.status === 'admitted'
+    && record.transition === governedTransition
+    && record.subject.type === 'pull-request'
+    && record.subject.number === pullRequestNumber
+    && record.stateVersion === governorStateVersion)
+  if (!matchingAdmission) {
+    throw new Error('Capacity wait has no current controller-attested CI repair admission')
+  }
+  const budget = governorBudgetDecision({
+    transition: budgetTransition,
+    subject: { type: governorSubject.type, number: governorSubject.number },
+    workIdentity: `branch:${pullRequest.head.ref}`,
+    observationId: matchingAdmission.observationId,
+    limit: 3,
+    records: governorRecords,
+  })
+  if (!budget.execute || !budget.record) {
+    throw new Error(`Capacity wait cannot resume CI repair: ${budget.action}`)
+  }
+  governorStartedRecord = createStartedGovernorRecord({
+    admittedRecord: matchingAdmission,
     attemptRecord: budget.record,
   })
 } else if (ciRequest && recoveryRequest) {
@@ -597,6 +682,7 @@ const executionClaim = createWorkerExecutionClaim({
   config,
   role: repairRole,
   workRequest: executionWorkRequest,
+  routeDecision: priorCapacityProjection?.routeDecision,
   subjectStateVersion: governorStateVersion,
   trustedTaskSnapshot: repairRoutingEvidence({
     paths: changedPaths,
@@ -686,9 +772,29 @@ try {
     ? ciBaselineIssueFromReceipt({ receipt: effectiveReceipt, repository })
     : null
   if (effectiveReceipt.outcome === 'capacity-deferred') {
+    const capacityProjection = createCapacityWaitProjection({
+      workRequestId: executionRequestId,
+      role: repairRole,
+      profileId: capacityProfile.definition.profileId,
+      workflowId: capacityWorkflowId,
+      stageId: capacityStageId,
+      definitionHash: capacityProfile.definitionHash,
+      revision: { base: pullRequest.base.sha, head: expectedHead },
+      subject: {
+        type: 'pull-request',
+        number: pullRequestNumber,
+        stateVersion: governorStateVersion,
+        base: pullRequest.base.sha,
+        head: expectedHead,
+      },
+      routeDecision: effectiveReceipt.routeDecision,
+      capacityGenerationHash: effectiveReceipt.capacityGenerationHash,
+      observationId: governorObservationId,
+    })
     await upsertStatus('capacity-waiting', branch,
       'All admitted change Workers are currently unavailable due to verified capacity state; the original repair WorkRequest remains eligible.',
-      undefined)
+      undefined,
+      capacityProjection)
     await setRepairLabels({ remove: ['automation/repairing'] })
     process.stdout.write(`Pull request #${pullRequestNumber} repair is waiting for an available change Worker; no product failure was recorded.\n`)
   } else if (baselineReference) {

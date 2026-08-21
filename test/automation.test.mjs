@@ -33,6 +33,7 @@ import {
   independentIssueObservationNumber,
   issueDependencies,
   selectBacklogWork,
+  selectCapacityWaitingWork,
   trustedBlockedReviewProof,
   trustedCiFailure,
   trustedCiRerunSuccess,
@@ -1174,6 +1175,35 @@ test('WorkRequest repository dispatch uses one extensible payload envelope', asy
   )
 })
 
+test('capacity reconciliation uses one trusted bounded wake source', async () => {
+  const backlogSource = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
+  const capacitySource = backlogSource.slice(
+    backlogSource.indexOf('async function capacityComments'),
+    backlogSource.indexOf('async function writeGovernorRecord'),
+  )
+  const reviewSource = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
+  const issueCaller = await readFile(new URL('../templates/target/.github/workflows/agent-issues.yml', import.meta.url), 'utf8')
+  const landingCaller = await readFile(new URL('../templates/target/.github/workflows/agent-landing-reconcile.yml', import.meta.url), 'utf8')
+  assert.match(backlogSource, /trustedControllerMutation/)
+  assert.match(backlogSource, /GITHUB_RUN_NUMBER/)
+  assert.match(capacitySource, /const pages = \[1\]/)
+  assert.match(capacitySource, /capacityRotatingPage > 1/)
+  assert.match(capacitySource, /pages\.push\(capacityRotatingPage\)/)
+  assert.match(capacitySource, /for \(const page of pages\)/)
+  assert.match(capacitySource, /issues\/comments\?sort=updated&direction=desc&per_page=\$\{capacityPageSize\}&page=\$\{page\}/)
+  assert.match(capacitySource, /seenCommentIds/)
+  assert.match(backlogSource, /issue_url/)
+  assert.match(backlogSource, /current capacity subject/)
+  assert.doesNotMatch(capacitySource, /pulls\?state=open|issues\?state=all/)
+  assert.doesNotMatch(capacitySource, /capacity-wait comments for #/)
+  assert.match(reviewSource, /hasTrustedExactReviewInvocation/)
+  assert.match(reviewSource, /isTrustedReviewCheck/)
+  assert.doesNotMatch(issueCaller, /schedule:/)
+  assert.doesNotMatch(issueCaller, /capacity_resume_only:/)
+  assert.match(landingCaller, /schedule:/)
+  assert.match(landingCaller, /capacity_resume_only:/)
+})
+
 test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {
   for (const name of ['dsh-repair.yml', 'pipeline-health.yml']) {
     const workflow = await readFile(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8')
@@ -1691,6 +1721,53 @@ test('backlog dispatch leaves failed or active repairs for their explicit recove
       repository: 'Ornn8/deepseek-harness', pullRequests: [pullRequest], issues: [],
     }), null)
   }
+})
+
+test('capacity backlog resume selects one exact waiting subject and rejects stale or terminal revisions', () => {
+  const projection = {
+    version: 1,
+    workRequestId: 'repair-request-1',
+    role: 'change',
+    profileId: 'github-pr-cycle',
+    workflowId: 'repair',
+    stageId: 'change',
+    definitionHash: 'a'.repeat(64),
+    revision: { base: 'c'.repeat(40), head: 'd'.repeat(40) },
+    subject: {
+      type: 'pull-request', number: 10, stateVersion: 'b'.repeat(64),
+      base: 'c'.repeat(40), head: 'd'.repeat(40),
+    },
+    routeDecision: {
+      version: 1,
+      workRequestId: 'repair-request-1', role: 'change', stateVersion: 'b'.repeat(64),
+      taskClass: 'default', policyHash: 'e'.repeat(64), evidenceHash: 'f'.repeat(64),
+    },
+    capacityGenerationHash: '1'.repeat(64),
+    observationId: 'run-1:1',
+  }
+  const pullRequest = {
+    number: 10, state: 'open', draft: false,
+    head: { sha: 'd'.repeat(40), repo: { full_name: 'Ornn8/deepseek-harness' } },
+    base: { sha: 'c'.repeat(40) }, labels: [],
+  }
+  const selected = selectCapacityWaitingWork({
+    pullRequests: [pullRequest], issues: [],
+    capacityWaits: [{ repository: 'Ornn8/deepseek-harness', projection, currentStateVersion: 'b'.repeat(64) }],
+  })
+  assert.equal(selected.type, 'repair')
+  assert.equal(selected.number, 10)
+  assert.equal(selectCapacityWaitingWork({
+    pullRequests: [pullRequest], issues: [],
+    capacityWaits: [{ repository: 'Ornn8/deepseek-harness', projection, currentStateVersion: '0'.repeat(64) }],
+  }), null)
+  assert.equal(selectCapacityWaitingWork({
+    pullRequests: [{ ...pullRequest, head: { ...pullRequest.head, sha: '0'.repeat(40) } }], issues: [],
+    capacityWaits: [{ repository: 'Ornn8/deepseek-harness', projection, currentStateVersion: 'b'.repeat(64) }],
+  }), null)
+  assert.equal(selectCapacityWaitingWork({
+    pullRequests: [{ ...pullRequest, labels: [{ name: 'automation/repair-blocked' }] }], issues: [],
+    capacityWaits: [{ repository: 'Ornn8/deepseek-harness', projection, currentStateVersion: 'b'.repeat(64) }],
+  }), null)
 })
 
 test('backlog dispatch waits for open dependencies and skips trackers', () => {

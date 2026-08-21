@@ -25,6 +25,7 @@ import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-pro
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseAgentWorkRequest } from './work-request.mjs'
 import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
+import { capacityWaitStatusLine, createCapacityWaitProjection, parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
@@ -36,6 +37,7 @@ const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
 const marker = '<!-- agent-worker-run -->'
+const observationId = `${requiredEnv('GITHUB_RUN_ID')}:${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 const governorTrust = {
   repository,
   controllerRepository: requiredEnv('CONTROLLER_REPOSITORY'),
@@ -87,7 +89,7 @@ async function upsertStatus(body) {
   }
 }
 
-function statusBody(status, branch, detail, failureClass) {
+function statusBody(status, branch, detail, failureClass, capacityProjection = null) {
   const runUrl = requiredEnv('RUN_URL')
   return [
     marker,
@@ -100,6 +102,7 @@ function statusBody(status, branch, detail, failureClass) {
     `- Branch: \`${branch}\``,
     `- Run: ${runUrl}`,
     ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
+    ...(capacityProjection ? [capacityWaitStatusLine(capacityProjection)] : []),
     `- Detail: ${detail}`,
     '',
     '_The selected change Worker owns implementation, validation, commits, pushes, and the pull request._',
@@ -153,13 +156,30 @@ if (stage.role !== 'change') throw new Error('Issue implementation must use the 
 const admissionComments = (await ghJson([
   'api', `repos/${repository}/issues/${issueNumber}/comments?per_page=100`, '--paginate', '--slurp',
 ], 'Issue governor records')).flat()
+const governorSubject = issueGovernorSubject(issue)
+const governorStateVersion = subjectStateVersion(governorSubject)
+const statusComment = admissionComments.slice().reverse().find(comment => authenticatedMarker(comment, marker, markerAuthor))
+const priorCapacityProjection = statusComment?.body?.match(/^- Status: \*\*capacity-waiting\*\*$/m)
+  ? parseCapacityWaitStatus(statusComment.body)
+  : null
+if (priorCapacityProjection && (priorCapacityProjection.workRequestId !== issueRequestId
+  || priorCapacityProjection.role !== workRequest.role
+  || priorCapacityProjection.profileId !== workRequest.profileId
+  || priorCapacityProjection.workflowId !== workRequest.workflowId
+  || priorCapacityProjection.stageId !== workRequest.stageId
+  || priorCapacityProjection.definitionHash !== workRequest.definitionHash
+  || priorCapacityProjection.revision.base !== workRequest.revision.base
+  || priorCapacityProjection.revision.head !== workRequest.revision.head
+  || priorCapacityProjection.subject.type !== 'issue'
+  || priorCapacityProjection.subject.number !== issueNumber
+  || priorCapacityProjection.subject.stateVersion !== governorStateVersion)) {
+  throw new Error('Capacity wait projection is stale for the current Issue WorkRequest')
+}
 const governorRecords = await trustedGovernorRecords({
   comments: admissionComments,
   trust: governorTrust,
   loadRun: runId => ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `governor workflow run ${runId}`),
 })
-const governorSubject = issueGovernorSubject(issue)
-const governorStateVersion = subjectStateVersion(governorSubject)
 if (!governorRecords.some(record => (record.status === 'applied' || record.status === 'started')
   && record.transition === workflowStageTransition(workRequest)
   && record.subject.type === 'issue'
@@ -258,6 +278,7 @@ try {
     config,
     role: stage.role,
     workRequest,
+    routeDecision: priorCapacityProjection?.routeDecision,
     subjectStateVersion: governorStateVersion,
     trustedTaskSnapshot: {
       workflowStage: workRequest.stageId,
@@ -290,8 +311,27 @@ try {
     : workerReceipt
 
   if (effectiveReceipt.outcome === 'capacity-deferred') {
+    const capacityProjection = createCapacityWaitProjection({
+      workRequestId: workRequest.requestId,
+      role: workRequest.role,
+      profileId: workRequest.profileId,
+      workflowId: workRequest.workflowId,
+      stageId: workRequest.stageId,
+      definitionHash: workRequest.definitionHash,
+      revision: workRequest.revision,
+      subject: {
+        type: 'issue',
+        number: issueNumber,
+        stateVersion: governorStateVersion,
+      },
+      routeDecision: effectiveReceipt.routeDecision,
+      capacityGenerationHash: effectiveReceipt.capacityGenerationHash,
+      observationId,
+    })
     await upsertStatus(statusBody('capacity-waiting', branch,
-      'All admitted change Workers are currently unavailable due to verified capacity state; the original WorkRequest remains eligible.'))
+      'All admitted change Workers are currently unavailable due to verified capacity state; the original WorkRequest remains eligible.',
+      undefined,
+      capacityProjection))
     process.stdout.write(`Issue #${issueNumber} is waiting for an available change Worker; no product failure was recorded.\n`)
   } else if (workerReceipt.outcome === 'blocked' || effectiveReceipt.outcome === 'blocked') {
     await run(config.ghExecutable, [

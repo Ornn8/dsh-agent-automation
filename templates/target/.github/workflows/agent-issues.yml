@@ -42,6 +42,7 @@ jobs:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dispatch-backlog.yml@{{CONTROLLER_SHA}}
     with:
       requested_issue_number: ${{ (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'agent/dsh' && github.event.issue.number) || (github.event_name == 'repository_dispatch' && github.event.action == 'agent_backlog_reconcile' && github.event.client_payload.issue_number) || 0 }}
+      controller_login: ${{ vars.AGENT_AUTOMATION_CONTROLLER_LOGIN }}
 
   fault-resume:
     if: >-
