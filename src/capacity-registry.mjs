@@ -102,7 +102,20 @@ function parseCapacityIdentity(value, scope) {
     throw new Error('CapacityRecord model scope requires provider and model identity')
   }
   if (scope === 'worker' && identity.worker === null) throw new Error('CapacityRecord worker scope requires Worker identity')
-  return identity
+  return scope === 'capacity-group'
+    ? { provider: null, model: null, worker: null }
+    : scope === 'provider'
+      ? { provider: identity.provider, model: null, worker: null }
+      : scope === 'model'
+        ? { provider: identity.provider, model: identity.model, worker: null }
+        : identity
+}
+
+/** Return the canonical identity fields owned by one capacity scope. */
+/** @param {string} scope @param {CapacityIdentity} identity @returns {CapacityIdentity} */
+export function scopeCapacityIdentity(scope, identity) {
+  if (!SCOPE_SET.has(scope)) throw new Error(`CapacityRecord scope ${scope} is unsupported`)
+  return parseCapacityIdentity(identity, scope)
 }
 
 /** @param {CapacityIdentity} left @param {CapacityIdentity} right @returns {boolean} */
@@ -427,6 +440,9 @@ export function capacityEligibility(record, input = {}) {
   const nowMs = input.now ?? Date.now()
   if (current.state === 'available') return { eligible: true, state: 'available', record: current }
   if (current.state === 'cooldown' && current.retryAtUtc && Date.parse(current.retryAtUtc) <= nowMs) {
+    return { eligible: true, state: 'half-open', requiresProbe: true, record: current }
+  }
+  if (current.state === 'half-open' && current.lease && Date.parse(current.lease.expiresAt) <= nowMs) {
     return { eligible: true, state: 'half-open', requiresProbe: true, record: current }
   }
   return { eligible: false, state: current.state, record: current }

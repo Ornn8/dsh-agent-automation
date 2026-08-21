@@ -21,6 +21,7 @@ import {
   projectWorkerCapacityIdentity,
   recordCapacityFailure,
   completeHalfOpenLease,
+  scopeCapacityIdentity,
 } from './capacity-registry.mjs'
 
 export const CAPACITY_ATTEMPT_RESULTS = Object.freeze([
@@ -1248,8 +1249,9 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
 
   /** @param {Record<string, any>} probe @param {Record<string, any>} snapshot @param {string} scope @param {string} key */
   function assertProbeIdentity(probe, snapshot, scope, key) {
-    const expectedKey = capacityRecordKey({ capacityGroup: snapshot.capacityGroup, scope, identity: snapshot.identity })
-    if (probe.key !== expectedKey || probe.scope !== scope || JSON.stringify(probe.identity) !== JSON.stringify(snapshot.identity)) {
+    const expectedIdentity = scopeCapacityIdentity(scope, snapshot.identity)
+    const expectedKey = capacityRecordKey({ capacityGroup: snapshot.capacityGroup, scope, identity: expectedIdentity })
+    if (probe.key !== expectedKey || probe.scope !== scope || JSON.stringify(probe.identity) !== JSON.stringify(expectedIdentity)) {
       throw new Error('Capacity probe identity does not match the trusted Worker snapshot')
     }
     if (probe.leaseId === undefined) throw new Error('Capacity probe leaseId is required')
@@ -1397,6 +1399,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         const nowMs = completionTime ?? clock()
         const document = await readRegistrySnapshot(stateRoot)
         const records = []
+        let matchingFailureClaimed = false
         for (const item of probe.leases) {
           assertProbeIdentity(item, snapshot, item.scope, item.key)
           const current = document.document.records[item.key]
@@ -1407,6 +1410,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
           const matchingFailure = normalizedFailure && normalizedFailure.scope === current.scope
             ? normalizedFailure
             : undefined
+          matchingFailureClaimed ||= matchingFailure !== undefined
           const itemOutcome = outcome === 'failure' && !matchingFailure ? 'abandon' : outcome
           const next = completeHalfOpenLease(current, {
             leaseId: item.leaseId,
@@ -1417,6 +1421,34 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
           })
           document.document.records[item.key] = next
           records.push({ key: item.key, scope: current.scope, record: next })
+        }
+        if (outcome === 'failure' && normalizedFailure && !matchingFailureClaimed) {
+          const failureIdentity = scopeCapacityIdentity(normalizedFailure.scope, snapshot.identity)
+          const failureKey = capacityRecordKey({
+            capacityGroup: snapshot.capacityGroup,
+            scope: normalizedFailure.scope,
+            identity: failureIdentity,
+          })
+          const current = document.document.records[failureKey]
+          if (current?.state === 'half-open' && current.lease) {
+            throw new Error(`Capacity failure scope ${normalizedFailure.scope} is owned by another probe`)
+          }
+          const seed = current ?? createCapacityRecord({
+            ...identity,
+            capacityGroup: snapshot.capacityGroup,
+            scope: normalizedFailure.scope,
+            sourceWorker: snapshot.workerId,
+            capacityIdentity: failureIdentity,
+            now: nowMs,
+          })
+          const next = recordCapacityFailure(seed, normalizedFailure, {
+            sourceWorker: snapshot.workerId,
+            capacityIdentity: failureIdentity,
+            now: nowMs,
+            cooldownMs,
+          })
+          document.document.records[failureKey] = next
+          records.push({ key: failureKey, scope: normalizedFailure.scope, record: next })
         }
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return records

@@ -651,3 +651,132 @@ test('an independent later generation can claim the scopes again after a deferre
     await rm(stateRoot, { recursive: true, force: true })
   }
 })
+
+test('a same-group Worker can claim and complete a group record created by another Worker', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-role-worker-shared-group-'))
+  try {
+    let now = Date.parse('2026-08-21T00:00:00.000Z')
+    const localConfig = multiScopeConfig(stateRoot)
+    localConfig.workers.first.capacityGroup = 'shared-group'
+    localConfig.workers.second.capacityGroup = 'shared-group'
+    localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'second' }]
+    const registry = createCapacityRegistry({
+      stateRoot,
+      configurationHash: localConfig.configurationHash,
+      credentialGeneration: localConfig.credentialGeneration,
+      workers: localConfig.workers,
+      now: () => now,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'shared-group', sourceWorker: 'first', failure: scopedFailure('capacity-group'), now, cooldownMs: 1,
+    })
+    now += 2
+    const result = await runRoleWorker({
+      executionClaim: createWorkerExecutionClaim({
+        config: localConfig, role: 'change', workRequest: { requestId: 'shared-group-probe', role: 'change' },
+        subjectStateVersion: stateVersion, capacityProvider: registry,
+      }),
+      invocation: invocation(),
+      adapters: { fake: async () => ({ sessionId: 'second-session', outcome: 'completed' }) },
+    })
+    const records = await registry.records()
+    const groupKey = capacityRecordKey({ capacityGroup: 'shared-group', scope: 'capacity-group' })
+    assert.equal(result.workerId, 'second')
+    assert.deepEqual(records[groupKey].capacityIdentity, { provider: null, model: null, worker: null })
+    assert.equal(records[groupKey].state, 'available')
+    assert.equal(records[groupKey].lease, null)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('an expired one-millisecond probe lease is safely reclaimed by the next claimant', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-role-worker-expired-probe-'))
+  try {
+    let now = Date.parse('2026-08-21T00:00:00.000Z')
+    const localConfig = multiScopeConfig(stateRoot)
+    const registry = createCapacityRegistry({
+      stateRoot,
+      configurationHash: localConfig.configurationHash,
+      credentialGeneration: localConfig.credentialGeneration,
+      workers: localConfig.workers,
+      now: () => now,
+    })
+    await registry.recordFailure({
+      capacityGroup: 'first-group', sourceWorker: 'first', failure: scopedFailure('capacity-group'), now, cooldownMs: 1,
+    })
+    now += 2
+    const first = await registry.claimHalfOpenProbe({ workerId: 'first', leaseId: 'probe-expiring', owner: 'first', now, leaseMs: 1 })
+    assert.ok(first.probe)
+    now += 1
+    assert.deepEqual((await registry.inspect({ workerId: 'first', now })).probeScopes, ['capacity-group'])
+    const reclaimed = await registry.claimHalfOpenProbe({ workerId: 'first', leaseId: 'probe-reclaimed', owner: 'second', now, leaseMs: 1 })
+    assert.ok(reclaimed.probe)
+    await registry.completeHalfOpenProbe({ probe: reclaimed.probe, outcome: 'success', now })
+    const key = capacityRecordKey({ capacityGroup: 'first-group', scope: 'capacity-group' })
+    const record = (await registry.records())[key]
+    assert.equal(record.state, 'available')
+    assert.equal(record.lease, null)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+for (const missingScope of ['model', 'provider']) {
+  test(`a claimed group probe records an authoritative ${missingScope} failure in one transaction`, async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), `dsh-role-worker-missing-${missingScope}-`))
+    try {
+      let now = Date.parse('2026-08-21T00:00:00.000Z')
+      const localConfig = multiScopeConfig(stateRoot)
+      localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+      const registry = createCapacityRegistry({
+        stateRoot,
+        configurationHash: localConfig.configurationHash,
+        credentialGeneration: localConfig.credentialGeneration,
+        workers: localConfig.workers,
+        now: () => now,
+      })
+      await registry.recordFailure({
+        capacityGroup: 'first-group', sourceWorker: 'first', failure: scopedFailure('capacity-group'), now, cooldownMs: 1,
+      })
+      now += 2
+      const deferred = await runRoleWorker({
+        executionClaim: createWorkerExecutionClaim({
+          config: localConfig, role: 'change', workRequest: { requestId: `missing-${missingScope}`, role: 'change' },
+          subjectStateVersion: stateVersion, capacityProvider: registry,
+        }),
+        invocation: invocation(),
+        adapters: { fake: async () => {
+          throw Object.assign(new Error(`${missingScope} unavailable`), { adapterFailure: scopedFailure(missingScope) })
+        } },
+      })
+      let records = await registry.records()
+      const groupKey = capacityRecordKey({ capacityGroup: 'first-group', scope: 'capacity-group' })
+      const scopedKey = capacityRecordKey({
+        capacityGroup: 'first-group', scope: missingScope,
+        identity: { provider: 'provider-1', model: 'model-1', worker: 'first' },
+      })
+      assert.equal(deferred.outcome, 'capacity-deferred')
+      assert.equal(records[groupKey].lease, null)
+      assert.equal(records[scopedKey].state, 'cooldown')
+      assert.equal(records[scopedKey].reason, scopedFailure(missingScope).reason)
+      now += 15 * 60 * 1000 + 1
+      const recovered = await runRoleWorker({
+        executionClaim: createWorkerExecutionClaim({
+          config: localConfig, role: 'change', workRequest: { requestId: `missing-${missingScope}-retry`, role: 'change' },
+          subjectStateVersion: stateVersion, capacityProvider: registry,
+        }),
+        invocation: invocation(),
+        adapters: { fake: async () => ({ sessionId: 'recovered-session', outcome: 'completed' }) },
+      })
+      records = await registry.records()
+      assert.equal(recovered.outcome, 'completed')
+      assert.equal(records[groupKey].lease, null)
+      assert.equal(records[scopedKey].lease, null)
+      assert.equal(records[groupKey].state, 'available')
+      assert.equal(records[scopedKey].state, 'available')
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true })
+    }
+  })
+}
