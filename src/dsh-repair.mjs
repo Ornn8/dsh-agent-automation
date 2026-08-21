@@ -542,7 +542,7 @@ try {
   const workerReceipt = await runRoleWorker({
     executionClaim,
     ...(governorStartedRecord ? {
-      beforeWorkerStart: async () => writeGovernorRecord(governorStartedRecord),
+      onExecutionCommitted: async () => writeGovernorRecord(governorStartedRecord),
     } : {}),
     invocation: {
       taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,

@@ -549,11 +549,13 @@ test('only verified capacity failures continue to the next candidate', async () 
 test('all unavailable candidates return capacity-deferred without invoking a Worker', async () => {
   const provider = attemptProvider({ available: false, generation: 3 })
   let calls = 0
+  let committed = 0
   const result = await runRoleWorker({
     executionClaim: createWorkerExecutionClaim({
       config: config(), role: 'change', workRequest: { requestId: 'request-deferred', role: 'change' },
       subjectStateVersion: stateVersion, capacityProvider: provider,
     }),
+    onExecutionCommitted: async () => { committed += 1 },
     invocation: invocation(),
     adapters: { fake: async () => { calls += 1; return { sessionId: 'unexpected', outcome: 'completed' } } },
   })
@@ -562,11 +564,12 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(result.reason, 'capacity-deferred')
   assert.deepEqual(result.unavailable, ['first', 'second', 'third'])
   assert.equal(calls, 0)
+  assert.equal(committed, 0)
   assert.equal(provider.claims.size, 3)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
 })
 
-test('capacity deferral leaves the controller start hook untouched until same-claim reentry starts a Worker', async () => {
+test('capacity deferral leaves the execution commit hook untouched until same-claim reentry starts a Worker', async () => {
   const provider = attemptProvider({ available: false, generation: 3 })
   const starts = []
   let calls = 0
@@ -575,7 +578,7 @@ test('capacity deferral leaves the controller start hook untouched until same-cl
       config: config(), role: 'change', workRequest: { requestId: 'request-deferred-reentry', role: 'change' },
       subjectStateVersion: stateVersion, capacityProvider: provider,
     }),
-    beforeWorkerStart: async () => { starts.push('started') },
+    onExecutionCommitted: async () => { starts.push('committed') },
     invocation: invocation(),
     adapters: { fake: async () => {
       calls += 1
@@ -592,20 +595,25 @@ test('capacity deferral leaves the controller start hook untouched until same-cl
   provider.setGeneration(4)
   const resumed = await runRoleWorker(input)
   assert.equal(resumed.outcome, 'completed')
-  assert.deepEqual(starts, ['started'])
+  assert.deepEqual(starts, ['committed'])
   assert.equal(calls, 1)
 })
 
-test('controller start hook runs before every adapter and succeeds once across pre-session failover', async () => {
+test('capacity fallback invokes the execution commit hook once after the successful adapter', async () => {
   const provider = attemptProvider()
   const calls = []
   const events = []
+  const appendAttempt = provider.appendAttempt
+  provider.appendAttempt = async input => {
+    if (input.result.outcome !== 'claimed') events.push(`${input.result.outcome}:journal`)
+    return appendAttempt(input)
+  }
   const result = await runRoleWorker({
     executionClaim: createWorkerExecutionClaim({
       config: config(), role: 'change', workRequest: { requestId: 'request-start-order', role: 'change' },
       subjectStateVersion: stateVersion, capacityProvider: provider,
     }),
-    beforeWorkerStart: async () => { events.push('before-worker-start') },
+    onExecutionCommitted: async () => { events.push('execution-committed') },
     invocation: invocation(),
     adapters: { fake: async ({ workerId }) => {
       events.push(`${workerId}:adapter`)
@@ -617,52 +625,99 @@ test('controller start hook runs before every adapter and succeeds once across p
 
   assert.equal(result.workerId, 'second')
   assert.deepEqual(calls, ['first', 'second'])
-  assert.deepEqual(events, ['before-worker-start', 'first:adapter', 'second:adapter'])
+  assert.deepEqual(events, [
+    'first:adapter', 'capacity-failure:journal',
+    'second:adapter', 'completed:journal', 'execution-committed',
+  ])
 })
 
-test('a successful controller start hook is not repeated when the same claim re-enters', async () => {
+test('a completed replay with a missing execution commit invokes the hook without a Worker', async () => {
   const localConfig = config()
   localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
   const provider = attemptProvider({ generation: 1 })
   let starts = 0
+  let calls = 0
   const input = {
     executionClaim: createWorkerExecutionClaim({
       config: localConfig, role: 'change', workRequest: { requestId: 'request-start-reentry', role: 'change' },
       subjectStateVersion: stateVersion, capacityProvider: provider,
     }),
-    beforeWorkerStart: async () => { starts += 1 },
     invocation: invocation(),
-    adapters: { fake: async () => { throw quotaError() } },
+    adapters: { fake: async () => {
+      calls += 1
+      return { sessionId: 'completed-session', outcome: 'completed', output: 'durable result' }
+    } },
   }
 
-  assert.equal((await runRoleWorker(input)).outcome, 'capacity-deferred')
-  provider.setGeneration(2)
-  assert.equal((await runRoleWorker(input)).outcome, 'capacity-deferred')
+  assert.equal((await runRoleWorker(input)).outcome, 'completed')
+  const replay = await runRoleWorker({
+    ...input,
+    onExecutionCommitted: async () => { starts += 1 },
+    adapters: { fake: async () => { throw new Error('replay must not invoke Worker') } },
+  })
+  assert.equal(replay.outcome, 'replayed')
+  assert.equal(replay.priorOutcome, 'completed')
   assert.equal(starts, 1)
+  assert.equal(calls, 1)
 })
 
-test('controller start hook failure ends the attempt without invoking or failing over an adapter', async () => {
+test('a non-capacity failure commits once without replaying the Worker', async () => {
   const provider = attemptProvider()
   const calls = []
   let starts = 0
-  await assert.rejects(runRoleWorker({
+  const input = {
     executionClaim: createWorkerExecutionClaim({
-      config: config(), role: 'change', workRequest: { requestId: 'request-start-hook-failure', role: 'change' },
+      config: config(), role: 'change', workRequest: { requestId: 'request-non-capacity-commit', role: 'change' },
       subjectStateVersion: stateVersion, capacityProvider: provider,
     }),
-    beforeWorkerStart: async () => { starts += 1; throw new Error('Governor started record write failed') },
+    onExecutionCommitted: async () => { starts += 1 },
     invocation: invocation(),
     adapters: {
       fake: async ({ workerId }) => {
         calls.push(workerId)
-        return { sessionId: `${workerId}-session`, outcome: 'completed' }
+        const error = new Error('task failed')
+        error.adapterFailure = {
+          version: 1, category: 'task', reason: 'task-failure', scope: 'worker', phase: 'session',
+          code: 'worker.task-failure', confidence: 'authoritative',
+        }
+        throw error
       },
     },
-  }), /Governor started record write failed/)
+  }
+  await assert.rejects(runRoleWorker(input), /task failed/)
+  const replay = await runRoleWorker(input)
+  assert.equal(replay.outcome, 'replayed')
+  assert.equal(replay.priorOutcome, 'failed')
   assert.equal(starts, 1)
-  assert.deepEqual(calls, [])
-  assert.equal(provider.records.at(-1).result.category, 'controller')
-  assert.equal(provider.records.at(-1).result.reason, 'controller-failure')
+  assert.deepEqual(calls, ['first'])
+})
+
+test('execution commit failure leaves the durable result for a later replay without rerunning the Worker', async () => {
+  const provider = attemptProvider()
+  let calls = 0
+  let commitAttempts = 0
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'review', workRequest: { requestId: 'request-commit-retry', role: 'review' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => {
+      calls += 1
+      return { sessionId: 'commit-retry-session', outcome: 'completed' }
+    } },
+    onExecutionCommitted: async () => {
+      commitAttempts += 1
+      if (commitAttempts === 1) throw new Error('started record write failed')
+    },
+  }
+
+  await assert.rejects(runRoleWorker(input), /started record write failed/)
+  const replay = await runRoleWorker(input)
+  assert.equal(replay.outcome, 'replayed')
+  assert.equal(replay.priorOutcome, 'completed')
+  assert.equal(calls, 1)
+  assert.equal(commitAttempts, 2)
 })
 
 test('completed Worker output is durably available to a replay', async () => {
@@ -728,11 +783,13 @@ test('completed and claimed attempt replays remain terminal and never become neu
   for (const priorOutcome of ['completed', 'claimed']) {
     const provider = attemptProvider({ replayOutcome: priorOutcome })
     let calls = 0
+    let commits = 0
     const result = await runRoleWorker({
       executionClaim: createWorkerExecutionClaim({
         config: config(), role: 'review', workRequest: { requestId: `request-${priorOutcome}-replay`, role: 'review' },
         subjectStateVersion: stateVersion, capacityProvider: provider,
       }),
+      onExecutionCommitted: async () => { commits += 1 },
       invocation: invocation(),
       adapters: { fake: async () => { calls += 1; return { sessionId: 'unexpected', outcome: 'completed' } } },
     })
@@ -740,6 +797,7 @@ test('completed and claimed attempt replays remain terminal and never become neu
     assert.equal(result.outcome, 'replayed')
     assert.equal(result.priorOutcome, priorOutcome)
     assert.equal(calls, 0)
+    assert.equal(commits, priorOutcome === 'completed' ? 1 : 0)
   }
 })
 

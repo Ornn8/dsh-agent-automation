@@ -133,9 +133,10 @@ async function recordCapacityFailure(provider, input) {
   })
 }
 
-/** @param {AnyObject} provider @param {AnyObject} attempt @returns {Promise<void>} */
+/** @param {AnyObject} provider @param {AnyObject} attempt @returns {Promise<AnyObject|undefined>} */
 async function appendAttempt(provider, attempt) {
-  if (typeof provider.appendAttempt === 'function') await provider.appendAttempt(attempt)
+  if (typeof provider.appendAttempt === 'function') return provider.appendAttempt(attempt)
+  return undefined
 }
 
 /** @param {AnyObject} input @returns {AnyObject} */
@@ -250,11 +251,39 @@ async function claimAttempt(state, claim) {
   return { ...result, attempt, prepared }
 }
 
-/** @param {AnyObject} state @param {object} claim @param {AnyObject} result @returns {Promise<void>} */
+/** @param {AnyObject} state @param {object} claim @param {AnyObject} result @returns {Promise<AnyObject|undefined>} */
 async function finishAttempt(state, claim, result) {
   const prepared = ATTEMPT_CLAIMS.get(claim)
   if (!prepared || prepared.state !== state) throw new Error('Worker execution claim is not locally trusted')
-  await appendAttempt(state.provider, journalEntry(prepared.base, result))
+  return appendAttempt(state.provider, journalEntry(prepared.base, result))
+}
+
+/** @param {string} outcome @returns {boolean} */
+function isCapacityOutcome(outcome) {
+  return outcome === 'capacity-deferred' || outcome === 'capacity-failure'
+}
+
+/**
+ * Notify the controller after one non-capacity result is durable. A failed
+ * notification remains retryable on replay, while a successful one is shared
+ * by concurrent re-entry of this local execution claim.
+ * @param {AnyObject} state
+ * @param {(() => Promise<unknown>)|undefined} onExecutionCommitted
+ * @returns {Promise<void>}
+ */
+async function commitExecution(state, onExecutionCommitted) {
+  if (!onExecutionCommitted || state.executionCommitNotified) return
+  if (!state.executionCommitPromise) {
+    state.executionCommitPromise = Promise.resolve()
+      .then(() => onExecutionCommitted())
+      .then(() => { state.executionCommitNotified = true })
+  }
+  try {
+    await state.executionCommitPromise
+  } catch (error) {
+    if (!state.executionCommitNotified) state.executionCommitPromise = null
+    throw error
+  }
 }
 
 /** @param {AnyObject} state @param {object} claim @param {AnyObject} failure @returns {Promise<void>} */
@@ -356,8 +385,8 @@ export function createWorkerExecutionClaim(options = {}) {
     candidates: [...candidates],
     workRequest,
     workRequestId: boundedId(workRequest.requestId, 'role-work'),
-    workerStartCommitted: false,
-    workerStartPromise: null,
+    executionCommitNotified: false,
+    executionCommitPromise: null,
   }
   EXECUTION_CLAIMS.add(token)
   EXECUTION_STATES.set(token, state)
@@ -375,12 +404,12 @@ export function createWorkerExecutionAllocator(options = {}) {
  * @param {AnyObject} options
  * @returns {Promise<AnyObject>}
  */
-export async function runRoleWorker({ executionClaim, invocation, adapters, beforeWorkerStart } = {}) {
+export async function runRoleWorker({ executionClaim, invocation, adapters, onExecutionCommitted } = {}) {
   if (!EXECUTION_CLAIMS.has(executionClaim)) {
     throw new Error('runRoleWorker requires an opaque Worker execution claim')
   }
-  if (beforeWorkerStart !== undefined && typeof beforeWorkerStart !== 'function') {
-    throw new Error('runRoleWorker beforeWorkerStart must be a function')
+  if (onExecutionCommitted !== undefined && typeof onExecutionCommitted !== 'function') {
+    throw new Error('runRoleWorker onExecutionCommitted must be a function')
   }
   const state = EXECUTION_STATES.get(executionClaim)
   const attempted = new Set()
@@ -393,10 +422,11 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, befo
     const admission = await claimAttempt(state, prepared.claim)
     if (admission.claimed === false) {
       const priorOutcome = admission.attempt.result.outcome
-      if (priorOutcome === 'capacity-deferred' || priorOutcome === 'capacity-failure') {
+      if (isCapacityOutcome(priorOutcome)) {
         unavailable.push(workerId)
         continue
       }
+      if (priorOutcome !== 'claimed') await commitExecution(state, onExecutionCommitted)
       return {
         version: 1,
         outcome: 'replayed',
@@ -416,7 +446,6 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, befo
     let invocationAttempted = false
     let probeFinalized = false
     let attemptFinalized = false
-    let controllerStartFailure = null
     try {
       if (!prepared.capacity.eligible) {
         unavailable.push(workerId)
@@ -438,19 +467,6 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, befo
         }
         prepared.capacity.probe = probe.probe
       }
-      if (!state.workerStartCommitted && beforeWorkerStart) {
-        try {
-          if (!state.workerStartPromise) {
-            state.workerStartPromise = Promise.resolve()
-              .then(() => beforeWorkerStart())
-              .then(() => { state.workerStartCommitted = true })
-          }
-          await state.workerStartPromise
-        } catch (error) {
-          controllerStartFailure = error
-          throw error
-        }
-      }
       const candidateInvocation = {
         ...invocation,
         onStarted: /** @param {AnyObject} value */ async value => {
@@ -467,17 +483,9 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, befo
       attemptFinalized = true
       await completeCapacityProbe(state, prepared.capacity, 'success')
       probeFinalized = true
+      await commitExecution(state, onExecutionCommitted)
       return receipt
     } catch (error) {
-      if (controllerStartFailure) {
-        await completeCapacityProbe(state, prepared.capacity, 'abandon')
-        probeFinalized = true
-        await finishAttempt(state, prepared.claim, {
-          outcome: 'failed', category: 'controller', reason: 'controller-failure',
-        })
-        attemptFinalized = true
-        throw error
-      }
       if (attemptFinalized) {
         // The durable execution result is authoritative. A capacity projection
         // failure must not rewrite it or start the Worker again on replay.
@@ -512,6 +520,8 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, befo
         await finishAttempt(state, prepared.claim, {
           outcome: 'failed', category: failure.category, reason: failure.reason,
         })
+        attemptFinalized = true
+        await commitExecution(state, onExecutionCommitted)
         throw error
       }
       if (prepared.capacity.probe) {
