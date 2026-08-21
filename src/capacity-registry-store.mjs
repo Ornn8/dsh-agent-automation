@@ -97,6 +97,7 @@ function categoryForReason(reason) {
   if (reason === 'transport-failure') return 'transport'
   if (reason === 'protocol-invalid') return 'protocol'
   if (reason === 'host-failure') return 'host'
+  if (reason === 'controller-failure') return 'controller'
   return 'task'
 }
 

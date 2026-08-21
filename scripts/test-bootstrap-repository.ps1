@@ -122,6 +122,10 @@ try {
   Assert-True ($landingReconcileWorkflow -match [Regex]::Escape("uses: $repository/.github/workflows/reconcile-landing.yml@$sha")) 'Landing reconciliation omitted the immutable controller workflow.'
   Assert-True ($landingReconcileWorkflow -notmatch 'self-hosted') 'Landing reconciliation must stay GitHub-hosted.'
   Assert-True ($rendered -match 'recover-backlog\.yml') 'Generated YAML omitted recovery.'
+  $controllerRecoveryWorkflow = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\recover-backlog.yml') -Raw
+  Assert-True ($controllerRecoveryWorkflow -match 'controller_login:\s*\r?\n\s*required: true\s*\r?\n\s*type: string') 'Controller recovery omitted the required login input.'
+  Assert-True ($controllerRecoveryWorkflow -match 'TRUSTED_CONTROLLER_LOGIN: \$\{\{ inputs\.controller_login \}\}') 'Controller recovery did not pass its login input to the script.'
+  Assert-True ($controllerRecoveryWorkflow -notmatch 'actions/variables/AGENT_AUTOMATION_CONTROLLER_LOGIN') 'Controller recovery must not read mutable Actions variables for authority.'
   $supervisionWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-repository-supervision.yml') -Raw
   Assert-True ($supervisionWorkflow -match '(?m)^    - cron: ''17 \*/6 \* \* \*''\r?$') 'Repository supervision omitted its offset six-hour schedule.'
   Assert-True ($supervisionWorkflow -match [Regex]::Escape("upstream_repository: $upstreamRepository")) 'Repository supervision omitted the rendered upstream repository.'
@@ -153,6 +157,7 @@ try {
   Assert-True ($issuesWorkflow -match 'requested_issue_number:.*github\.event\.issue\.number.*github\.event\.client_payload\.issue_number') 'Agent Issues does not preserve the exact Issue across independent wake observations.'
   $recoveryWorkflow = Get-Content -LiteralPath (Join-Path $temp '.github\workflows\agent-recovery.yml') -Raw
   Assert-True ($recoveryWorkflow -match '(?m)^    workflows: \[Agent Issues, Agent PR Rework, Agent PR CI Repair, Agent PR Review\]\r?$') 'Agent Recovery must include each trusted model-backed entry workflow.'
+  Assert-True ($recoveryWorkflow -match 'controller_login: \$\{\{ vars\.AGENT_AUTOMATION_CONTROLLER_LOGIN \}\}') 'Agent Recovery must pass the configured controller login.'
   Assert-True ($recoveryWorkflow -match '(?m)^      source_run_attempt: \$\{\{ github\.event\.workflow_run\.run_attempt \}\}\r?$') 'Agent Recovery must bind fault observation to the completed workflow attempt.'
   Assert-True ($recoveryWorkflow -match '(?m)^    if: always\(\)\r?$') 'Agent Recovery must run the pinned controller for every workflow completion.'
   Assert-True (-not ($recoveryWorkflow -match 'github\.event\.workflow_run\.conclusion')) 'Agent Recovery must leave terminal-failure classification to the pinned controller.'

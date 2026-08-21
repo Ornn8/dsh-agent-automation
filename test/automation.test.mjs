@@ -1223,6 +1223,16 @@ test('reviewer infrastructure recovery uses the recursion-safe exact-pair dispat
   assert.match(workflow, /pull-requests: write/)
 })
 
+test('CI repair recovery dispatch uses verified source routing and a single root request suffix', async () => {
+  const source = await readFile(new URL('../src/recover-backlog.mjs', import.meta.url), 'utf8')
+  assert.match(source, /trustedRepairSourceComment/)
+  assert.match(source, /const originalRequestId = sourceCandidate\.requestId/)
+  assert.match(source, /originalRequestId\.startsWith\('ci-run-'\)/)
+  assert.match(source, /requiredEnv\('TRUSTED_CONTROLLER_LOGIN'\)/)
+  assert.doesNotMatch(source, /actions\/variables\/AGENT_AUTOMATION_CONTROLLER_LOGIN/)
+  assert.doesNotMatch(source, /function repairRequestId/)
+})
+
 test('review infrastructure faults are observed on hosted compute before bounded recovery runs', async () => {
   const target = await readFile(new URL('../templates/target/.github/workflows/agent-recovery.yml', import.meta.url), 'utf8')
   const observer = await readFile(new URL('../.github/workflows/observe-agent-fault.yml', import.meta.url), 'utf8')
@@ -1279,6 +1289,20 @@ test('review production path routes through the controller-owned capacity claim'
   assert.doesNotMatch(source, /completeReviewCheck\(\{[\s\S]*conclusion: 'neutral'/)
   assert.match(checkSource, /status', 'completed'.*conclusion', 'neutral'/s)
   assert.match(checkSource, /external_id', reviewCheckIdentity/)
+})
+
+test('change and repair production paths share role routing and capacity admission', async () => {
+  for (const name of ['dsh-issue.mjs', 'dsh-repair.mjs']) {
+    const source = await readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
+    assert.match(source, /createWorkerExecutionClaim/)
+    assert.match(source, /runRoleWorker/)
+    assert.match(source, /trustedTaskSnapshot/)
+    assert.doesNotMatch(source, /resolveRepositoryWorker|runAgentWorker/)
+    assert.match(source, /capacity-deferred/)
+    assert.match(source, /capacity-waiting/)
+    assert.match(source, /replayedCompleted/)
+    assert.match(source, /non-completed outcome/)
+  }
 })
 
 test('Codex review waits for its App Server to release workspace handles', async () => {

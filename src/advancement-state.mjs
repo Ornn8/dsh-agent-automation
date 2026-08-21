@@ -13,7 +13,7 @@ import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 
 const FULL_SHA = /^[0-9a-f]{40}$/
 
-/** @typedef {{ status?: string, transition?: string, stateVersion?: string, observationId?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
+/** @typedef {{ status?: string, transition?: string, stateVersion?: string, observationId?: string, candidateObservationId?: string, budgetTransition?: string, workIdentity?: string, attempt?: number, subject?: { type?: string, number?: number } }} GovernorRecord */
 /** @typedef {{ number: number, state: 'open' | 'closed', draft: boolean, mergeable?: boolean | string | null, base: { ref: string, sha: string }, head: { ref: string, sha: string, repo?: { full_name?: string } }, labels?: Array<string | { name?: string }> }} PullRequest */
 /** @typedef {Record<string, unknown> & { id?: number, name?: string, head_sha?: string, status?: string, run_attempt?: number }} EvidenceRecord */
 /** @typedef {{ definition: object, definitionHash: string }} WorkflowProfile */
@@ -39,7 +39,7 @@ function activeEpoch(records, pullRequestNumber) {
 /** @param {GovernorRecord[]} records @param {string} stateVersion @param {(transition: string) => boolean} predicate @param {boolean} requested @returns {'idle' | 'requested' | 'pending' | 'running'} */
 function transitionState(records, stateVersion, predicate, requested) {
   const matching = records.filter(record => record.stateVersion === stateVersion && predicate(record.transition || ''))
-  if (matching.some(record => record.status === 'applied' || record.status === 'attempt')) return 'running'
+  if (matching.some(record => record.status === 'applied' || record.status === 'started' || record.status === 'attempt')) return 'running'
   if (matching.some(record => record.status === 'admitted')) return 'pending'
   if (matching.some(record => record.status === 'candidate')) return requested ? 'requested' : 'pending'
   return 'idle'
@@ -54,7 +54,7 @@ function requestedRepairCandidate(records, stateVersion) {
       || record.transition.startsWith('review-repair:')
       || record.transition === 'merge-repair'
       || record.transition.startsWith('merge-repair:'))
-    && !records.some(applied => applied.status === 'applied'
+    && !records.some(applied => (applied.status === 'applied' || applied.status === 'started')
       && applied.transition === record.transition
       && applied.stateVersion === record.stateVersion
       && applied.subject?.type === record.subject?.type

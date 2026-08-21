@@ -10,7 +10,6 @@ import {
   parseJson,
   processCancellationSignal,
   removeJobDirectory,
-  resolveRepositoryWorker,
   requiredEnv,
   run,
   trustedAssociation,
@@ -25,9 +24,11 @@ import {
 } from './dispatch-policy.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { controllerMutationMarker } from './controller-mutation-marker.mjs'
-import { runAgentWorker } from './agent-worker.mjs'
+import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 import {
   interruptedRepairMayRetry,
+  recoverableRepairIdentity,
+  repairRoutingEvidence,
   recordedRepairState,
 } from './repair-state.mjs'
 import {
@@ -35,11 +36,17 @@ import {
   nonBaselineBlockFromReceipt,
   trustedBaselineIssue,
 } from './baseline-issue.mjs'
+import { RECOVERABLE_CONCLUSIONS } from './recovery-policy.mjs'
 import { isReviewRepairRequestId, mergeRepairTransition, parseAgentWorkRequest, reviewRepairTransition } from './work-request.mjs'
 import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
 import { hasNewReviewCheck, trustedReviewCheckIds } from './review-check.mjs'
-import { governorBudgetDecision, governorDecision, subjectStateVersion } from './governor-policy.mjs'
+import {
+  createStartedGovernorRecord,
+  governorBudgetDecision,
+  governorDecision,
+  subjectStateVersion,
+} from './governor-policy.mjs'
 import {
   attestedGovernorRecordBody,
   GOVERNOR_WORKFLOW_PATHS,
@@ -48,6 +55,7 @@ import {
 } from './governor-state.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
+import { githubPages } from './supervision-github.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -63,7 +71,8 @@ const ciWorkflowName = process.env.CI_WORKFLOW_NAME?.trim() || ''
 const repairCause = process.env.REPAIR_CAUSE?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
-const workerId = resolveRepositoryWorker(config, repository, transportedRequest?.role || requiredEnv('AGENT_ROLE'))
+const repairRole = transportedRequest?.role || requiredEnv('AGENT_ROLE')
+if (repairRole !== 'change') throw new Error(`Pull-request repair must use the change role, received ${repairRole}`)
 const cancellation = processCancellationSignal()
 const defaultBranch = requiredEnv('DEFAULT_BRANCH')
 const markerAuthor = githubLogin(config)
@@ -89,23 +98,29 @@ const marker = requestId
   ? `<!-- dsh-review-repair:${controllerSha}:${expectedHead}:${requestId} -->`
   : `<!-- dsh-review-repair:${controllerSha}:${expectedHead} -->`
 const ciRequest = ciRepairRequest(requestId)
-const mergeRequest = repairCause === 'merge-conflict'
-if (repairCause && !mergeRequest) throw new Error(`Unsupported repair cause ${repairCause}`)
-const reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
+const recoveryRequest = /^recovery-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}$/.test(requestId)
+  || /^ci-run-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}\.recovery-[1-9][0-9]{0,19}$/.test(requestId)
+let mergeRequest = repairCause === 'merge-conflict'
+if (!recoveryRequest && repairCause && !mergeRequest) throw new Error(`Unsupported repair cause ${repairCause}`)
+let reviewObservationId = transportedRequest && isReviewRepairRequestId(transportedRequest.requestId, expectedHead)
   ? transportedRequest.requestId.slice(`review-repair-${expectedHead}-`.length)
   : null
-const explicitRequest = Boolean(ciRequest)
+let explicitRequest = Boolean(ciRequest)
   || reviewObservationId?.startsWith('comment-') === true
   || (!isReviewRepairRequestId(requestId, expectedHead)
     && requestId.startsWith('comment-'))
-const recoveryRequest = /(?:^recovery-|\.recovery-\d+$)/.test(requestId)
-const repairClass = ciRequest
+let repairClass = ciRequest
   ? 'automatic-ci'
   : mergeRequest
     ? 'automatic-merge'
   : explicitRequest
     ? 'explicit-human'
     : 'automatic-review'
+let effectiveRepairCause = ciRequest ? ciWorkflowName : mergeRequest ? 'merge-conflict' : 'review-repair'
+let effectiveRepairCode = ciRequest ? ciWorkflowName : mergeRequest ? 'merge-conflict' : 'review-repair'
+let effectiveCiWorkflowName = ciWorkflowName
+let effectiveWorkflowStage = transportedRequest?.stageId || 'repair'
+let effectiveOriginalRequestId = null
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
 if (transportedRequest && (transportedRequest.repository !== repository
   || transportedRequest.subject.type !== 'pull-request'
@@ -121,6 +136,27 @@ if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 0) {
 async function ghJson(args, description) {
   const result = await run(config.ghExecutable, args, { env: hostCredentialEnvironment() })
   return parseJson(result.stdout, description)
+}
+
+async function pullRequestChangedPaths() {
+  const files = await githubPages({
+    config,
+    environment: hostCredentialEnvironment(),
+    path: `repos/${repository}/pulls/${pullRequestNumber}/files`,
+    description: `pull request #${pullRequestNumber} changed files`,
+  })
+  if (files.length > 100) throw new Error('Pull request changed-file evidence exceeded its bound')
+  const paths = files.map((file, index) => {
+    if (!file || typeof file.filename !== 'string' || !file.filename.trim()) {
+      throw new Error(`Pull request changed-file evidence item ${index} is invalid`)
+    }
+    return file.filename
+  })
+  const refreshed = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after changed files')
+  if (refreshed.head?.sha !== expectedHead || refreshed.base?.sha !== pullRequest.base?.sha) {
+    throw new Error('Pull request changed while collecting exact-head changed files')
+  }
+  return paths
 }
 
 async function actionsJson(args, description) {
@@ -186,7 +222,9 @@ async function upsertStatus(status, branch, detail, failureClass) {
     ] : []),
     `- Controller SHA: \`${controllerSha}\``,
     `- Repair class: \`${repairClass}\``,
-    ...(ciRequest ? [`- CI workflow: \`${ciWorkflowName}\``] : []),
+    `- Stage: \`${effectiveWorkflowStage}\``,
+    ...(recoveryRequest && effectiveOriginalRequestId ? [`- Original request: \`${effectiveOriginalRequestId}\``] : []),
+    ...(repairClass === 'automatic-ci' ? [`- CI workflow: \`${effectiveCiWorkflowName}\``] : []),
     `- Reviewed head: \`${expectedHead}\``,
     `- Branch: \`${branch}\``,
     `- Run: ${runUrl}`,
@@ -326,17 +364,84 @@ if (pullRequest.head.sha !== expectedHead) {
   process.stdout.write(`Recovered the completed repair for pull request #${pullRequestNumber} at ${pullRequest.head.sha}.\n`)
   process.exit(0)
 }
+const changedPaths = await pullRequestChangedPaths()
+
+const priorComments = (await ghJson([
+  'api', `repos/${repository}/issues/${pullRequestNumber}/comments?per_page=100`, '--paginate', '--slurp',
+], 'pull request comments')).flat()
+const recoveryIdentity = recoveryRequest
+  ? recoverableRepairIdentity({
+    requestId,
+    comments: priorComments,
+    controllerSha,
+    expectedHead,
+    markerAuthor,
+    repository,
+  })
+  : {
+    requestId,
+    originalRequestId: requestId,
+    sourceRunId: null,
+    sourceStatus: null,
+    repairClass: null,
+    repairCause: null,
+    repairCode: null,
+    workflowStage: null,
+    ciWorkflow: null,
+  }
+const executionRequestId = transportedRequest?.requestId || recoveryIdentity.originalRequestId
+  || requestId || `repair-${pullRequestNumber}-${expectedHead}`
+effectiveOriginalRequestId = recoveryRequest ? executionRequestId : null
+async function trustedSourceRepairRun(sourceRunId) {
+  const runId = Number.parseInt(sourceRunId, 10)
+  if (!Number.isSafeInteger(runId) || runId < 1) throw new Error('Repair recovery source run is invalid')
+  const sourceRun = await actionsJson(['api', `repos/${repository}/actions/runs/${runId}`], 'repair recovery source run')
+  const workflowReference = `${controllerRepository}/.github/workflows/dsh-repair.yml@${controllerSha}`
+  if (sourceRun?.id !== runId || sourceRun.repository?.full_name !== repository
+    || sourceRun.status !== 'completed'
+    || !RECOVERABLE_CONCLUSIONS.has(sourceRun.conclusion)
+    || !Number.isSafeInteger(sourceRun.run_attempt) || sourceRun.run_attempt < 1
+    || !sourceRun.referenced_workflows?.some(reference => reference.path === workflowReference
+      && reference.sha === controllerSha)) {
+    throw new Error('Repair recovery source run is not a trusted completed dsh-repair run')
+  }
+  return sourceRun
+}
+const sourceRepairRun = recoveryIdentity.sourceRunId
+  ? await trustedSourceRepairRun(recoveryIdentity.sourceRunId)
+  : null
+if (recoveryRequest) {
+  if (!recoveryIdentity.repairClass || Boolean(ciRequest) !== (recoveryIdentity.repairClass === 'automatic-ci')) {
+    throw new Error('Repair recovery source class does not match the recovery request')
+  }
+  if (ciWorkflowName && ciWorkflowName !== recoveryIdentity.ciWorkflow) {
+    throw new Error('Repair recovery CI workflow does not match the source repair evidence')
+  }
+  if (repairCause && repairCause !== recoveryIdentity.repairCause) {
+    throw new Error('Repair recovery cause does not match the source repair evidence')
+  }
+  repairClass = recoveryIdentity.repairClass
+  effectiveRepairCause = recoveryIdentity.repairCause
+  effectiveRepairCode = recoveryIdentity.repairCode
+  effectiveCiWorkflowName = recoveryIdentity.ciWorkflow || ''
+  effectiveWorkflowStage = recoveryIdentity.workflowStage || 'repair'
+  mergeRequest = effectiveRepairCause === 'merge-conflict'
+  explicitRequest = repairClass === 'explicit-human'
+  reviewObservationId = isReviewRepairRequestId(executionRequestId, expectedHead)
+    ? executionRequestId.slice(`review-repair-${expectedHead}-`.length)
+    : null
+}
 let ciRun
 if (ciRequest) {
-  if (!ciWorkflowName) throw new Error('CI_WORKFLOW_NAME is required for a CI repair request')
+  if (!effectiveCiWorkflowName) throw new Error('CI_WORKFLOW_NAME is required for a CI repair request')
   ciRun = await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run')
   if (ciRun.run_attempt !== ciRequest.attempt) throw new Error('CI workflow run attempt changed')
   if (!trustedCiFailure({
-    run: ciRun, pullRequestNumber, expectedHead, workflowName: ciWorkflowName,
+    run: ciRun, pullRequestNumber, expectedHead, workflowName: effectiveCiWorkflowName,
   })) {
     throw new Error('Workflow run is not trusted failed CI evidence for this pull request head')
   }
-} else if (explicitRequest) {
+} else if (explicitRequest && !recoveryRequest) {
   const commentRequestId = reviewObservationId?.startsWith('comment-') ? reviewObservationId : requestId
   const feedbackId = Number.parseInt(commentRequestId.slice('comment-'.length), 10)
   if (!Number.isSafeInteger(feedbackId) || feedbackId < 1) throw new Error('Invalid explicit repair request id')
@@ -352,10 +457,6 @@ if (ciRequest) {
 if (!explicitRequest && !mergeRequest && !pullRequest.labels.some(label => label.name === 'automation/review-blocked')) {
   throw new Error('The pull request no longer has the automation/review-blocked label')
 }
-
-const priorComments = (await ghJson([
-  'api', `repos/${repository}/issues/${pullRequestNumber}/comments?per_page=100`, '--paginate', '--slurp',
-], 'pull request comments')).flat()
 const governorRecords = await trustedGovernorRecords({
   comments: priorComments,
   trust: governorTrust,
@@ -366,14 +467,15 @@ const governorStateVersion = subjectStateVersion(governorSubject)
 if (pullRequest.labels.some(label => label.name === 'automation/paused')) {
   throw new Error(`Pull request #${pullRequestNumber} is paused and requires an authorized resume`)
 }
-const governedTransition = ciRequest
+const governedTransition = repairClass === 'automatic-ci'
   ? ciRepairTransition(ciRequest.runId)
   : mergeRequest
     ? mergeRepairTransition(reviewObservationId || (requestId.match(/^[0-9a-f]{64}$/) ? `advance-${requestId}` : requestId))
   : reviewObservationId
     ? reviewRepairTransition(reviewObservationId)
     : 'review-repair'
-const budgetTransition = ciRequest ? 'ci-repair' : mergeRequest ? 'merge-repair' : 'review-repair'
+const budgetTransition = repairClass === 'automatic-ci' ? 'ci-repair' : mergeRequest ? 'merge-repair' : 'review-repair'
+let governorStartedRecord = null
 if (ciRequest && !recoveryRequest) {
   const admission = governorDecision({
     transition: governedTransition,
@@ -382,7 +484,7 @@ if (ciRequest && !recoveryRequest) {
     observationId: governorObservationId,
     records: governorRecords,
   })
-  if (admission.record) await writeGovernorRecord(admission.record)
+  if (admission.record && admission.action === 'record-candidate') await writeGovernorRecord(admission.record)
   if (!admission.execute) {
     if (admission.action === 'record-candidate') {
       await run(config.ghExecutable, [
@@ -403,8 +505,8 @@ if (ciRequest && !recoveryRequest) {
     limit: 3,
     records: governorRecords,
   })
-  if (budget.record) await writeGovernorRecord(budget.record)
   if (!budget.execute) {
+    if (budget.record) await writeGovernorRecord(budget.record)
     if (budget.action !== 'pause') {
       cancellation.dispose()
       process.stdout.write(`Governor ${budget.action}; CI repair did not start a model.\n`)
@@ -415,21 +517,65 @@ if (ciRequest && !recoveryRequest) {
     process.stdout.write(`CI repair budget exhausted for pull request #${pullRequestNumber}; no model was started.\n`)
     process.exit(0)
   }
-  await writeGovernorRecord({
-    version: 1,
-    status: 'applied',
-    transition: governedTransition,
-    subject: { type: governorSubject.type, number: governorSubject.number },
-    stateVersion: governorStateVersion,
-    observationId: governorObservationId,
+  governorStartedRecord = createStartedGovernorRecord({
+    admittedRecord: admission.record,
+    attemptRecord: budget.record,
   })
-} else if (!governorRecords.some(record => ['admitted', 'applied'].includes(record.status)
+} else if (ciRequest && recoveryRequest) {
+  if (!sourceRepairRun) throw new Error('CI repair recovery has no trusted source run')
+  const sourceObservationId = `${sourceRepairRun.id}:${sourceRepairRun.run_attempt}`
+  const matchingRecord = (status, transition, observationId = null) => governorRecords.find(record => record.status === status
+    && record.transition === transition
+    && record.subject.type === 'pull-request'
+    && record.subject.number === pullRequestNumber
+    && record.stateVersion === governorStateVersion
+    && (!observationId || record.observationId === observationId))
+  const existingStarted = matchingRecord('started', governedTransition)
+  if (!existingStarted) {
+    let admittedRecord = matchingRecord('admitted', governedTransition, sourceObservationId)
+      || matchingRecord('admitted', governedTransition)
+    if (!admittedRecord) {
+      const admission = governorDecision({
+        transition: governedTransition,
+        subject: governorSubject,
+        stateVersion: governorStateVersion,
+        observationId: sourceObservationId,
+        records: governorRecords,
+      })
+      if (admission.action !== 'admit' || !admission.record) {
+        throw new Error(`Cannot rebuild CI repair admission from source observation: ${admission.action}`)
+      }
+      admittedRecord = admission.record
+    }
+    let attemptRecord = matchingRecord('attempt', budgetTransition, sourceObservationId)
+      || matchingRecord('attempt', budgetTransition)
+    if (!attemptRecord) {
+      const budget = governorBudgetDecision({
+        transition: budgetTransition,
+        subject: { type: governorSubject.type, number: governorSubject.number },
+        workIdentity: `branch:${pullRequest.head.ref}`,
+        observationId: sourceObservationId,
+        limit: 3,
+        records: governorRecords,
+      })
+      if (budget.action !== 'attempt' || !budget.record) {
+        throw new Error(`Cannot rebuild CI repair budget attempt from source observation: ${budget.action}`)
+      }
+      attemptRecord = budget.record
+    }
+    governorStartedRecord = createStartedGovernorRecord({ admittedRecord, attemptRecord })
+  }
+} else if (!governorRecords.some(record => ['admitted', 'applied', 'started'].includes(record.status)
   && (record.transition === governedTransition || (recoveryRequest && record.transition === 'workflow-recovery'))
   && record.subject.type === 'pull-request'
   && record.subject.number === pullRequestNumber
   && record.stateVersion === governorStateVersion)) {
   throw new Error(`Pull request #${pullRequestNumber} has no current controller-attested repair admission`)
 }
+const executionWorkRequest = transportedRequest ?? Object.freeze({
+  requestId: executionRequestId,
+  role: repairRole,
+})
 const priorRun = priorComments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
 if (priorRun) {
   const recorded = recordedRepairState(priorRun.body)
@@ -447,6 +593,21 @@ if (priorRun) {
 const branch = pullRequest.head.ref
 const baseBranch = pullRequest.base.ref
 if (baseBranch !== defaultBranch) throw new Error(`Pull request base ${baseBranch} is not the configured default branch ${defaultBranch}`)
+const executionClaim = createWorkerExecutionClaim({
+  config,
+  role: repairRole,
+  workRequest: executionWorkRequest,
+  subjectStateVersion: governorStateVersion,
+  trustedTaskSnapshot: repairRoutingEvidence({
+    paths: changedPaths,
+    workflowStage: effectiveWorkflowStage,
+    failureEvidence: {
+      class: repairClass,
+      code: effectiveRepairCode,
+    },
+  }),
+  routingPolicy: config.operations.routing.change,
+})
 await upsertStatus('running', branch, explicitRequest
   ? ciRequest
     ? `Failed CI request ${requestId} started a fresh DSH repair session.`
@@ -462,7 +623,7 @@ await setRepairLabels({
       ? ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed']
       : ['automation/ci-baseline', 'automation/repair-blocked', 'agent/dsh-failed'],
 })
-const priorReviewCheckIds = ciRequest || mergeRequest ? null : await reviewCheckIds()
+const priorReviewCheckIds = repairClass === 'automatic-ci' || mergeRequest ? null : await reviewCheckIds()
 
 const jobPath = await mkdtemp(join(runnerTemp, `dsh-repair-${pullRequestNumber}-`))
 const checkoutPath = join(jobPath, 'repository')
@@ -489,31 +650,48 @@ try {
     defaultBranch,
     branch,
     expectedHead,
-    requestKind: ciRequest ? 'ci' : mergeRequest ? 'merge-conflict' : explicitRequest ? 'explicit' : 'review',
-    requestId: requestId || `review-${expectedHead}`,
-    ...(ciRequest ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
+    requestKind: repairClass === 'automatic-ci' ? 'ci' : mergeRequest ? 'merge-conflict' : explicitRequest ? 'explicit' : 'review',
+    requestId: executionRequestId || `review-${expectedHead}`,
+    ...(repairClass === 'automatic-ci' ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
   })
 
-  const workerReceipt = await runAgentWorker({
-    config,
-    workerId,
+  const workerReceipt = await runRoleWorker({
+    executionClaim,
+    ...(governorStartedRecord ? {
+      onExecutionCommitted: async () => writeGovernorRecord(governorStartedRecord),
+    } : {}),
     invocation: {
-      taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${requestId}`,
+      taskId: `repair-${repository}-${pullRequestNumber}-${expectedHead}-${executionRequestId}`,
       cwd: checkoutPath,
-      title: `[Agent: ${workerId}] 修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
+      title: `修复 PR #${pullRequestNumber} @${expectedHead.slice(0, 7)}`,
       prompt,
       requiredSkill: repairProcedure,
       timeoutMs: 3 * 60 * 60 * 1000,
       signal: cancellation.signal,
-      onStarted: ({ sessionId }) => upsertStatus('running', branch, `Visible ${workerId} session: ${sessionId}.`),
+      onStarted: async ({ sessionId }) => {
+        await upsertStatus('running', branch, `Visible change Worker session: ${sessionId}.`)
+      },
     },
     adapters: createAgentAdapters(),
   })
+  const replayedCompleted = workerReceipt.outcome === 'replayed' && workerReceipt.priorOutcome === 'completed'
+  if (workerReceipt.outcome === 'replayed' && !replayedCompleted) {
+    throw new Error(`Durable repair execution replayed a non-completed outcome: ${workerReceipt.priorOutcome}`)
+  }
+  const effectiveReceipt = replayedCompleted
+    ? { ...workerReceipt, outcome: 'completed' }
+    : workerReceipt
 
-  const baselineReference = ciRequest
-    ? ciBaselineIssueFromReceipt({ receipt: workerReceipt, repository })
+  const baselineReference = repairClass === 'automatic-ci'
+    ? ciBaselineIssueFromReceipt({ receipt: effectiveReceipt, repository })
     : null
-  if (baselineReference) {
+  if (effectiveReceipt.outcome === 'capacity-deferred') {
+    await upsertStatus('capacity-waiting', branch,
+      'All admitted change Workers are currently unavailable due to verified capacity state; the original repair WorkRequest remains eligible.',
+      undefined)
+    await setRepairLabels({ remove: ['automation/repairing'] })
+    process.stdout.write(`Pull request #${pullRequestNumber} repair is waiting for an available change Worker; no product failure was recorded.\n`)
+  } else if (baselineReference) {
     const baselineIssue = await ghJson([
       'api', `repos/${repository}/issues/${baselineReference.number}`,
     ], 'reported CI baseline Issue')
@@ -522,7 +700,7 @@ try {
       repository,
       reference: baselineReference,
       trustedAssociation,
-      workflowName: ciWorkflowName,
+      workflowName: effectiveCiWorkflowName,
       branch,
       pullRequestBody: pullRequest.body,
     })
@@ -531,44 +709,44 @@ try {
       remove: ['automation/ci-failed', 'automation/repairing', 'automation/repair-blocked', 'agent/dsh-failed'],
     })
     await upsertStatus('blocked-baseline', branch,
-      `Session ${workerReceipt.sessionId} verified the separate default-branch baseline Issue: ${baselineReference.url} (${verifiedBaseline.identity.key}).`)
+      `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} verified the separate default-branch baseline Issue: ${baselineReference.url} (${verifiedBaseline.identity.key}).`)
     process.stdout.write(`DSH identified CI baseline Issue #${baselineReference.number}; the pull request remains unchanged.\n`)
   } else {
-    if (workerReceipt.outcome === 'blocked') {
-      const blocked = nonBaselineBlockFromReceipt(workerReceipt)
+    if (effectiveReceipt.outcome === 'blocked') {
+      const blocked = nonBaselineBlockFromReceipt(effectiveReceipt)
       if (!blocked) throw new Error('DSH reported blocked without a terminal automation result')
       await setRepairLabels({
         add: ['automation/repair-blocked'],
         remove: ['automation/ci-failed', 'automation/repairing', 'agent/dsh-failed'],
       })
       await upsertStatus('blocked', branch,
-        `Session ${workerReceipt.sessionId} ended with the valid ${blocked.reason} outcome; no baseline Issue was dispatched.`)
+        `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} ended with the valid ${blocked.reason} outcome; no baseline Issue was dispatched.`)
       process.stdout.write(`DSH ended repair for pull request #${pullRequestNumber} with ${blocked.reason}; no retry was scheduled.\n`)
     } else {
       const current = await ghJson(['api', `repos/${repository}/pulls/${pullRequestNumber}`], 'pull request after DSH repair')
-      const currentCiRun = ciRequest
+      const currentCiRun = repairClass === 'automatic-ci'
         ? await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run after repair')
         : null
       if (current.head.sha !== expectedHead) {
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
+        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
         process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
       } else if (ciRequest && trustedCiRerunSuccess({
         priorRun: ciRun,
         currentRun: currentCiRun,
         pullRequestNumber,
         expectedHead,
-        workflowName: ciWorkflowName,
+        workflowName: effectiveCiWorkflowName,
       })) {
         await setRepairLabels({ remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
-        process.stdout.write(`${workerId} repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
+        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
+        process.stdout.write(`The change Worker repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
       } else if (!ciRequest && !mergeRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${workerReceipt.sessionId} posted a technical rebuttal and requested one same-head review.`)
-        process.stdout.write(`${workerId} requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
+        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} posted a technical rebuttal and requested one same-head review.`)
+        process.stdout.write(`The change Worker requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
       } else {
         throw new Error('DSH exited successfully without advancing the head or proving the documented same-head completion')
       }

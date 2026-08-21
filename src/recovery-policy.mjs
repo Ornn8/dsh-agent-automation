@@ -1,7 +1,8 @@
 import { REVIEW_WORKFLOW_PATH } from './review-authority.mjs'
 
 const FULL_SHA = /^[0-9a-f]{40}$/
-const RECOVERABLE_CONCLUSIONS = new Set([
+/** Conclusions that permit bounded workflow recovery. */
+export const RECOVERABLE_CONCLUSIONS = new Set([
   'failure', 'cancelled', 'timed_out', 'startup_failure', 'stale',
 ])
 

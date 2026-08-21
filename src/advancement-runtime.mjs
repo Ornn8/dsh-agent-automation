@@ -12,7 +12,7 @@ const TERMINAL_ACTIONS = new Set([
 /** @typedef {{ action: string, repository: string, pullRequestNumber: number, pair: { base: string, head: string }, stateVersion: string, workflow: { definitionHash: string, workflowId: string, stageId: string }, repair?: { cause?: string, candidate?: { transition: string, observationId: string } | null }, review?: { rereview?: boolean } }} AdvancementRequest */
 /** @typedef {{ requestReview: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestRepair: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, requestLanding: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementEffects */
 /** @typedef {{ claim: (request: AdvancementRequest & { transitionIdentity: string }) => boolean | Promise<boolean>, markInflight?: (request: AdvancementRequest & { transitionIdentity: string }) => unknown, markApplied: (request: AdvancementRequest & { transitionIdentity: string }) => unknown }} AdvancementJournal */
-/** @typedef {{ status?: string, transition?: string, stateVersion?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
+/** @typedef {{ status?: string, transition?: string, stateVersion?: string, candidateObservationId?: string, observationId?: string, subject?: { type?: string, number?: number } }} GovernorRecord */
 /** @typedef {{ type: 'pull-request', number: number, state: string, draft: boolean, base: string, head: string, labels?: unknown[] }} RepairSubject */
 
 /** @param {unknown} value @returns {string} */
@@ -90,7 +90,8 @@ export function repairObservationIdFromGovernorRecord(transition, record) {
     : transition?.startsWith('review-repair:') ? 'review-repair:' : ''
   const observationId = prefix
     ? transition.slice(prefix.length)
-    : record?.status === 'admitted' ? record.candidateObservationId : record?.observationId
+    : (record?.status === 'admitted' || record?.status === 'started')
+      ? record.candidateObservationId : record?.observationId
   if (typeof observationId !== 'string' || !observationId) throw new Error('Governor repair observation is missing')
   return observationId
 }

@@ -5,9 +5,7 @@ import {
   classifyWorkRequest,
   createWorkerRouteDecision,
   parseWorkerRouteDecision,
-  parseWorkerRouteDecisionBody,
   serializeWorkerRouteDecision,
-  workerRouteDecisionBody,
 } from '../src/worker-routing.mjs'
 
 const stateVersion = 'c'.repeat(64)
@@ -311,58 +309,16 @@ test('WorkerRouteDecision v1 binds request id, role, exact state, class, and has
   )
 })
 
-test('durable decision serialization and body parsing remain strict', () => {
+test('route decision serialization and parsing remain strict', () => {
   const classification = classify({ workRequest, routingPolicy, trustedTaskSnapshot: { labels: ['ui'] } })
   const decision = createWorkerRouteDecision({ workRequest, stateVersion, classification, routingPolicy })
   const serialized = serializeWorkerRouteDecision(decision)
   assert.equal(serialized, serializeWorkerRouteDecision(JSON.parse(serialized)))
-  const body = workerRouteDecisionBody(decision)
-  assert.deepEqual(parseWorkerRouteDecisionBody(body, { workRequest, stateVersion }), decision)
   assert.deepEqual(parseWorkerRouteDecision(decision, { routingPolicy }), decision)
   assert.throws(() => parseWorkerRouteDecision({ ...decision, concreteWorker: 'worker-a' }), /unknown field/)
   assert.throws(
     () => parseWorkerRouteDecision({ ...decision, taskClass: 'backend' }, { routingPolicy }),
     /not configured by routingPolicy/,
-  )
-  const [marker, durableJson, trailer] = body.split('\n')
-  for (const invalidBody of [
-    `${durableJson}\n${trailer}`,
-    `${marker}\n${durableJson}`,
-    `${trailer}\n${durableJson}\n${marker}`,
-    `${marker}${body}`,
-    `${body}${trailer}`,
-    `${body}\n${body}`,
-    `prefix${body}`,
-    `${body}suffix`,
-  ]) {
-    assert.throws(() => parseWorkerRouteDecisionBody(invalidBody), /one exact durable v1 record/)
-  }
-  const members = Object.entries(decision)
-    .map(([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`)
-  const conflictingValues = {
-    version: 2,
-    workRequestId: 'other-request',
-    role: 'review',
-    stateVersion: 'd'.repeat(64),
-    taskClass: 'default',
-    policyHash: 'd'.repeat(64),
-    evidenceHash: 'd'.repeat(64),
-  }
-  for (const key of Object.keys(decision)) {
-    const duplicate = `{${members.join(',')},${JSON.stringify(key)}:${JSON.stringify(conflictingValues[key])}}`
-    assert.throws(
-      () => parseWorkerRouteDecisionBody(body.replace(serialized, duplicate)),
-      new RegExp(`duplicate JSON member ${key}`),
-    )
-  }
-  const escapedDuplicate = `{${members.join(',')},"\\u0072ole":${JSON.stringify(decision.role)}}`
-  assert.throws(
-    () => parseWorkerRouteDecisionBody(body.replace(serialized, escapedDuplicate)),
-    /duplicate JSON member role/,
-  )
-  assert.throws(
-    () => parseWorkerRouteDecisionBody(body.replace(serialized, '{"outer":{"value":1,"value":2}}')),
-    /duplicate JSON member value/,
   )
   assert.throws(() => createWorkerRouteDecision({
     workRequest,

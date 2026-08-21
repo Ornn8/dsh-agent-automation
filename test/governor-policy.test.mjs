@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
+  createStartedGovernorRecord,
   governorBudgetDecision,
   governorDecision,
   governorRecordBody,
@@ -31,6 +32,61 @@ const issue = {
   body: 'Branch: `agent/governor-control-plane`',
   labels: [],
 }
+
+test('one started Governor record atomically binds admitted routing and budget attempt', () => {
+  const subject = {
+    type: 'pull-request', number: 44, state: 'open', draft: false,
+    base: 'a'.repeat(40), head: 'b'.repeat(40), labels: [],
+  }
+  const stateVersion = subjectStateVersion(subject)
+  const candidate = governorDecision({
+    transition: 'ci-repair:run-1', subject, stateVersion,
+    observationId: 'run-1:1', records: [],
+  }).record
+  const admitted = governorDecision({
+    transition: 'ci-repair:run-1', subject, stateVersion,
+    observationId: 'run-2:1', records: [candidate],
+  })
+  const budget = governorBudgetDecision({
+    transition: 'ci-repair', subject: { type: subject.type, number: subject.number },
+    workIdentity: 'branch:agent/fix', observationId: 'run-2:1', limit: 3, records: [],
+  })
+  const started = createStartedGovernorRecord({
+    admittedRecord: admitted.record,
+    attemptRecord: budget.record,
+  })
+
+  assert.deepEqual(started, {
+    version: 1,
+    status: 'started',
+    transition: 'ci-repair:run-1',
+    subject: { type: 'pull-request', number: 44 },
+    stateVersion,
+    observationId: 'run-2:1',
+    candidateObservationId: 'run-1:1',
+    budgetTransition: 'ci-repair',
+    workIdentity: 'branch:agent/fix',
+    attempt: 1,
+  })
+  assert.deepEqual(parseGovernorRecord(governorRecordBody(started)), started)
+  assert.equal(governorDecision({
+    transition: 'ci-repair:run-1', subject, stateVersion,
+    observationId: 'run-3:1', records: [candidate, started],
+  }).action, 'noop')
+  assert.deepEqual(governorBudgetDecision({
+    transition: 'ci-repair', subject: { type: subject.type, number: subject.number },
+    workIdentity: 'branch:agent/fix', observationId: 'run-2:1', limit: 3, records: [started],
+  }), { action: 'noop', execute: false, reason: 'attempt-already-recorded' })
+  assert.equal(governorBudgetDecision({
+    transition: 'ci-repair', subject: { type: subject.type, number: subject.number },
+    workIdentity: 'branch:agent/fix', observationId: 'run-3:1', limit: 3, records: [started],
+  }).record.attempt, 2)
+  assert.equal(unappliedGovernorCandidate([candidate, started], () => true), undefined)
+  assert.throws(() => createStartedGovernorRecord({
+    admittedRecord: admitted.record,
+    attemptRecord: { ...budget.record, observationId: 'different-observation' },
+  }), /observation/)
+})
 
 test('Workflow Stage transition identity changes with Profile content or Stage', () => {
   const first = workflowStageTransition({
