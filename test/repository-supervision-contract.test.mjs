@@ -37,7 +37,7 @@ test('target recovery forwards the configured controller login through its reusa
   const target = await readFile(new URL('../templates/target/.github/workflows/agent-recovery.yml', import.meta.url), 'utf8')
   const controller = await readFile(new URL('../.github/workflows/recover-backlog.yml', import.meta.url), 'utf8')
   assert.match(target, /controller_login: \$\{\{ vars\.AGENT_AUTOMATION_CONTROLLER_LOGIN \}\}/)
-  assert.match(controller, /controller_login:\s*\n\s*required: true\n\s*type: string/)
+  assert.match(controller, /controller_login:\s*\r?\n\s*required: true\s*\r?\n\s*type: string/)
   assert.match(controller, /TRUSTED_CONTROLLER_LOGIN: \$\{\{ inputs\.controller_login \}\}/)
   assert.doesNotMatch(controller, /actions\/variables\/AGENT_AUTOMATION_CONTROLLER_LOGIN/)
 })
