@@ -22,7 +22,7 @@ The public file contains intent. [`ops/config.defaults.json`](../ops/config.defa
 
 ## Worker fields
 
-Every Worker requires `adapter`. The Adapter determines the remaining fields. Role-owned values are not accepted in the Worker object: `mode`, capabilities, review isolation, and maintenance `githubLogin` are derived from `operations.roles` and the Adapter implementation. `capacityGroup` defaults to the Worker id when it is a routing identifier; legacy Worker ids containing other characters receive a stable `worker-<sha256>` default and require no configuration migration. A capacity group identifies a machine-local capacity boundary for later capacity handling; it does not activate failover. `routingTags` defaults to an empty list and is only metadata for the bounded route selectors.
+Every Worker requires `adapter`. The Adapter determines the remaining fields. Role-owned values are not accepted in the Worker object: `mode`, capabilities, review isolation, and maintenance `githubLogin` are derived from `operations.roles` and the Adapter implementation. `capacityGroup` defaults to the Worker id when it is a routing identifier; legacy Worker ids containing other characters receive a stable `worker-<sha256>` default and require no configuration migration. A capacity group identifies a machine-local capacity boundary for later capacity handling; it does not activate failover. The durable registry projects provider, model, and Worker identity from this trusted normalized Worker configuration; failure text and caller-supplied identity cannot select a different record. `routingTags` defaults to an empty list and is only metadata for the bounded route selectors.
 
 | Adapter | Required fields | Optional fields |
 | --- | --- | --- |
