@@ -145,6 +145,7 @@ const profile = await targetProfile()
 if (profile.definitionHash !== workRequest.definitionHash) {
   throw new Error('WorkRequest Profile hash does not match the trusted target revision')
 }
+parseAgentWorkRequest(workRequest, { trustedVerificationContract: profile.verificationContract })
 const stage = resolveWorkflowStage(
   profile.definition,
   workRequest.workflowId,
@@ -194,6 +195,7 @@ const agentDispatch = resolveAgentWorkDispatch(
   issueNumber,
   issueRequestId,
   workRequest.definitionHash,
+  profile.verificationContract?.hash,
 )
 const agentWork = agentDispatch?.work
 if (!agentDispatch || agentWork.profile !== workRequest.profileId || agentWork.workflow !== workRequest.workflowId) {

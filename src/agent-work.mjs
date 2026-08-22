@@ -7,6 +7,7 @@ const REQUIRED_FIELDS = ['version', 'dispatch', 'workflow', 'dependsOn']
 const ALLOWED_FIELDS = new Set([...REQUIRED_FIELDS, 'profile', 'branch'])
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const DEFINITION_HASH = /^[0-9a-f]{64}$/
+const CONTRACT_HASH = /^[0-9a-f]{64}$/
 
 function validateDependencies(value) {
   if (!Array.isArray(value)
@@ -69,12 +70,19 @@ export function parseAgentWork(body) {
 }
 
 /** Return the stable dispatch identity bound to the exact trusted Profile definition. */
-export function agentWorkRequestId(work, definitionHash) {
+export function agentWorkRequestId(work, definitionHash, verificationContractHash) {
   if (!DEFINITION_HASH.test(definitionHash || '')) {
     throw new Error('agent-work:v2 request identity requires a Workflow Definition hash')
   }
+  if (verificationContractHash !== undefined && !CONTRACT_HASH.test(verificationContractHash || '')) {
+    throw new Error('agent-work:v2 request identity requires a Verification Contract hash')
+  }
   const digest = createHash('sha256')
-    .update(JSON.stringify({ work, definitionHash }))
+    .update(JSON.stringify({
+      work,
+      definitionHash,
+      ...(verificationContractHash === undefined ? {} : { verificationContractHash }),
+    }))
     .digest('hex')
     .slice(0, 32)
   return `agent-work-${digest}`
@@ -88,10 +96,10 @@ export function agentWorkBranch(work, issueNumber) {
 }
 
 /** Bind a queued request id to the current live declaration and trusted Profile hash. */
-export function resolveAgentWorkDispatch(body, issueNumber, requestId, definitionHash) {
+export function resolveAgentWorkDispatch(body, issueNumber, requestId, definitionHash, verificationContractHash) {
   const work = parseAgentWork(body)
   if (String(requestId || '').startsWith('agent-work-')) {
-    if (!work || requestId !== agentWorkRequestId(work, definitionHash)) {
+    if (!work || requestId !== agentWorkRequestId(work, definitionHash, verificationContractHash)) {
       throw new Error(`Issue #${issueNumber} agent-work:v2 or its Profile changed after dispatch`)
     }
   }

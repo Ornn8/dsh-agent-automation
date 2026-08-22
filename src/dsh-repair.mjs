@@ -321,6 +321,7 @@ if (transportedRequest) {
   if (transportedProfile.definitionHash !== transportedRequest.definitionHash) {
     throw new Error('Transported WorkRequest Profile hash does not match the trusted pull request base')
   }
+  parseAgentWorkRequest(transportedRequest, { trustedVerificationContract: transportedProfile.verificationContract })
   const stage = resolveWorkflowStage(
     transportedProfile.definition,
     transportedRequest.workflowId,

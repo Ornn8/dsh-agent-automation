@@ -76,6 +76,11 @@ test('request identity binds normalized work and exact Profile hash', () => {
   assert.equal(agentWorkRequestId(work, profile.definitionHash), agentWorkRequestId({ ...work }, profile.definitionHash))
   assert.match(agentWorkRequestId(work, profile.definitionHash), /^agent-work-[0-9a-f]{32}$/)
   assert.notEqual(agentWorkRequestId(work, profile.definitionHash), agentWorkRequestId(work, '0'.repeat(64)))
+  assert.notEqual(
+    agentWorkRequestId(work, profile.definitionHash),
+    agentWorkRequestId(work, profile.definitionHash, 'f'.repeat(64)),
+  )
+  assert.throws(() => agentWorkRequestId(work, profile.definitionHash, 'bad'), /Contract hash/)
 })
 
 test('Agent Issues reevaluates work declarations when trusted Issues change', async () => {
@@ -96,16 +101,18 @@ test('the Issue worker rejects stale declarations and Profile revisions before s
   const fields = { version: 2, dispatch: 'ready', workflow: 'default', dependsOn: [] }
   const body = agentWork(fields)
   const parsed = parseAgentWork(body)
-  const requestId = agentWorkRequestId(parsed, profile.definitionHash)
-  assert.deepEqual(resolveAgentWorkDispatch(body, 40, requestId, profile.definitionHash), {
+  const contractHash = 'f'.repeat(64)
+  const requestId = agentWorkRequestId(parsed, profile.definitionHash, contractHash)
+  assert.deepEqual(resolveAgentWorkDispatch(body, 40, requestId, profile.definitionHash, contractHash), {
     work: parsed,
     branch: 'agent/issue-40',
   })
   assert.throws(
-    () => resolveAgentWorkDispatch(agentWork({ ...fields, workflow: 'repair' }), 40, requestId, profile.definitionHash),
+    () => resolveAgentWorkDispatch(agentWork({ ...fields, workflow: 'repair' }), 40, requestId, profile.definitionHash, contractHash),
     /changed after dispatch/,
   )
-  assert.throws(() => resolveAgentWorkDispatch(body, 40, requestId, '0'.repeat(64)), /changed after dispatch/)
+  assert.throws(() => resolveAgentWorkDispatch(body, 40, requestId, '0'.repeat(64), contractHash), /changed after dispatch/)
+  assert.throws(() => resolveAgentWorkDispatch(body, 40, requestId, profile.definitionHash), /changed after dispatch/)
 })
 
 test('the Issue worker rechecks live dependencies before starting an Agent', async () => {

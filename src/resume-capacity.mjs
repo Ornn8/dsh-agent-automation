@@ -67,7 +67,7 @@ async function currentRequest(issue, projection, base) {
   const work = parseAgentWork(issue.body)
   if (!work || work.dispatch !== 'ready' || work.profile !== projection.profileId || work.workflow !== projection.workflowId) return null
   const profile = await profileAt(projection.profileId, base)
-  const requestId = agentWorkRequestId(work, profile.definitionHash)
+  const requestId = agentWorkRequestId(work, profile.definitionHash, profile.verificationContract?.hash)
   return {
     request: createIssueImplementationRequest({
       ...profile, definition: profile.definition, definitionHash: profile.definitionHash,

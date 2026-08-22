@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
+import { parseVerificationContractIdentity, verificationContractIdentity } from './verification-contract.mjs'
 import { workflowDefinitionHash } from './workflow-definition.mjs'
 import { resolveIssueEntryStage, resolveWorkflowStage } from './workflow-profile.mjs'
 
@@ -8,6 +9,10 @@ const SHA256 = /^[0-9a-f]{64}$/
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const ALLOWED_FIELDS = new Set([
+  'version', 'requestId', 'profileId', 'workflowId', 'stageId', 'definitionHash',
+  'role', 'repository', 'subject', 'revision', 'coordinationKey', 'verificationContract',
+])
+const REQUIRED_FIELDS = new Set([
   'version', 'requestId', 'profileId', 'workflowId', 'stageId', 'definitionHash',
   'role', 'repository', 'subject', 'revision', 'coordinationKey',
 ])
@@ -74,14 +79,15 @@ export function isReviewRepairRequestId(value, expectedHead) {
 }
 
 /** Validate and return one immutable WorkRequest. */
-export function parseAgentWorkRequest(value) {
+export function parseAgentWorkRequest(value, options = {}) {
+  const { trustedVerificationContract } = options
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 2) {
     throw new Error('WorkRequest version must be 2')
   }
   for (const key of Object.keys(value)) {
     if (!ALLOWED_FIELDS.has(key)) throw new Error(`WorkRequest has unknown field ${key}`)
   }
-  for (const key of ALLOWED_FIELDS) {
+  for (const key of REQUIRED_FIELDS) {
     if (!Object.hasOwn(value, key)) throw new Error(`WorkRequest is missing required field ${key}`)
   }
 
@@ -104,6 +110,21 @@ export function parseAgentWorkRequest(value) {
     || Object.keys(value.revision).length !== 2) {
     throw new Error('WorkRequest revision must contain full lowercase commit SHAs')
   }
+  const hasVerificationContract = Object.hasOwn(value, 'verificationContract')
+  const verificationContract = hasVerificationContract
+    ? parseVerificationContractIdentity(value.verificationContract)
+    : undefined
+  if (Object.hasOwn(options, 'trustedVerificationContract')) {
+    if (trustedVerificationContract === undefined) {
+      if (verificationContract) throw new Error('WorkRequest verificationContract is unexpected for the unconfigured trusted Profile')
+    } else {
+      const expected = verificationContractIdentity(trustedVerificationContract)
+      if (!verificationContract) throw new Error('WorkRequest verificationContract is missing for the trusted Profile')
+      if (verificationContract.contractId !== expected.contractId || verificationContract.hash !== expected.hash) {
+        throw new Error('WorkRequest verificationContract does not match the trusted Profile')
+      }
+    }
+  }
   return {
     version: 2,
     requestId,
@@ -116,6 +137,7 @@ export function parseAgentWorkRequest(value) {
     subject: { type: value.subject.type, number: value.subject.number },
     revision: { base: value.revision.base, head: value.revision.head },
     coordinationKey,
+    ...(verificationContract ? { verificationContract } : {}),
   }
 }
 
@@ -130,10 +152,18 @@ export function createStageWorkRequest({
   revision,
   coordinationKey,
   requestId,
+  verificationContract = undefined,
 }) {
   const actualHash = workflowDefinitionHash(definition)
   if (definitionHash !== actualHash) throw new Error('WorkRequest definitionHash does not match the Profile')
   const stage = resolveWorkflowStage(definition, workflowId, stageId, 'worker')
+  const profileHasContract = Object.hasOwn(definition, 'verificationContract')
+  if (profileHasContract !== (verificationContract !== undefined)) {
+    throw new Error('WorkRequest Verification Contract does not match the Profile configuration')
+  }
+  const contractIdentity = verificationContract === undefined
+    ? undefined
+    : verificationContractIdentity(verificationContract)
   const unsigned = {
     version: 2,
     profileId: definition.profileId,
@@ -145,11 +175,12 @@ export function createStageWorkRequest({
     subject,
     revision,
     coordinationKey,
+    ...(contractIdentity ? { verificationContract: contractIdentity } : {}),
   }
   return parseAgentWorkRequest({
     ...unsigned,
     requestId: requestId || generatedRequestId(unsigned),
-  })
+  }, { trustedVerificationContract: verificationContract })
 }
 
 /** Create the root worker request selected by one ready Issue declaration. */
@@ -161,6 +192,7 @@ export function createIssueImplementationRequest({
   issueNumber,
   base,
   requestId,
+  verificationContract = undefined,
 }) {
   const stage = resolveIssueEntryStage(definition, workflowId)
   return createStageWorkRequest({
@@ -173,6 +205,7 @@ export function createIssueImplementationRequest({
     revision: { base, head: base },
     coordinationKey: `${repository}:${definition.profileId}:${workflowId}`,
     requestId,
+    verificationContract,
   })
 }
 
@@ -196,6 +229,7 @@ export function createReviewRepairRequest({
   base,
   head,
   reviewObservationId,
+  verificationContract = undefined,
 }) {
   const { workflowId, stage } = resolveRepairEntryStage(definition)
   return createStageWorkRequest({
@@ -208,6 +242,7 @@ export function createReviewRepairRequest({
     revision: { base, head },
     coordinationKey: `${repository}:${definition.profileId}:${workflowId}`,
     requestId: reviewRepairRequestId(head, reviewObservationId),
+    verificationContract,
   })
 }
 
