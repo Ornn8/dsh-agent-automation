@@ -1,7 +1,21 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { evaluatePullRequestSize, measureGitNumstat } from '../src/pull-request-size.mjs'
+import { evaluatePullRequestSize, measureGitHubPullRequestFiles, measureGitNumstat } from '../src/pull-request-size.mjs'
+
+test('GitHub pull request files count additions and deletions as changed lines', () => {
+  assert.deepEqual(measureGitHubPullRequestFiles([
+    { filename: 'src/changed.mjs', additions: 12, deletions: 3 },
+    { filename: 'fixtures/image.png', additions: 0, deletions: 0 },
+    { filename: 'docs/readme.md', additions: 1, deletions: 0 },
+  ]), { files: 3, changedLines: 16 })
+})
+
+test('GitHub pull request file counts reject malformed API values', () => {
+  assert.throws(() => measureGitHubPullRequestFiles([
+    { filename: 'src/changed.mjs', additions: 1, deletions: '0' },
+  ]), /deletions must be a non-negative integer/)
+})
 
 test('pull request size rejects an above-target change without a split rationale', () => {
   const decision = evaluatePullRequestSize({

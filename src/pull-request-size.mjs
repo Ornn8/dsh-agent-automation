@@ -12,6 +12,22 @@ function count(value, name) {
   return value
 }
 
+/** Measure the changed lines reported by GitHub's pull request files API. */
+/** @param {unknown} files @returns {{ files: number, changedLines: number }} */
+export function measureGitHubPullRequestFiles(files) {
+  if (!Array.isArray(files)) throw new Error('GitHub pull request files must be an array')
+  return files.reduce((total, file) => {
+    if (!file || typeof file !== 'object' || Array.isArray(file)) {
+      throw new Error('GitHub pull request file is invalid')
+    }
+    const entry = /** @type {{ additions?: unknown, deletions?: unknown }} */ (file)
+    return {
+      files: total.files + 1,
+      changedLines: total.changedLines + count(entry.additions, 'additions') + count(entry.deletions, 'deletions'),
+    }
+  }, { files: 0, changedLines: 0 })
+}
+
 function unit(value, singular, plural) {
   return `${value} ${value === 1 ? singular : plural}`
 }
