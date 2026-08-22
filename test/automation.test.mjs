@@ -1810,6 +1810,91 @@ test('backlog dispatch selects a ready agent-work declaration after its dependen
   }), null)
 })
 
+test('backlog selection rejects a missing dependency before dispatch with a bounded diagnostic', () => {
+  const body = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"default","dependsOn":[99]}\n```'
+  const diagnostics = []
+  const selected = selectBacklogWork({
+    repository: 'owner/repository',
+    pullRequests: [],
+    issues: [{ number: 7, state: 'open', body, author_association: 'OWNER', labels: [] }],
+    diagnostics,
+  })
+  assert.equal(selected, null)
+  assert.deepEqual(diagnostics, [{ issueNumber: 7, code: 'dependency-missing', dependencyNumber: 99 }])
+})
+
+test('backlog selection rejects a self dependency with a bounded diagnostic', () => {
+  const body = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"default","dependsOn":[7]}\n```'
+  const diagnostics = []
+  const selected = selectBacklogWork({
+    repository: 'owner/repository',
+    pullRequests: [],
+    issues: [{ number: 7, state: 'open', body, author_association: 'OWNER', labels: [] }],
+    diagnostics,
+  })
+  assert.equal(selected, null)
+  assert.deepEqual(diagnostics, [{ issueNumber: 7, code: 'dependency-self', dependencyNumber: 7 }])
+})
+
+test('backlog selection rejects a pull request dependency before dispatch', () => {
+  const body = '<!-- agent-work:v2 -->\n```json\n{"version":2,"dispatch":"ready","workflow":"default","dependsOn":[8]}\n```'
+  const diagnostics = []
+  const selected = selectBacklogWork({
+    repository: 'owner/repository',
+    pullRequests: [{ number: 8 }],
+    issues: [{ number: 7, state: 'open', body, author_association: 'OWNER', labels: [] }],
+    diagnostics,
+  })
+  assert.equal(selected, null)
+  assert.deepEqual(diagnostics, [{ issueNumber: 7, code: 'dependency-pull-request', dependencyNumber: 8 }])
+})
+
+test('backlog selection rejects two-node and longer dependency cycles', () => {
+  const declaration = dependsOn => `<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify({
+    version: 2, dispatch: 'ready', workflow: 'default', dependsOn,
+  })}\n\`\`\``
+  const issues = [
+    { number: 1, state: 'open', body: declaration([2]), author_association: 'OWNER', labels: [] },
+    { number: 2, state: 'open', body: declaration([1]), author_association: 'OWNER', labels: [] },
+    { number: 3, state: 'open', body: declaration([4]), author_association: 'OWNER', labels: [] },
+    { number: 4, state: 'open', body: declaration([5]), author_association: 'OWNER', labels: [] },
+    { number: 5, state: 'open', body: declaration([3]), author_association: 'OWNER', labels: [] },
+  ]
+  const diagnostics = []
+  assert.equal(selectBacklogWork({
+    repository: 'owner/repository', pullRequests: [], issues, diagnostics,
+  }), null)
+  assert.deepEqual(diagnostics, [
+    { issueNumber: 1, code: 'dependency-cycle' },
+    { issueNumber: 2, code: 'dependency-cycle' },
+    { issueNumber: 3, code: 'dependency-cycle' },
+    { issueNumber: 4, code: 'dependency-cycle' },
+    { issueNumber: 5, code: 'dependency-cycle' },
+  ])
+})
+
+test('requested selection cannot bypass an invalid dependency graph', () => {
+  const declaration = dependsOn => `<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify({
+    version: 2, dispatch: 'ready', workflow: 'default', dependsOn,
+  })}\n\`\`\``
+  const issues = [
+    { number: 6, state: 'open', body: declaration([99]), author_association: 'OWNER', labels: [] },
+    { number: 7, state: 'open', body: declaration([]), author_association: 'OWNER', labels: [] },
+  ]
+  const singleDiagnostics = []
+  assert.equal(selectBacklogWork({
+    repository: 'owner/repository', pullRequests: [], issues, requestedIssueNumber: 6,
+    diagnostics: singleDiagnostics,
+  }), null)
+  const batchDiagnostics = []
+  assert.deepEqual(selectBacklogBatch({
+    repository: 'owner/repository', pullRequests: [], issues, requestedIssueNumber: 6,
+    workflowLimits: { 'github-pr-cycle/default': 2 }, maximumBatchSize: 2, diagnostics: batchDiagnostics,
+  }).map(work => work.number), [7])
+  assert.deepEqual(singleDiagnostics, [{ issueNumber: 6, code: 'dependency-missing', dependencyNumber: 99 }])
+  assert.deepEqual(batchDiagnostics, [{ issueNumber: 6, code: 'dependency-missing', dependencyNumber: 99 }])
+})
+
 test('an exact label wake re-reads only that eligible Issue without consuming its own coordination slot', () => {
   const declaration = workflow => `<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify({
     version: 2, dispatch: 'ready', workflow, dependsOn: [],
@@ -1907,6 +1992,27 @@ test('backlog dispatch consumes the CI baseline Issue emitted by the repair Skil
     labels: [{ name: 'agent/dsh' }],
   }
   assert.equal(selectBacklogWork({ repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [baseline] }), null)
+})
+
+test('ordinary batch reports invalid dependency diagnostics without suppressing independent ready work', () => {
+  const declaration = (dependsOn = []) => [
+    '<!-- agent-work:v2 -->', '```json',
+    JSON.stringify({ version: 2, dispatch: 'ready', workflow: 'default', dependsOn }), '```',
+  ].join('\n')
+  const diagnostics = []
+  const result = selectBacklogBatch({
+    repository: 'owner/repository',
+    pullRequests: [{ number: 8 }],
+    issues: [
+      { number: 4, state: 'open', body: declaration([99]), author_association: 'OWNER', labels: [] },
+      { number: 7, state: 'open', body: declaration(), author_association: 'OWNER', labels: [] },
+    ],
+    workflowLimits: { 'github-pr-cycle/default': 2 },
+    maximumBatchSize: 2,
+    diagnostics,
+  })
+  assert.deepEqual(result.map(work => work.number), [7])
+  assert.deepEqual(diagnostics, [{ issueNumber: 4, code: 'dependency-missing', dependencyNumber: 99 }])
 })
 
 test('ready batch selection fills stable independent Issues up to its bound', () => {

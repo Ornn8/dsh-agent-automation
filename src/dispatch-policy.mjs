@@ -2,6 +2,7 @@ import { trustedAssociation } from './common.mjs'
 import { parseAgentWork } from './agent-work.mjs'
 import { parseCapacityWaitProjection } from './capacity-wait-projection.mjs'
 import { hasTrustedExactReviewRun } from './landing-policy.mjs'
+import { buildIssueDependencyGraph, issueDependencyState } from './issue-dependency-graph.mjs'
 
 function labelNames(item) {
   return new Set((item.labels || []).map(label => typeof label === 'string' ? label : label.name))
@@ -187,6 +188,7 @@ export function selectBacklogWork({
   trustedBlockedRepairNumbers = new Set(),
   includeRepairs = true,
   requestedIssueNumber = null,
+  diagnostics = [],
 }) {
   if (requestedIssueNumber !== null
     && (!Number.isSafeInteger(requestedIssueNumber) || requestedIssueNumber < 1)) {
@@ -204,9 +206,7 @@ export function selectBacklogWork({
     .sort((left, right) => left.number - right.number)[0]
   if (repair) return { type: 'repair', number: repair.number, head: repair.head.sha }
 
-  const openIssueNumbers = new Set(issues
-    .filter(issue => issue.state === 'open')
-    .map(issue => issue.number))
+  const dependencyGraph = buildIssueDependencyGraph({ issues, pullRequests })
   const candidates = [...issues]
     .filter(candidate => candidate.state === 'open'
       && trustedAssociation(candidate.author_association)
@@ -218,8 +218,15 @@ export function selectBacklogWork({
       || (labelNames(candidate).has('agent/dsh') && candidate.number !== requestedIssueNumber)
       || labelNames(candidate).has('automation/paused')
       || pullRequests.some(pullRequest => closesIssue(pullRequest, candidate.number))) continue
+    const dependencyState = issueDependencyState(dependencyGraph, candidate.number)
+    if (!dependencyState.valid) {
+      if (Array.isArray(diagnostics) && diagnostics.length < 64) {
+        diagnostics.push(dependencyState.diagnostic)
+      }
+      continue
+    }
     const dispatch = issueDispatch(candidate)
-    if (dispatch && dispatch.dependencies.every(number => !openIssueNumbers.has(number))) {
+    if (dispatch && dependencyState.openDependencies.length === 0) {
       return dispatch.selected
     }
   }
@@ -245,10 +252,10 @@ function uniqueIssueSnapshots(issues) {
   return [...byNumber.values()].map(({ issue }) => issue)
 }
 
-function batchIssueSelection(issue, issues, pullRequests) {
+function batchIssueSelection(issue, issues, pullRequests, diagnostics) {
   if (labelNames(issue).has('agent/dsh')) return null
   try { return selectBacklogWork({
-    pullRequests, issues, includeRepairs: false, requestedIssueNumber: issue.number,
+    pullRequests, issues, includeRepairs: false, requestedIssueNumber: issue.number, diagnostics,
   }) } catch { return null }
 }
 
@@ -259,6 +266,7 @@ export function selectBacklogBatch({
   requestedIssueNumber = null,
   workflowLimits = {},
   maximumBatchSize = 1,
+  diagnostics = [],
 } = {}) {
   if (requestedIssueNumber !== null
     && (!Number.isSafeInteger(requestedIssueNumber) || requestedIssueNumber < 1)) {
@@ -275,7 +283,7 @@ export function selectBacklogBatch({
   const candidates = []
   const counts = new Map()
   for (const issue of uniqueIssues) {
-    const selected = batchIssueSelection(issue, uniqueIssues, pullRequests)
+    const selected = batchIssueSelection(issue, uniqueIssues, pullRequests, diagnostics)
     if (!selected) continue
     const { work } = selected
     const limit = workflowLimits?.[`${work.profile}/${work.workflow}`]
