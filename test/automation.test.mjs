@@ -32,6 +32,7 @@ import {
   explicitReworkCommand,
   independentIssueObservationNumber,
   issueDependencies,
+  selectBacklogBatch,
   selectBacklogWork,
   trustedBlockedReviewProof,
   trustedCiFailure,
@@ -1906,6 +1907,130 @@ test('backlog dispatch consumes the CI baseline Issue emitted by the repair Skil
     labels: [{ name: 'agent/dsh' }],
   }
   assert.equal(selectBacklogWork({ repository: 'Ornn8/deepseek-harness', pullRequests: [], issues: [baseline] }), null)
+})
+
+test('ready batch selection fills stable independent Issues up to its bound', () => {
+  const declaration = (dependsOn = []) => [
+    '<!-- agent-work:v2 -->',
+    '```json',
+    JSON.stringify({ version: 2, dispatch: 'ready', workflow: 'default', dependsOn }),
+    '```',
+  ].join('\n')
+  const issues = [
+    { number: 9, state: 'open', body: declaration(), author_association: 'OWNER', labels: [] },
+    { number: 4, state: 'open', body: declaration(), author_association: 'OWNER', labels: [] },
+    { number: 6, state: 'open', body: declaration([9]), author_association: 'OWNER', labels: [] },
+  ]
+  const result = selectBacklogBatch({
+    repository: 'owner/repository', issues, pullRequests: [],
+    workflowLimits: { 'github-pr-cycle/default': 2 }, maximumBatchSize: 2,
+  })
+  assert.deepEqual(result.map(work => work.number), [4, 9])
+})
+
+test('requested eligible Issue is preferred without bypassing dependency or slot rules', () => {
+  const declaration = (dependsOn = []) => [
+    '<!-- agent-work:v2 -->', '```json',
+    JSON.stringify({ version: 2, dispatch: 'ready', workflow: 'default', dependsOn }), '```',
+  ].join('\n')
+  const issues = [
+    { number: 4, state: 'open', body: declaration(), author_association: 'OWNER', labels: [] },
+    { number: 6, state: 'open', body: declaration([9]), author_association: 'OWNER', labels: [] },
+    { number: 9, state: 'open', body: declaration(), author_association: 'OWNER', labels: [] },
+  ]
+  assert.deepEqual(selectBacklogBatch({
+    repository: 'owner/repository', issues, workflowLimits: { 'github-pr-cycle/default': 2 },
+    maximumBatchSize: 2, requestedIssueNumber: 9,
+  }).map(work => work.number), [9, 4])
+  assert.deepEqual(selectBacklogBatch({
+    repository: 'owner/repository', issues, workflowLimits: { 'github-pr-cycle/default': 2 },
+    maximumBatchSize: 2, requestedIssueNumber: 6,
+  }).map(work => work.number), [4, 9])
+})
+
+test('active work consumes Profile coordination slots before batch selection', () => {
+  const declaration = [
+    '<!-- agent-work:v2 -->', '```json',
+    JSON.stringify({ version: 2, dispatch: 'ready', workflow: 'default', dependsOn: [] }), '```',
+  ].join('\n')
+  const issues = [
+    { number: 2, state: 'open', body: declaration, author_association: 'OWNER', labels: [{ name: 'agent/dsh' }] },
+    { number: 5, state: 'open', body: declaration, author_association: 'OWNER', labels: [] },
+    { number: 7, state: 'open', body: declaration, author_association: 'OWNER', labels: [] },
+  ]
+  const result = selectBacklogBatch({
+    repository: 'owner/repository', issues, workflowLimits: { 'github-pr-cycle/default': 2 }, maximumBatchSize: 3,
+  })
+  assert.deepEqual(result.map(work => work.number), [5])
+})
+
+test('shuffled duplicate snapshots are stable and conflicting duplicates fail closed', () => {
+  const declaration = (dispatch = 'ready') => [
+    '<!-- agent-work:v2 -->', '```json',
+    JSON.stringify({ version: 2, dispatch, workflow: 'default', dependsOn: [] }), '```',
+  ].join('\n')
+  const issue4 = { number: 4, state: 'open', body: declaration(), author_association: 'OWNER', labels: [] }
+  const issue9 = { number: 9, state: 'open', body: declaration(), author_association: 'OWNER', labels: [] }
+  const conflicting4 = { ...issue4, body: declaration('hold') }
+  const options = { repository: 'owner/repository', workflowLimits: { 'github-pr-cycle/default': 2 }, maximumBatchSize: 2 }
+  const first = selectBacklogBatch({ ...options, issues: [issue4, issue9, issue4, conflicting4] })
+  const second = selectBacklogBatch({ ...options, issues: [conflicting4, issue9, { ...issue4 }, issue4] })
+  assert.deepEqual(second, first)
+  assert.deepEqual(first, [])
+})
+
+test('strategy-conflicting duplicate snapshots fail closed regardless of order', () => {
+  const declaration = (workflow = 'default') => [
+    '<!-- agent-work:v2 -->', '```json',
+    JSON.stringify({ version: 2, dispatch: 'ready', workflow, dependsOn: [] }), '```',
+  ].join('\n')
+  const base = { number: 4, state: 'open', body: declaration(), author_association: 'OWNER', labels: [] }
+  const other = { ...base, number: 9 }
+  const variants = [
+    { ...base, state: 'closed' },
+    { ...base, labels: [{ name: 'agent/dsh' }] },
+    { ...base, body: declaration('other') },
+  ]
+  for (const variant of variants) {
+    for (const issues of [[base, other, variant], [variant, other, base]]) {
+      assert.deepEqual(selectBacklogBatch({
+        issues, workflowLimits: { 'github-pr-cycle/default': 2 }, maximumBatchSize: 2,
+      }), [])
+    }
+  }
+})
+
+test('batch selection excludes untrusted, terminal, active, and closing Issues', () => {
+  const declaration = [
+    '<!-- agent-work:v2 -->', '```json',
+    JSON.stringify({ version: 2, dispatch: 'ready', workflow: 'default', dependsOn: [] }), '```',
+  ].join('\n')
+  const issue = (number, labels = [], author_association = 'OWNER') => ({
+    number, state: 'open', body: declaration, author_association, labels: labels.map(name => ({ name })),
+  })
+  const issues = [
+    issue(1, [], 'NONE'), issue(2, ['automation/paused']), issue(3, ['agent/dsh-failed']),
+    issue(4, ['agent/dsh-blocked']), issue(5, ['agent/dsh']), issue(6),
+    { ...issue(7), body: '<!-- agent-work:v2 -->\n```json\nnot-json\n```' },
+  ]
+  const result = selectBacklogBatch({
+    repository: 'owner/repository', issues, pullRequests: [{ body: 'Closes #6' }],
+    workflowLimits: { 'github-pr-cycle/default': 2 }, maximumBatchSize: 2,
+  })
+  assert.deepEqual(result, [])
+})
+
+test('ready batch output carries declaration work only, never concrete Worker identity', () => {
+  const body = [
+    '<!-- agent-work:v2 -->', '```json',
+    JSON.stringify({ version: 2, dispatch: 'ready', workflow: 'default', dependsOn: [] }), '```',
+  ].join('\n')
+  const result = selectBacklogBatch({
+    repository: 'owner/repository',
+    issues: [{ number: 8, state: 'open', body, author_association: 'OWNER', labels: [] }],
+    workflowLimits: { 'github-pr-cycle/default': 1 }, maximumBatchSize: 1,
+  })
+  assert.equal(/worker|provider|model/i.test(JSON.stringify(result)), false)
 })
 
 test('explicit rework commands are deliberate and case insensitive', () => {
