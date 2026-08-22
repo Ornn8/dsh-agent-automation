@@ -274,6 +274,7 @@ try {
     issueNumber,
     defaultBranch,
     branch,
+    ...(profile.verificationContract ? { verificationContract: profile.verificationContract } : {}),
     ...(agentWork ? { work: agentWork } : {}),
   })
 
