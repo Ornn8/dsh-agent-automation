@@ -88,7 +88,7 @@ function splitRationale(body) {
 
   const headings = parsed.lines.map(parseHeading)
   const rationaleHeading = /^split rationale(?:[ \t]*:[ \t]*(.*)|[ \t]+(.*))?$/i
-  const start = headings.findIndex(heading => heading && rationaleHeading.test(heading.text))
+  const start = headings.findIndex(heading => heading && heading.level === 2 && rationaleHeading.test(heading.text))
   if (start < 0) return ''
 
   const match = headings[start].text.match(rationaleHeading)

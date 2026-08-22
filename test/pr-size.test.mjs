@@ -43,6 +43,18 @@ test('pull request size accepts a heading and rationale with three leading space
   assert.equal(decision.accepted, true)
 })
 
+test('pull request size requires an exact level-two split rationale heading', () => {
+  for (const pullRequestBody of [
+    '# Split rationale\nThis level-one heading cannot authorize the change.',
+    '### Split rationale\nThis level-three heading cannot authorize the change.',
+  ]) {
+    const decision = evaluatePullRequestSize({ files: 11, changedLines: 1, pullRequestBody })
+
+    assert.equal(decision.accepted, false, pullRequestBody)
+    assert.match(decision.message, /non-empty, auditable split rationale/i, pullRequestBody)
+  }
+})
+
 test('pull request size recognizes a fence closer with three leading spaces', () => {
   const decision = evaluatePullRequestSize({
     files: 11,
