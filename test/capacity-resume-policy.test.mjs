@@ -10,7 +10,10 @@ import { resolveMachineConfig } from '../src/machine-config.mjs'
 import { createStageWorkRequest } from '../src/work-request.mjs'
 import { parseWorkflowDefinition, workflowDefinitionHash } from '../src/workflow-definition.mjs'
 import { createWorkerRouteDecision } from '../src/worker-routing.mjs'
-import { evaluateCapacityWaitResume } from '../src/capacity-resume-policy.mjs'
+import {
+  evaluateCapacityWaitResume,
+  evaluateCapacityWaitResumeAndDispatch,
+} from '../src/capacity-resume-policy.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const stateVersion = 'a'.repeat(64)
@@ -227,4 +230,46 @@ test('a missing or mismatched current candidate plan fails closed', async () => 
   const mismatched = structuredClone(input.currentCapacity.plans)
   mismatched[1].capacityGroup = 'other-group'
   assert.equal(evaluate(input, { capacitySnapshot: { generationHash: '6'.repeat(64), plans: mismatched } }).decision, 'stale')
+})
+
+test('resume dispatches the exact WorkRequest and route identity', async () => {
+  const workRequest = {
+    version: 2, requestId: 'issue-request-17', profileId: 'github-pr-cycle', workflowId: 'issue-work', stageId: 'change',
+    definitionHash: 'a'.repeat(64), role: 'change', repository: 'Ornn8/deepseek-harness', subject: { type: 'issue', number: 17 },
+    revision: { base: 'b'.repeat(40), head: 'b'.repeat(40) }, coordinationKey: 'Ornn8/deepseek-harness:github-pr-cycle:issue-work',
+  }
+  const routeDecision = {
+    version: 1, workRequestId: workRequest.requestId, role: 'change', stateVersion: 'c'.repeat(64), taskClass: 'default',
+    policyHash: 'd'.repeat(64), evidenceHash: 'e'.repeat(64),
+  }
+  const dispatched = []
+  const result = await evaluateCapacityWaitResumeAndDispatch({
+    workRequest, currentRouteDecision: routeDecision, evaluate: () => ({ decision: 'resume' }),
+    dispatch: value => { dispatched.push(value) },
+  })
+  assert.equal(result.dispatched, true)
+  assert.deepEqual(dispatched, [{
+    event_type: 'agent_work_requested', client_payload: { work_request: workRequest, route_decision: routeDecision },
+  }])
+})
+
+for (const decision of ['stale', 'deferred']) {
+  test(`${decision} resume evaluation is a read-only no-op`, async () => {
+    let calls = 0
+    const result = await evaluateCapacityWaitResumeAndDispatch({
+      workRequest: {}, currentRouteDecision: {}, evaluate: () => ({ decision }), dispatch: () => { calls += 1 },
+    })
+    assert.equal(result.dispatched, false)
+    assert.equal(calls, 0)
+  })
+}
+
+test('only the landing schedule opts into self-hosted capacity observation', async () => {
+  const dispatch = await readFile(new URL('../.github/workflows/dispatch-backlog.yml', import.meta.url), 'utf8')
+  const landing = await readFile(new URL('../templates/target/.github/workflows/agent-landing-reconcile.yml', import.meta.url), 'utf8')
+  const issues = await readFile(new URL('../templates/target/.github/workflows/agent-issues.yml', import.meta.url), 'utf8')
+  assert.match(dispatch, /capacity_resume:[\s\S]*default: false/)
+  assert.match(dispatch, /if: inputs\.capacity_resume[\s\S]*runs-on: \[self-hosted, agent-change\]/)
+  assert.match(landing, /dispatch-backlog\.yml@[\s\S]*capacity_resume: true/)
+  assert.doesNotMatch(issues, /capacity_resume: true/)
 })

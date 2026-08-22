@@ -8,12 +8,39 @@ on:
         required: false
         default: 0
         type: number
+      capacity_resume:
+        description: Run one self-hosted capacity-wait observation.
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: dsh-backlog-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
+  capacity-resume:
+    if: inputs.capacity_resume
+    name: dsh/capacity-resume
+    runs-on: [self-hosted, agent-change]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Check out automation controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Evaluate current Issue capacity waits
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+        run: node controller/src/resume-capacity.mjs
+
   dispatch:
     name: dsh/backlog-dispatch
     runs-on: ubuntu-latest

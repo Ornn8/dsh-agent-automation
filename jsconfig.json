@@ -21,6 +21,7 @@
     "src/advancement-state.mjs",
     "src/landing-policy.mjs",
     "src/machine-config.mjs",
+    "src/resume-capacity.mjs",
     "src/role-worker.mjs",
     "src/worker-routing.mjs",
     "src/review-authority.mjs",
