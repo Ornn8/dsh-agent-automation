@@ -1,0 +1,57 @@
+name: Trusted pull request size
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  trusted-pull-request-size:
+    name: trusted pull request size
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the trusted pull request base
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted-controller
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the pull request head for diff data only
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate-diff
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Make the trusted base available to the diff repository
+        working-directory: candidate-diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TRUSTED_REPOSITORY: ${{ github.workspace }}/trusted-controller
+        run: git fetch --no-tags "$TRUSTED_REPOSITORY" "$BASE_SHA"
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - name: Install trusted controller dependencies
+        working-directory: trusted-controller
+        run: npm ci --ignore-scripts
+
+      - name: Enforce trusted pull request size
+        working-directory: trusted-controller
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GIT_DIFF_REPOSITORY: ${{ github.workspace }}/candidate-diff
+        run: node scripts/check-pr-size.mjs

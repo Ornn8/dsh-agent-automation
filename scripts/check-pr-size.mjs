@@ -8,7 +8,10 @@ if (!/^[0-9a-f]{40}$/.test(base) || !/^[0-9a-f]{40}$/.test(head)) {
   throw new Error('BASE_SHA and HEAD_SHA must be lowercase full commit SHAs')
 }
 
-const result = await run('git', ['diff', '--numstat', '--find-renames', `${base}...${head}`])
+const diffRepository = process.env.GIT_DIFF_REPOSITORY?.trim()
+const result = await run('git', ['diff', '--numstat', '--find-renames', `${base}...${head}`], {
+  cwd: diffRepository || undefined,
+})
 const decision = evaluatePullRequestSize({ ...measureGitNumstat(result.stdout), pullRequestBody })
 process.stdout.write(`${decision.message}\n`)
 if (!decision.accepted) process.exitCode = 1
