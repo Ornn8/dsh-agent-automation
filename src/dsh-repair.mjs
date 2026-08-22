@@ -27,9 +27,10 @@ import { controllerMutationMarker } from './controller-mutation-marker.mjs'
 import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 import {
   interruptedRepairMayRetry,
+  recordedRepairState,
+  recordedRepairStatus,
   recoverableRepairIdentity,
   repairRoutingEvidence,
-  recordedRepairState,
   trustedRepairSourceComment,
 } from './repair-state.mjs'
 import {

@@ -84,6 +84,7 @@ import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-st
 import { parseAgentWork } from '../src/agent-work.mjs'
 import { intentionalReviewBlock } from '../src/recovery-policy.mjs'
 import { parseWorkflowIdentity } from '../src/workflow-identity.mjs'
+import { dispatchReceiptState, dispatchWithReceipt } from '../src/dispatch-receipt.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -2341,4 +2342,87 @@ test('a marker is auditable but never becomes review-failure authorization', () 
   assert.equal(hasExactReviewVerdict([{ user: { login: 'github-actions[bot]' }, body: `<!-- agent-review:${head} -->\n## Agent review: BLOCK` }], head), true)
   assert.equal(hasExactReviewVerdict([{ user: { login: 'pr-author' }, body: `<!-- agent-review:${head} -->\n## Agent review: BLOCK` }], head), false)
   assert.equal(hasExactReviewVerdict([{ body: '<!-- agent-review:other -->' }], head), false)
+})
+
+function failedDispatchRun(id, requestId, title) {
+  return {
+    id,
+    run_attempt: 1,
+    status: 'completed',
+    conclusion: 'failure',
+    display_title: `${title} request:${requestId}`,
+  }
+}
+
+test('queued, running, and successful matching dispatch runs are durable receipts', () => {
+  const requestId = 'capacity-receipt-state'
+  const base = { display_title: `Agent Issues request:${requestId}` }
+  assert.deepEqual(dispatchReceiptState([{ ...base, status: 'queued' }]), { kind: 'active', failureCount: 0 })
+  assert.deepEqual(dispatchReceiptState([{ ...base, status: 'in_progress' }]), { kind: 'active', failureCount: 0 })
+  assert.deepEqual(dispatchReceiptState([{ ...base, status: 'completed', conclusion: 'success' }]), { kind: 'success', failureCount: 0 })
+})
+
+test('receipt polling tolerates old terminal failure visibility before the retry run appears', async () => {
+  const requestId = 'capacity-receipt-visibility'
+  const workflowFile = 'agent-issues.yml'
+  const runs = [failedDispatchRun(1, requestId, 'Agent Issues')]
+  const calls = []
+  let postSeen = false
+  let listCallsAfterPost = 0
+  const execute = async (_executable, args) => {
+    calls.push(args)
+    if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
+      if (postSeen) {
+        listCallsAfterPost += 1
+        if (listCallsAfterPost === 2) runs.push({
+          id: 2, run_attempt: 1, status: 'in_progress', display_title: `Agent Issues request:${requestId}`,
+        })
+      }
+      return { stdout: JSON.stringify({ workflow_runs: runs }) }
+    }
+    if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
+      postSeen = true
+      return { stdout: '' }
+    }
+    throw new Error(`unexpected gh invocation: ${args.join(' ')}`)
+  }
+  await dispatchWithReceipt({
+    executable: 'gh', environment: {}, repository: 'owner/repository',
+    workflowFile, payload: {}, requestId,
+    runCommand: execute, sleep: async () => undefined,
+  })
+  assert.equal(calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST').length, 1)
+  assert.equal(listCallsAfterPost, 2)
+})
+
+test('terminal Issue and repair dispatch failures permit one bounded retry and then suppress repeats', async () => {
+  for (const [workflowFile, title] of [['agent-issues.yml', 'Agent Issues'], ['agent-pr-rework.yml', 'Agent PR Rework']]) {
+    const requestId = `capacity-resume-${workflowFile.replaceAll('.', '-')}`
+    const runs = []
+    const calls = []
+    const execute = async (_executable, args) => {
+      calls.push(args)
+      if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
+        return { stdout: JSON.stringify({ workflow_runs: runs }) }
+      }
+      if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
+        runs.push(failedDispatchRun(runs.length + 1, requestId, title))
+        return { stdout: '' }
+      }
+      throw new Error(`unexpected gh invocation: ${args.join(' ')}`)
+    }
+    const dispatch = () => dispatchWithReceipt({
+      executable: 'gh', environment: {}, repository: 'owner/repository',
+      workflowFile, payload: {}, requestId,
+      runCommand: execute, sleep: async () => undefined,
+    })
+
+    await assert.rejects(dispatch(), /terminal failure/)
+    await assert.rejects(dispatch(), /retry budget exhausted/)
+    const dispatchCalls = calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST')
+    assert.equal(dispatchCalls.length, 2)
+
+    await assert.rejects(dispatch(), /retry budget exhausted/)
+    assert.equal(calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST').length, 2)
+  }
 })
