@@ -225,3 +225,73 @@ export function selectBacklogWork({
   }
   return null
 }
+
+const POLICY_LABELS = new Set(['agent/dsh', 'agent/dsh-failed', 'agent/dsh-blocked', 'automation/paused'])
+
+function issueFingerprint(issue) {
+  const declaration = (() => { try { return parseAgentWork(issue.body) } catch { return 'invalid' } })()
+  return JSON.stringify([issue.state, issue.author_association,
+    [...labelNames(issue)].filter(label => POLICY_LABELS.has(label)).sort(), declaration])
+}
+
+function uniqueIssueSnapshots(issues) {
+  const byNumber = new Map()
+  for (const issue of issues) {
+    const key = issueFingerprint(issue)
+    const prior = byNumber.get(issue.number)
+    if (prior && prior.key !== key) return null
+    if (!prior) byNumber.set(issue.number, { issue, key })
+  }
+  return [...byNumber.values()].map(({ issue }) => issue)
+}
+
+function batchIssueSelection(issue, issues, pullRequests) {
+  if (labelNames(issue).has('agent/dsh')) return null
+  try { return selectBacklogWork({
+    pullRequests, issues, includeRepairs: false, requestedIssueNumber: issue.number,
+  }) } catch { return null }
+}
+
+/** Select a deterministic bounded batch of ready Issue work without dispatching it. */
+export function selectBacklogBatch({
+  pullRequests = [],
+  issues = [],
+  requestedIssueNumber = null,
+  workflowLimits = {},
+  maximumBatchSize = 1,
+} = {}) {
+  if (requestedIssueNumber !== null
+    && (!Number.isSafeInteger(requestedIssueNumber) || requestedIssueNumber < 1)) {
+    throw new Error('requestedIssueNumber must be null or a positive safe integer')
+  }
+  if (!Number.isSafeInteger(maximumBatchSize) || maximumBatchSize < 1) {
+    throw new Error('maximumBatchSize must be a positive safe integer')
+  }
+  const uniqueIssues = uniqueIssueSnapshots([...(Array.isArray(issues) ? issues : [])]
+    .filter(issue => Number.isSafeInteger(issue?.number) && issue.number > 0)
+    .sort((left, right) => left.number - right.number))
+  if (!uniqueIssues) return []
+  const result = []
+  const candidates = []
+  const counts = new Map()
+  for (const issue of uniqueIssues) {
+    const selected = batchIssueSelection(issue, uniqueIssues, pullRequests)
+    if (!selected) continue
+    const { work } = selected
+    const limit = workflowLimits?.[`${work.profile}/${work.workflow}`]
+    if (!Number.isSafeInteger(limit) || limit < 1) continue
+    const key = `${work.profile}/${work.workflow}`
+    if (!counts.has(key)) counts.set(key, activeWorkflowIssueNumbers({ issues: uniqueIssues,
+      pullRequests, profileId: work.profile, workflowId: work.workflow }).size)
+    candidates.push({ number: issue.number, work, limit, key })
+  }
+  candidates.sort((left, right) => left.number === right.number ? 0 : left.number === requestedIssueNumber ? -1 : right.number === requestedIssueNumber ? 1 : left.number - right.number)
+  for (const candidate of candidates) {
+    const count = counts.get(candidate.key)
+    if (count >= candidate.limit) continue
+    if (result.length >= maximumBatchSize) break
+    result.push({ type: 'issue', number: candidate.number, work: candidate.work })
+    counts.set(candidate.key, count + 1)
+  }
+  return result
+}
