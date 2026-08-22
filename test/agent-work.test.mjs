@@ -16,6 +16,15 @@ function agentWork(fields) {
   return `<!-- agent-work:v2 -->\n\`\`\`json\n${JSON.stringify(fields)}\n\`\`\``
 }
 
+function agentWorkV3(fields, prose = true) {
+  const sections = prose ? [
+    '## Objective', '', 'Implement one bounded task.', '',
+    '## Scope', '', '- Keep the change independently reviewable.', '',
+    '## Acceptance criteria', '', '- The focused contract tests pass.', '',
+  ].join('\n') : ''
+  return `${sections}\n\n<!-- agent-work:v3 -->\n\`\`\`json\n${JSON.stringify(fields)}\n\`\`\``
+}
+
 test('agent-work:v2 selects orchestration without naming an Agent or procedure', () => {
   const body = [
     '# Implement the integration',
@@ -39,6 +48,7 @@ test('agent-work:v2 selects orchestration without naming an Agent or procedure',
     profile: 'github-pr-cycle',
     workflow: 'default',
     branch: 'agent/ci-baseline-integration',
+    taskClass: 'default',
     dependsOn: [12, 14],
   })
 })
@@ -51,8 +61,58 @@ test('agent-work:v2 supplies the bundled Profile default but keeps workflow expl
     dispatch: 'hold',
     profile: 'github-pr-cycle',
     workflow: 'default',
+    taskClass: 'default',
     dependsOn: [],
   })
+})
+
+test('agent-work:v3 parses one executable child with its abstract route class', () => {
+  assert.deepEqual(parseAgentWork(agentWorkV3({
+    version: 3,
+    dispatch: 'ready',
+    profile: 'github-pr-cycle',
+    workflow: 'default',
+    parent: 100,
+    taskClass: 'frontend',
+    dependsOn: [101],
+  }), { issueNumber: 102 }), {
+    version: 3,
+    dispatch: 'ready',
+    profile: 'github-pr-cycle',
+    workflow: 'default',
+    parent: 100,
+    taskClass: 'frontend',
+    dependsOn: [101],
+  })
+})
+
+test('agent-work:v3 requires executable prose and rejects mixed or unknown declarations', () => {
+  const valid = {
+    version: 3, dispatch: 'ready', workflow: 'default', parent: 100, taskClass: 'frontend', dependsOn: [],
+  }
+  assert.throws(() => parseAgentWork(agentWorkV3(valid, false)), /Objective/)
+  assert.throws(() => parseAgentWork(agentWorkV3({ ...valid, extra: 'nope' })), /unknown field extra/)
+  assert.throws(
+    () => parseAgentWork(`${agentWorkV3(valid)}\n${agentWork(valid)}`),
+    /exactly one recognized/,
+  )
+  assert.throws(() => parseAgentWork(agentWorkV3({ ...valid, taskClass: 'worker/id' })), /taskClass/)
+  assert.throws(() => parseAgentWork(agentWorkV3({ ...valid, taskClass: 'model command' })), /taskClass/)
+  assert.throws(() => parseAgentWork(agentWorkV3({ ...valid, parent: 0 })), /parent/)
+})
+
+test('agent-work:v3 rejects self references when the executable Issue number is supplied', () => {
+  const valid = {
+    version: 3, dispatch: 'ready', workflow: 'default', parent: 100, taskClass: 'frontend', dependsOn: [],
+  }
+  assert.throws(
+    () => parseAgentWork(agentWorkV3({ ...valid, parent: 102 }), { issueNumber: 102 }),
+    /parent must not reference/,
+  )
+  assert.throws(
+    () => parseAgentWork(agentWorkV3({ ...valid, dependsOn: [102] }), { issueNumber: 102 }),
+    /dependsOn must not reference/,
+  )
 })
 
 test('agent-work:v2 rejects commands, Agent choices, and ambiguous declarations', () => {
@@ -81,6 +141,17 @@ test('request identity binds normalized work and exact Profile hash', () => {
     agentWorkRequestId(work, profile.definitionHash, 'f'.repeat(64)),
   )
   assert.throws(() => agentWorkRequestId(work, profile.definitionHash, 'bad'), /Contract hash/)
+})
+
+test('v3 identity changes when normalized planning fields change', () => {
+  const fields = {
+    version: 3, dispatch: 'ready', workflow: 'default', parent: 100, taskClass: 'frontend', dependsOn: [101],
+  }
+  const work = parseAgentWork(agentWorkV3(fields), { issueNumber: 102 })
+  const id = value => agentWorkRequestId(value, profile.definitionHash)
+  assert.notEqual(id(work), id({ ...work, parent: 103 }))
+  assert.notEqual(id(work), id({ ...work, taskClass: 'backend' }))
+  assert.notEqual(id(work), id({ ...work, dependsOn: [104] }))
 })
 
 test('Agent Issues reevaluates work declarations when trusted Issues change', async () => {
