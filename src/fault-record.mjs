@@ -107,12 +107,13 @@ function normalizeStateVersion(value) {
 }
 
 function normalizeAttempt(value, index) {
-  const object = exactKeys(value, ['epoch', 'kind', 'target', 'sequence', 'outcome', 'at', 'detail'], `FaultRecord attempt ${index}`)
+  const object = exactKeys(value, ['epoch', 'kind', 'target', 'sequence', 'outcome', 'at', 'detail', 'head'], `FaultRecord attempt ${index}`)
   if (!Number.isSafeInteger(object.epoch) || object.epoch < 1) throw new Error('FaultRecord attempt epoch is invalid')
   if (!ATTEMPT_KINDS.has(object.kind)) throw new Error('FaultRecord attempt kind is invalid')
   const target = identifier(object.target, 'FaultRecord attempt target')
   if (!Number.isSafeInteger(object.sequence) || object.sequence < 1) throw new Error('FaultRecord attempt sequence is invalid')
   if (!ATTEMPT_OUTCOMES.has(object.outcome)) throw new Error('FaultRecord attempt outcome is invalid')
+  if (object.head !== undefined && !FULL_SHA.test(object.head || '')) throw new Error('FaultRecord attempt head is invalid')
   return {
     epoch: object.epoch,
     kind: object.kind,
@@ -121,6 +122,7 @@ function normalizeAttempt(value, index) {
     outcome: object.outcome,
     at: timestamp(object.at, 'FaultRecord attempt at'),
     ...(object.detail === undefined ? {} : { detail: boundedText(object.detail, 'FaultRecord attempt detail') }),
+    ...(object.head === undefined ? {} : { head: object.head }),
   }
 }
 
@@ -230,7 +232,8 @@ function withAttempt(record, input) {
     status: input.status,
     attempts: [...record.attempts, {
       epoch, kind: input.kind, target: input.target, sequence: input.sequence,
-      outcome: input.outcome, at: input.at, ...(input.detail ? { detail: input.detail } : {}),
+      outcome: input.outcome, at: input.at,
+      ...(input.detail ? { detail: input.detail } : {}), ...(input.head ? { head: input.head } : {}),
     }],
   })
 }
@@ -277,6 +280,10 @@ export function recordFaultAttempt(rawRecord, input) {
   if (!ATTEMPT_KINDS.has(input.kind)) throw new Error('FaultRecord attempt kind is invalid')
   const outcome = input.outcome
   if (!ATTEMPT_OUTCOMES.has(outcome)) throw new Error('FaultRecord attempt outcome is invalid')
+  if (outcome === 'succeeded' && ['review', 'ci', 'promotion'].includes(input.kind)
+    && !FULL_SHA.test(input.head || '')) {
+    throw new Error(`Successful ${input.kind} attempt requires an exact maintenance PR head`)
+  }
   let status = record.status
   if (input.kind === 'deterministic') status = outcome === 'succeeded' ? 'verifying' : 'recovering'
   if (input.kind === 'maintenance-worker') status = outcome === 'succeeded' ? 'reviewing' : 'repairing'

@@ -29,7 +29,11 @@ import { trustedFaultProjectionRun } from './fault-observation.mjs'
 import { observeFaultHealth, parseFaultHealthState } from './fault-health.mjs'
 import { parseMaintenanceProfile } from './maintenance-profile.mjs'
 import { assessMaintenanceCi, MAINTENANCE_CI_WORKFLOW_PATH } from './maintenance-ci.mjs'
-import { assessMaintenancePromotion, confirmMaintenancePromotionHead } from './maintenance-promotion.mjs'
+import {
+  assessMaintenancePromotion,
+  assertMaintenanceHeadContinuity,
+  confirmMaintenancePromotionHead,
+} from './maintenance-promotion.mjs'
 import { parseReviewMessage } from './review-protocol.mjs'
 import { validateReviewFindings } from './review-evidence.mjs'
 
@@ -296,6 +300,11 @@ async function reviewMaintenancePullRequest(record) {
 async function checkMaintenanceCi(record) {
   const pull = await ghJson(['api', `repos/${controllerRepository}/pulls/${record.repairPullRequest}`], 'maintenance pull request')
   const files = await validateMaintenancePullRequest(record, pull)
+  try {
+    assertMaintenanceHeadContinuity(record, pull.head?.sha, ['review'])
+  } catch (error) {
+    return { outcome: 'failed', pull, detail: error.message }
+  }
   const workflowRuns = await pages(
     `repos/${controllerRepository}/actions/workflows/${maintenanceCiWorkflowFile}/runs?event=pull_request&head_sha=${pull.head.sha}`,
     'maintenance CI workflow runs', 'workflow_runs',
@@ -322,7 +331,9 @@ async function checkMaintenanceCi(record) {
 async function promoteMaintenance(record) {
   const pull = await ghJson(['api', `repos/${controllerRepository}/pulls/${record.repairPullRequest}`], 'maintenance pull request')
   const files = await validateMaintenancePullRequest(record, pull)
+  const expectedHead = assertMaintenanceHeadContinuity(record, pull.head?.sha, ['review', 'ci'])
   const decision = assessMaintenancePromotion({ pull, files })
+  if (decision.expectedHead !== expectedHead) throw new Error('Maintenance promotion decision changed the exact PR head')
   const current = await ghJson(['api', `repos/${controllerRepository}/pulls/${pull.number}`], 'maintenance pull request before merge')
   confirmMaintenancePromotionHead({ decision, current })
   await run(config.ghExecutable, ['pr', 'merge', String(pull.number), '--repo', controllerRepository,
@@ -331,7 +342,7 @@ async function promoteMaintenance(record) {
   if (!merged.merged || merged.head?.sha !== decision.expectedHead || !/^[0-9a-f]{40}$/.test(merged.merge_commit_sha || '')) {
     throw new Error('Maintenance pull request did not produce a published SHA for the promoted head')
   }
-  return merged.merge_commit_sha
+  return { head: decision.expectedHead, publishedSha: merged.merge_commit_sha }
 }
 
 async function verifyPublishedRuntime(projection, publishedSha) {
@@ -404,11 +415,12 @@ async function processFault(issue) {
   if (record.status === 'reviewing' && record.repairPullRequest) {
     if (!attempts.some(attempt => attempt.kind === 'review')) {
       try {
-        const { review } = await reviewMaintenancePullRequest(record)
+        const { review, pull } = await reviewMaintenancePullRequest(record)
         record = recordFaultAttempt(record, {
           kind: 'review', target: reviewWorker, sequence: 1,
           outcome: review.verdict === 'pass' ? 'succeeded' : 'failed',
-          detail: review.summary.slice(0, 500), at: new Date().toISOString(),
+          detail: review.summary.slice(0, 500),
+          ...(review.verdict === 'pass' ? { head: pull.head.sha } : {}), at: new Date().toISOString(),
         })
       } catch (error) {
         record = recordFaultAttempt(record, {
@@ -424,7 +436,8 @@ async function processFault(issue) {
       if (ci.outcome === 'waiting') return
       record = recordFaultAttempt(record, {
         kind: 'ci', target: profile.checks.workflowNames[0].replace(/\s+/g, '-').toLowerCase(), sequence: 1,
-        outcome: ci.outcome, ...(ci.detail ? { detail: ci.detail } : {}), at: new Date().toISOString(),
+        outcome: ci.outcome, ...(ci.detail ? { detail: ci.detail } : {}),
+        ...(ci.outcome === 'succeeded' ? { head: ci.pull.head.sha } : {}), at: new Date().toISOString(),
       })
       await appendRecord(projection.repository, issue.number, record)
       return
@@ -432,10 +445,10 @@ async function processFault(issue) {
   }
   if (record.status === 'deploying') {
     try {
-      const publishedSha = await promoteMaintenance(record)
+      const { head, publishedSha } = await promoteMaintenance(record)
       record = recordFaultAttempt(record, {
         kind: 'promotion', target: 'fault-bound', sequence: 1, outcome: 'succeeded',
-        publishedSha, at: new Date().toISOString(),
+        head, publishedSha, at: new Date().toISOString(),
       })
     } catch (error) {
       record = recordFaultAttempt(record, {
