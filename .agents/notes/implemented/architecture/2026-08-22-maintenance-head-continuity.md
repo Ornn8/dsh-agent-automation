@@ -1,0 +1,1 @@
+Controller maintenance now persists the exact repair PR head on successful review, trusted CI, and promotion FaultRecord attempts. Each later invocation requires the current PR head to match every completed stage in the epoch, and merge confirmation requires the published PR head to remain exact; records without this binding fail closed.

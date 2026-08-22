@@ -83,10 +83,10 @@ test('maintenance repair, independent review, CI, release, and verification form
     kind: 'maintenance-worker', target: repair.target, sequence: 1, outcome: 'succeeded', repairPullRequest: 8,
     at: '2026-08-16T00:04:00Z',
   })
-  record = recordFaultAttempt(record, { kind: 'review', target: 'reviewer', sequence: 1, outcome: 'succeeded', at: '2026-08-16T00:05:00Z' })
-  record = recordFaultAttempt(record, { kind: 'ci', target: 'controller-ci', sequence: 1, outcome: 'succeeded', at: '2026-08-16T00:06:00Z' })
+  record = recordFaultAttempt(record, { kind: 'review', target: 'reviewer', sequence: 1, outcome: 'succeeded', head: 'a'.repeat(40), at: '2026-08-16T00:05:00Z' })
+  record = recordFaultAttempt(record, { kind: 'ci', target: 'controller-ci', sequence: 1, outcome: 'succeeded', head: 'a'.repeat(40), at: '2026-08-16T00:06:00Z' })
   record = recordFaultAttempt(record, {
-    kind: 'promotion', target: 'fault-bound', sequence: 1, outcome: 'succeeded', publishedSha: '4'.repeat(40),
+    kind: 'promotion', target: 'fault-bound', sequence: 1, outcome: 'succeeded', head: 'a'.repeat(40), publishedSha: '4'.repeat(40),
     at: '2026-08-16T00:07:00Z',
   })
   record = verifyThreeTimes(record, 7)
