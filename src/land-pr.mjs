@@ -12,7 +12,11 @@ import { parseReviewCheckIdentity } from './review-check.mjs'
 import { trustedReviewRunProfile } from './advancement-source.mjs'
 import { sameRepositoryClosingIssues } from './closing-issues.mjs'
 import { writeLandingResult } from './landing-result.mjs'
-import { assertVerificationContractChecks } from './verification-contract.mjs'
+import {
+  assertVerificationContractChecks,
+  assertVerificationContractExecution,
+  verificationJobId,
+} from './verification-contract.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const expectedHead = requiredEnv('HEAD_SHA')
@@ -103,6 +107,28 @@ async function readCheckRuns() {
     'api', `repos/${repository}/commits/${expectedHead}/check-runs`, '--paginate', '--slurp',
   ], 'head check runs')
   return pages.flatMap(page => page.check_runs || [])
+}
+
+async function readVerificationExecutions(checkRuns, requiredCheckDefinitions, trustedVerificationContract) {
+  if (trustedVerificationContract === undefined) return []
+  const executions = []
+  for (const required of requiredCheckDefinitions) {
+    const candidates = checkRuns
+      .filter(check => check?.name === required.context
+        && check.head_sha === expectedHead
+        && check.app?.id === required.app_id)
+      .sort((left, right) => Number(right.id || 0) - Number(left.id || 0))
+    if (candidates.length < 1) throw new Error(`Required check ${required.context} has no exact-head Actions CheckRun`)
+    const checkRun = candidates[0]
+    const jobId = verificationJobId(checkRun.details_url, repository)
+    if (jobId === null) throw new Error(`Required check ${required.context} has no verifiable Actions job`)
+    const job = await ghJson([
+      'api', `repos/${repository}/actions/jobs/${jobId}`,
+    ], `verification job ${jobId} for ${required.context}`)
+    if (job?.id !== jobId) throw new Error(`Verification job ${jobId} does not match its CheckRun`)
+    executions.push({ checkRun, job })
+  }
+  return executions
 }
 
 async function readLatestReviewProof(pullRequest, checkRuns) {
@@ -213,6 +239,11 @@ const requiredChecks = await protectedChecks(cycle.checks, profile.verificationC
 assertVerificationContractChecks({
   trustedVerificationContract: profile.verificationContract,
   configuredRequiredChecks: requiredChecks,
+})
+const verificationExecutions = await readVerificationExecutions(checkRuns, requiredChecks, profile.verificationContract)
+assertVerificationContractExecution({
+  trustedVerificationContract: profile.verificationContract,
+  executions: verificationExecutions,
 })
 
 const decision = evaluateLanding({ pullRequest, expectedHead, requiredChecks, checkRuns, reviewProof, trustedReview })

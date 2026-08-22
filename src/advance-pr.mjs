@@ -21,7 +21,11 @@ import { parseReviewCheckIdentity } from './review-check.mjs'
 import { terminalReviewSource, trustedReviewRunProfile } from './advancement-source.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { trustedWorkerIdentity } from './workflow-identity.mjs'
-import { assertVerificationContractChecks } from './verification-contract.mjs'
+import {
+  assertVerificationContractChecks,
+  assertVerificationContractExecution,
+  verificationJobId,
+} from './verification-contract.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
@@ -255,6 +259,27 @@ function configuredRequiredChecks(names) {
   })
 }
 
+async function readVerificationExecutions(checkResults, requiredCheckDefinitions, head) {
+  const executions = []
+  for (const required of requiredCheckDefinitions) {
+    const candidates = checkResults
+      .filter(check => check?.name === required.context
+        && check.head_sha === head
+        && check.app?.id === required.app_id)
+      .sort((left, right) => Number(right.id || 0) - Number(left.id || 0))
+    if (candidates.length < 1) throw new Error(`Required check ${required.context} has no exact-head Actions CheckRun`)
+    const checkRun = candidates[0]
+    const jobId = verificationJobId(checkRun.details_url, repository)
+    if (jobId === null) throw new Error(`Required check ${required.context} has no verifiable Actions job`)
+    const job = await ghJson([
+      'api', `repos/${repository}/actions/jobs/${jobId}`,
+    ], `verification job ${jobId} for ${required.context}`)
+    if (job?.id !== jobId) throw new Error(`Verification job ${jobId} does not match its CheckRun`)
+    executions.push({ checkRun, job })
+  }
+  return executions
+}
+
 const pullRequest = await readPullRequest()
 const checkResults = await readCheckResults(pullRequest.head.sha)
 const persistedIdentity = await persistedWorkflowIdentity(pullRequest)
@@ -289,6 +314,13 @@ const requiredCheckDefinitions = configuredRequiredChecks(requiredChecks)
 assertVerificationContractChecks({
   trustedVerificationContract: profile.verificationContract,
   configuredRequiredChecks: requiredChecks,
+})
+const verificationExecutions = profile.verificationContract
+  ? await readVerificationExecutions(checkResults, requiredCheckDefinitions, pullRequest.head.sha)
+  : []
+assertVerificationContractExecution({
+  trustedVerificationContract: profile.verificationContract,
+  executions: verificationExecutions,
 })
 if (verifiedTerminalReviewSource) {
   const sourceChecks = checkResults.filter(check => check.head_sha === expectedHead

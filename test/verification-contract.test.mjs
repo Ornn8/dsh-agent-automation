@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   assertVerificationContractChecks,
+  assertVerificationContractExecution,
   loadTrustedVerificationContract,
   parseVerificationContract,
+  verificationJobId,
   verificationContractHash,
 } from '../src/verification-contract.mjs'
 
@@ -103,6 +105,50 @@ test('rejects an extra independent branch-protection check before app binding', 
       { context: 'security', app_id: 15368 },
     ],
   }), /do not match trusted Verification Contract/)
+})
+
+test('requires a successful required-check job step for the trusted entrypoint', () => {
+  const contract = {
+    contract: parseVerificationContract(validContract()),
+    hash: verificationContractHash(validContract()),
+  }
+  const checkRun = {
+    name: 'unit-tests',
+    head_sha: 'a'.repeat(40),
+    status: 'completed',
+    conclusion: 'success',
+  }
+  const job = {
+    name: 'unit-tests',
+    head_sha: checkRun.head_sha,
+    status: 'completed',
+    conclusion: 'success',
+    steps: [{ name: 'verify/delivery', status: 'completed', conclusion: 'success' }],
+  }
+  assert.doesNotThrow(() => assertVerificationContractExecution({
+    trustedVerificationContract: contract,
+    executions: [{ checkRun, job }],
+  }))
+  assert.throws(() => assertVerificationContractExecution({
+    trustedVerificationContract: contract,
+    executions: [{ checkRun, job: { ...job, steps: [] } }],
+  }), /do not prove trusted Verification Contract execution/)
+  assert.doesNotThrow(() => assertVerificationContractExecution({
+    trustedVerificationContract: undefined,
+    executions: [],
+  }))
+})
+
+test('accepts only a job details URL for the configured repository', () => {
+  assert.equal(
+    verificationJobId('https://github.com/owner/repository/actions/runs/17/job/23', 'owner/repository'),
+    23,
+  )
+  assert.equal(
+    verificationJobId('https://github.com/owner/other/actions/runs/17/job/23', 'owner/repository'),
+    null,
+  )
+  assert.equal(verificationJobId('https://github.com/owner/repository/actions/runs/17', 'owner/repository'), null)
 })
 
 test('loads one immutable contract only from the supplied trusted revision', async () => {

@@ -128,6 +128,45 @@ export function assertVerificationContractChecks({ trustedVerificationContract, 
   }
 }
 
+/** Require one successful required-check job step to expose the trusted execution identity. */
+export function assertVerificationContractExecution({ trustedVerificationContract, executions }) {
+  if (trustedVerificationContract === undefined) return
+  const contract = parseVerificationContract(trustedVerificationContract?.contract)
+  if (trustedVerificationContract.hash !== verificationContractHash(contract)) {
+    throw new Error('Trusted Verification Contract hash does not match the contract contents')
+  }
+  if (!Array.isArray(executions)) {
+    throw new Error('Configured CI execution evidence must be an array')
+  }
+  const executionIdentity = Object.hasOwn(contract, 'procedure') ? contract.procedure : contract.entrypoint
+  const matches = executions.filter(execution => {
+    const checkRun = execution?.checkRun
+    const job = execution?.job
+    return contract.requiredChecks.includes(checkRun?.name)
+      && checkRun?.status === 'completed'
+      && checkRun?.conclusion === 'success'
+      && job?.name === checkRun.name
+      && job?.head_sha === checkRun.head_sha
+      && job?.status === 'completed'
+      && job?.conclusion === 'success'
+      && Array.isArray(job.steps)
+      && job.steps.some(step => step?.name === executionIdentity
+        && step?.status === 'completed'
+        && step?.conclusion === 'success')
+  })
+  if (matches.length !== 1) {
+    throw new Error('Configured CI job steps do not prove trusted Verification Contract execution')
+  }
+}
+
+/** Return the Actions job id encoded by one GitHub CheckRun details URL. */
+export function verificationJobId(detailsUrl, repository) {
+  if (typeof detailsUrl !== 'string' || typeof repository !== 'string') return null
+  const escapedRepository = repository.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = new RegExp(`^https://github\\.com/${escapedRepository}/actions/runs/[1-9]\\d*/job/([1-9]\\d*)$`).exec(detailsUrl)
+  return match ? Number.parseInt(match[1], 10) : null
+}
+
 /** Return the stable SHA-256 identity of one normalized verification contract. */
 export function verificationContractHash(value) {
   return createHash('sha256').update(canonicalJson(parseVerificationContract(value))).digest('hex')

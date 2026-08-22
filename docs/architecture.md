@@ -14,7 +14,7 @@ The repository defines one pure pull-request advancement decision seam. Pull-req
 
 This Module owns the stable invocation and terminal receipt Interface. Its Depth comes from hiding provider sessions, process protocols, model configuration, and local UI persistence behind one small call. Controllers know a worker id and role; they do not know how the Implementation starts or observes a session.
 
-Completed Agent automation results support a strict v2 verification receipt containing one exact lowercase revision, one trusted Verification Contract identity, the contract-selected procedure or entrypoint, a `passed` result, and bounded evidence identifiers. The pure binding helper compares that receipt with the expected revision and trusted contract; v1 completed and blocked results remain an explicit finite migration input, and this slice does not enforce v2 in Workers, CI, review, or landing.
+Completed Agent automation results support a strict v2 verification receipt containing one exact lowercase revision, one trusted Verification Contract identity, the contract-selected procedure or entrypoint, a `passed` result, and bounded evidence identifiers. The pure binding helper compares that receipt with the expected revision and trusted contract; v1 completed and blocked results remain an explicit finite migration input, and this slice does not enforce v2 receipts in Workers or review.
 
 When a trusted target Profile has a loaded Verification Contract, the issue and transported repair Worker Skill payloads carry that immutable context as structured data. Unconfigured Profiles omit it, and repair paths do not reread candidate content to reconstruct it.
 
@@ -23,6 +23,8 @@ Durable completed Worker replays reparse a stored final output with the existing
 Configured Issue and transported repair Skills run the trusted named procedure or entrypoint, collect its required evidence, and return a v2 automation result. The Controller binds that result to the exact accepted revision and trusted Verification Contract before accepting the PR advancement. Unconfigured Profiles retain v1 behavior, and blocked or baseline outcomes do not enter this binding path.
 
 When configured, the trusted Verification Contract's required check contexts must equal the target's configured exact-head CI checks before advancement or landing; Controller CI runs only for pull-request events, with no duplicate push trigger for the same head.
+
+When configured, advancement and landing load the exact Actions job for each required check and require one successful step named by the trusted contract's `procedure` or `entrypoint`. This is a target-owned static execution equivalent: the generic Controller observes the recorded job step and never runs a product command. Missing job identity, mismatched head, or missing successful step fails closed; unconfigured Profiles retain the existing path.
 
 ### Agent Adapters
 
