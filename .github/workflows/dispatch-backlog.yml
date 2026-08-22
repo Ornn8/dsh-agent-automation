@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      maximum_batch_size:
+        description: Maximum number of ordinary ready Issues to attempt in one scan.
+        required: false
+        default: 4
+        type: number
 
 concurrency:
   group: dsh-backlog-${{ github.repository }}
@@ -67,5 +72,6 @@ jobs:
           TRUSTED_CONTROLLER_SHA: ${{ job.workflow_sha }}
           TRUSTED_REVIEW_WORKFLOW_PATH: .github/workflows/agent-review.yml
           REQUESTED_ISSUE_NUMBER: ${{ inputs.requested_issue_number }}
+          MAXIMUM_BATCH_SIZE: ${{ inputs.maximum_batch_size }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/dispatch-backlog.mjs
