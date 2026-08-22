@@ -950,12 +950,39 @@ async function localProcessIdentity() {
   return localProcessIdentityPromise
 }
 
+/**
+ * Windows records the acquisition time and defers probing the current process
+ * until an expired lease needs ownership verification. This keeps concurrent
+ * contenders from starting one PowerShell process each during normal locking.
+ * Non-Windows platforms retain their OS process identity in the lease.
+ * @param {boolean} persistProcessIdentity
+ * @returns {Promise<{pid: number, processIdentity?: string}>}
+ */
+async function localLeaseIdentity(persistProcessIdentity) {
+  if (process.platform === 'win32' && !persistProcessIdentity) return { pid: process.pid }
+  return { pid: process.pid, processIdentity: await localProcessIdentity() }
+}
+
+/** @param {string} identity @param {string} acquiredAt @returns {boolean|null} */
+function identityMatchesAcquisition(identity, acquiredAt) {
+  if (!identity.startsWith('windows:')) return null
+  const startedAt = Date.parse(identity.slice('windows:'.length))
+  if (!Number.isFinite(startedAt)) return null
+  return startedAt <= Date.parse(acquiredAt)
+}
+
 /** @param {ReturnType<typeof parseLease>} lease @param {() => number} clock @param {ProcessIdentityVerifier} verifier @returns {Promise<boolean>} */
 async function leaseIsHeld(lease, clock, verifier) {
   if (Date.parse(lease.expiresAt) > clock()) return true
-  if (lease.pid === undefined || lease.processIdentity === undefined) return false
+  if (lease.pid === undefined) return false
   const identity = await verifier(lease.pid)
-  return identity !== null && identity === lease.processIdentity
+  if (identity === null) return false
+  if (lease.processIdentity === undefined) {
+    // An unrecognized identity is not evidence of a dead or reused PID.
+    // Keep the gate until a verifier supplies a comparable Windows start time.
+    return identityMatchesAcquisition(identity, lease.acquiredAt) ?? true
+  }
+  return identity === lease.processIdentity
 }
 
 /** @param {string} gatePath @param {string} ownerToken @returns {string} */
@@ -1102,8 +1129,8 @@ async function releaseReclaim(markerPath, ownerToken, fence) {
   await bestEffortRemoveEmptyDirectory(markerPath)
 }
 
-/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {() => number} clock @param {number} leaseMs @param {number} deadline @param {ProcessIdentityVerifier} verifier @returns {Promise<ReturnType<typeof parseLease>|null>} */
-async function claimReclaimMarker(paths, clock, leaseMs, deadline, verifier) {
+/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {() => number} clock @param {number} leaseMs @param {number} deadline @param {ProcessIdentityVerifier} verifier @param {boolean} persistProcessIdentity @returns {Promise<ReturnType<typeof parseLease>|null>} */
+async function claimReclaimMarker(paths, clock, leaseMs, deadline, verifier, persistProcessIdentity) {
   let firstAttempt = true
   while (firstAttempt || Date.now() < deadline) {
     firstAttempt = false
@@ -1124,7 +1151,7 @@ async function claimReclaimMarker(paths, clock, leaseMs, deadline, verifier) {
       await highestFence(paths.directory, paths.attemptsBasePrefix, paths),
     ) + 1
     const nowMs = clock()
-    let lease = parseLease({ version: 1, ownerToken, fence, pid: process.pid, processIdentity: await localProcessIdentity(), acquiredAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + leaseMs).toISOString() })
+    let lease = parseLease({ version: 1, ownerToken, fence, ...await localLeaseIdentity(persistProcessIdentity), acquiredAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + leaseMs).toISOString() })
     const pendingPath = join(paths.directory, `${RECLAIM_PENDING_PREFIX}.${ownerToken}.json`)
     try {
       await publishPrivateLease(paths.directory, pendingPath, lease)
@@ -1141,8 +1168,8 @@ async function claimReclaimMarker(paths, clock, leaseMs, deadline, verifier) {
   return null
 }
 
-/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {() => number} clock @param {number} leaseMs @param {number} deadline @param {ProcessIdentityVerifier} verifier @returns {Promise<ReturnType<typeof parseLease>|null>} */
-async function acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier) {
+/** @param {ReturnType<typeof capacityRegistryPaths>} paths @param {() => number} clock @param {number} leaseMs @param {number} deadline @param {ProcessIdentityVerifier} verifier @param {boolean} persistProcessIdentity @returns {Promise<ReturnType<typeof parseLease>|null>} */
+async function acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier, persistProcessIdentity) {
   let firstAttempt = true
   while (firstAttempt || Date.now() < deadline) {
     firstAttempt = false
@@ -1151,7 +1178,7 @@ async function acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier) 
       await waitForLock(10)
       continue
     }
-    const reclaim = observed.state === 'stale' ? await claimReclaimMarker(paths, clock, leaseMs, deadline, verifier) : null
+    const reclaim = observed.state === 'stale' ? await claimReclaimMarker(paths, clock, leaseMs, deadline, verifier, persistProcessIdentity) : null
     if (observed.state === 'stale' && !reclaim) {
       await waitForLock(10)
       continue
@@ -1193,7 +1220,7 @@ async function acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier) 
       await highestFence(paths.directory, paths.attemptsBasePrefix, paths),
     ) + 1
     const nowMs = clock()
-    let lease = parseLease({ version: 1, ownerToken, fence, pid: process.pid, processIdentity: await localProcessIdentity(), acquiredAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + leaseMs).toISOString() })
+    let lease = parseLease({ version: 1, ownerToken, fence, ...await localLeaseIdentity(persistProcessIdentity), acquiredAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + leaseMs).toISOString() })
     const candidatePath = join(paths.directory, `${paths.leasePrefix}.${ownerToken}.json`)
     try {
       await publishPrivateLease(paths.directory, candidatePath, lease)
@@ -1225,7 +1252,9 @@ export async function withCapacityRegistryLock(stateRoot, operation, options = {
     ? processIdentity
     : /** @type {ProcessIdentityVerifier} */ (pid => boundedProcessIdentity(injectedVerifier, pid))
   const deadline = Date.now() + waitMs
-  const acquired = await acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier)
+  // A synthetic lock clock cannot be compared with an OS process start time.
+  const persistProcessIdentity = options.now !== undefined
+  const acquired = await acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier, persistProcessIdentity)
   if (!acquired) throw new Error('Capacity registry lock is busy')
   const ownerPath = join(paths.directory, `${paths.leasePrefix}.${acquired.ownerToken}.json`)
   try {
@@ -1311,6 +1340,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
   }
   const identity = { configurationHash, credentialGeneration }
   const clock = typeof now === 'function' ? now : now === undefined ? () => Date.now() : () => now
+  const lockOptions = now === undefined ? {} : { now: clock }
   return {
     async records() {
       return withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
@@ -1323,7 +1353,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         }
         if (changed) await writeCapacityRegistry(stateRoot, document.document, lease)
         return document.document.records
-      }, { now: clock })
+      }, lockOptions)
     },
     /** @param {string} key */
     async get(key) {
@@ -1360,7 +1390,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         document.document.records[recordKey] = recordCapacityFailure(current, normalizedFailure, { sourceWorker: snapshot.workerId, capacityIdentity: snapshot.identity, now: observationTime ?? clock(), cooldownMs })
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return document.document.records[recordKey]
-      }, { now: clock })
+      }, lockOptions)
     },
     /** @param {RegistryLeaseInput} input */
     async acquireHalfOpenLease({ key, leaseId, owner, now: leaseTime, leaseMs }) {
@@ -1374,7 +1404,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         document.document.records[key] = acquired.record
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return acquired
-      }, { now: clock })
+      }, lockOptions)
     },
     /** Atomically claim all expired applicable scopes for one trusted Worker. */
     /** @param {RegistryProbeClaimInput} input */
@@ -1435,7 +1465,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
           })),
           probe: { workerId, capacityGroup: snapshot.capacityGroup, identity: snapshot.identity, leases: acquired },
         }
-      }, { now: clock })
+      }, lockOptions)
     },
     /** Complete or abandon every lease from one trusted multi-scope probe. */
     /** @param {RegistryProbeCompletionInput} input */
@@ -1504,7 +1534,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         }
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return records
-      }, { now: clock })
+      }, lockOptions)
     },
     /** @param {RegistryCompletionInput} input */
     async completeHalfOpenLease({ key, leaseId, outcome, failure, now: completionTime, cooldownMs }) {
@@ -1516,15 +1546,15 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         document.document.records[key] = completeHalfOpenLease(current, { leaseId, outcome, failure, now: completionTime ?? clock(), cooldownMs })
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return document.document.records[key]
-      }, { now: clock })
+      }, lockOptions)
     },
     /** @param {Record<string, any>} attempt */
     async appendAttempt(attempt) {
-      return withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, attempt, lease), { now: clock })
+      return withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, attempt, lease), lockOptions)
     },
     /** @param {Record<string, any>} attempt */
     async claimAttempt(attempt) {
-      return withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, attempt, lease), { now: clock })
+      return withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, attempt, lease), lockOptions)
     },
     async attempts() {
       return readCapacityAttempts(stateRoot)

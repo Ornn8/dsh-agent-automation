@@ -279,6 +279,36 @@ async function waitForFile(path, timeoutMs = 5_000) {
   throw new Error(`Timed out waiting for ${path}`)
 }
 
+async function observePublicLease(stateRoot, operation) {
+  const paths = capacityRegistryPaths(stateRoot)
+  let observing = true
+  let observed = null
+  const poll = (async () => {
+    while (observing && observed === null) {
+      try {
+        const ownerName = (await readdir(paths.lockPath)).find(name => name.startsWith('registry-owner.') && name.endsWith('.json'))
+        if (ownerName) {
+          try {
+            observed = JSON.parse(await readFile(join(paths.lockPath, ownerName), 'utf8'))
+          } catch (error) {
+            if (error?.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
+          }
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+      if (observed === null) await new Promise(resolve => setTimeout(resolve, 0))
+    }
+  })()
+  try {
+    await operation()
+  } finally {
+    observing = false
+  }
+  await poll
+  return observed
+}
+
 test('durable registry derives opaque keys from complete identity and persists records', async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-store-'))
   try {
@@ -468,6 +498,15 @@ test('process identity returns null only when Windows reports the target PID abs
   }), null)
 })
 
+test('process identity rejects successful Windows output with an empty StartTime', async () => {
+  const runCommand = async () => ({ stdout: '' })
+  await assert.rejects(resolveProcessIdentity(123, {
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    runCommand,
+  }), /Windows process identity output is empty/)
+})
+
 test('process identity requires an aborted child runner to acknowledge close', { timeout: 10_000 }, async () => {
   let child
   let closed = false
@@ -511,6 +550,66 @@ test('identity probe failure fails acquisition without reclaiming the old gate',
       processIdentity: async () => { throw new Error('identity probe unavailable') },
     }), /identity probe unavailable/)
     assert.equal((await readdir(paths.lockPath)).length, 1)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('Windows leases defer local identity probing until an expired owner must be checked', { skip: process.platform !== 'win32' }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-windows-local-identity-'))
+  try {
+    let lease
+    await withCapacityRegistryLock(stateRoot, async (paths) => {
+      const ownerName = (await readdir(paths.lockPath)).find(name => name.startsWith('registry-owner.') && name.endsWith('.json'))
+      assert.ok(ownerName)
+      lease = JSON.parse(await readFile(join(paths.lockPath, ownerName), 'utf8'))
+    })
+    assert.equal(lease.pid, process.pid)
+    assert.equal(lease.processIdentity, undefined)
+    assert.match(lease.acquiredAt, /^20\d\d-/)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('Windows timestamp identity keeps an active PID and rejects reuse when the lease has no stored identity', { skip: process.platform !== 'win32', timeout: 10_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-windows-timestamp-identity-'))
+  const acquiredAt = Date.parse('2026-08-21T00:00:00.000Z')
+  const writeExpiredOwner = async (ownerToken) => {
+    const paths = capacityRegistryPaths(stateRoot)
+    await mkdir(paths.directory, { recursive: true })
+    await mkdir(paths.lockPath)
+    await writeFile(join(paths.lockPath, `registry-owner.${ownerToken}.json`), `${JSON.stringify({
+      version: 1, ownerToken, fence: 10, pid: process.pid,
+      acquiredAt: new Date(acquiredAt).toISOString(),
+      expiresAt: new Date(acquiredAt + 1).toISOString(),
+    })}\n`, 'utf8')
+  }
+  try {
+    await writeExpiredOwner('active')
+    await assert.rejects(withCapacityRegistryLock(stateRoot, async () => undefined, {
+      now: acquiredAt + 1_000,
+      waitMs: 20,
+      processIdentity: async () => `windows:${new Date(acquiredAt - 1).toISOString()}`,
+    }), /busy/)
+    assert.equal((await readdir(capacityRegistryPaths(stateRoot).lockPath)).length, 1)
+
+    await rm(capacityRegistryPaths(stateRoot).lockPath, { recursive: true, force: true })
+    await writeExpiredOwner('reused')
+    let callbacks = 0
+    await withCapacityRegistryLock(stateRoot, async () => { callbacks += 1 }, {
+      now: acquiredAt + 2_000,
+      processIdentity: async () => `windows:${new Date(acquiredAt + 1).toISOString()}`,
+    })
+    assert.equal(callbacks, 1)
+
+    await rm(capacityRegistryPaths(stateRoot).lockPath, { recursive: true, force: true })
+    await writeExpiredOwner('dead')
+    await withCapacityRegistryLock(stateRoot, async () => { callbacks += 1 }, {
+      now: acquiredAt + 3_000,
+      processIdentity: async () => null,
+    })
+    assert.equal(callbacks, 2)
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
@@ -726,6 +825,38 @@ test('registry default clock is evaluated for each decision', async () => {
     assert.ok(await registry.acquireHalfOpenLease({ key, leaseId: 'live-probe', owner: 'worker-1' }))
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('public registry preserves live-clock identity probe suppression and injected-clock identity', { skip: process.platform !== 'win32', timeout: 30_000 }, async () => {
+  const defaultStateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-public-live-identity-'))
+  const injectedStateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-public-injected-identity-'))
+  const workers = { 'worker-1': { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'public-identity-group' } }
+  const failure = capacityFailure()
+  try {
+    const liveRegistry = createCapacityRegistry({
+      stateRoot: defaultStateRoot, configurationHash, credentialGeneration, workers,
+    })
+    const liveLease = await observePublicLease(defaultStateRoot, () => liveRegistry.recordFailure({
+      capacityGroup: 'public-identity-group', sourceWorker: 'worker-1', failure,
+    }))
+    assert.ok(liveLease)
+    assert.equal(liveLease.processIdentity, undefined)
+
+    const injectedNow = Date.now()
+    const injectedRegistry = createCapacityRegistry({
+      stateRoot: injectedStateRoot, configurationHash, credentialGeneration, workers, now: () => injectedNow,
+    })
+    const injectedLease = await observePublicLease(injectedStateRoot, () => injectedRegistry.recordFailure({
+      capacityGroup: 'public-identity-group', sourceWorker: 'worker-1', failure,
+    }))
+    assert.ok(injectedLease)
+    assert.equal(injectedLease.processIdentity, await resolveProcessIdentity(process.pid))
+  } finally {
+    await Promise.all([
+      rm(defaultStateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
+      rm(injectedStateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
+    ])
   }
 })
 
