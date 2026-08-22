@@ -2,6 +2,7 @@ name: Controller CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
   workflow_dispatch:
 
@@ -25,6 +26,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: node scripts/check-pr-size.mjs
       - name: Skip the pull request gate for non-pull-request events
         if: github.event_name != 'pull_request'
