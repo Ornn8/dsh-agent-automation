@@ -127,6 +127,41 @@ export function independentIssueObservationNumber({ work, governorAction }) {
     : null
 }
 
+/** Select one exact, still-open capacity-waiting subject for a later bounded resume. */
+export function selectCapacityWaitingWork({ pullRequests = [], issues = [], capacityWaits = [] } = {}) {
+  const pullRequestByNumber = new Map(pullRequests.map(value => [value.number, value]))
+  const issueByNumber = new Map(issues.map(value => [value.number, value]))
+  const candidates = capacityWaits
+    .filter(wait => wait?.projection?.role === 'change'
+      && wait.currentStateVersion === wait.projection.subject.stateVersion)
+    .map(wait => {
+      const projection = wait.projection
+      const source = projection.subject.type === 'pull-request'
+        ? pullRequestByNumber.get(projection.subject.number)
+        : issueByNumber.get(projection.subject.number)
+      if (!source || source.state !== 'open') return null
+      if (projection.subject.type === 'pull-request') {
+        if (source.draft || source.head?.repo?.full_name !== wait.repository
+          || source.base?.sha !== projection.subject.base
+          || source.head?.sha !== projection.subject.head
+          || labelNames(source).has('automation/paused')
+          || labelNames(source).has('automation/repairing')
+          || labelNames(source).has('automation/repair-blocked')
+          || labelNames(source).has('automation/ci-baseline')
+          || labelNames(source).has('agent/dsh-failed')) return null
+        return { type: 'repair', number: source.number, head: source.head.sha, projection }
+      }
+      if (labelNames(source).has('automation/paused')
+        || labelNames(source).has('agent/dsh-failed')
+        || labelNames(source).has('agent/dsh-blocked')
+        || pullRequests.some(pullRequest => closesIssue(pullRequest, source.number))) return null
+      return { type: 'issue', number: source.number, projection }
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.number - right.number)
+  return candidates[0] || null
+}
+
 /** Select one safe unit of backlog work, preferring blocked PR repairs. */
 export function selectBacklogWork({
   repository,
