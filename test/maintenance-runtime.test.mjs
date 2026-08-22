@@ -47,7 +47,7 @@ test('maintenance review selects one Worker from the configured review default r
 
 test('maintenance CI records only the public exact-run provenance decision', async () => {
   const source = await readFile(new URL('../src/maintenance-recovery.mjs', import.meta.url), 'utf8')
-  assert.match(source, /actions\/runs\?event=pull_request&head_sha=\$\{pull\.head\.sha\}/)
+  assert.match(source, /actions\/workflows\/\$\{maintenanceCiWorkflowFile\}\/runs\?event=pull_request&head_sha=\$\{pull\.head\.sha\}/)
   assert.match(source, /assessMaintenanceCi\(\{[\s\S]*requiredCheckNames: profile\.checks\.requiredChecks/)
 })
 

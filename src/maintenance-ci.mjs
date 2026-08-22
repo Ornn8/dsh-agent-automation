@@ -11,7 +11,8 @@ function failed(detail) {
 }
 
 function validPullRequest(pull, repository) {
-  return Number.isSafeInteger(pull?.number) && pull.number > 0
+  return pull?.state === 'open'
+    && Number.isSafeInteger(pull?.number) && pull.number > 0
     && pull.base?.repo?.full_name === repository
     && pull.head?.repo?.full_name === repository
     && FULL_SHA.test(pull.base?.sha || '')
@@ -31,8 +32,11 @@ function isExactWorkflowRun(run, pull, repository, workflowName) {
     && run.pull_requests[0]?.head?.sha === pull.head.sha
 }
 
-function latestRun(runs) {
-  return [...runs].sort((left, right) => (right?.id || 0) - (left?.id || 0))[0]
+function latestRun(runs, workflowName) {
+  const candidates = runs.filter(run => run?.name === workflowName && run?.path === MAINTENANCE_CI_WORKFLOW_PATH)
+  return candidates.length > 0
+    ? [...candidates].sort((left, right) => (right?.id || 0) - (left?.id || 0))[0]
+    : null
 }
 
 /**
@@ -57,7 +61,7 @@ export function assessMaintenanceCi({
   if (!Array.isArray(workflowRuns)) return failed('maintenance CI workflow-run evidence is invalid')
   if (workflowRuns.length === 0) return { outcome: 'waiting' }
 
-  const run = latestRun(workflowRuns)
+  const run = latestRun(workflowRuns, workflowName)
   if (!Number.isSafeInteger(run?.id) || run.id < 1
     || !isExactWorkflowRun(run, pull, repository, workflowName)) {
     return failed('maintenance CI workflow run is not the fixed Controller exact-pair run')

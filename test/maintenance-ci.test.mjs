@@ -76,8 +76,21 @@ test('maintenance CI rejects a forged same-name check from the wrong workflow id
   assert.equal(result.outcome, 'failed')
 })
 
+test('maintenance CI ignores a newer unrelated workflow before selecting the fixed Controller source', () => {
+  const result = assessMaintenanceCi(input({
+    workflowRuns: [workflowRun(), workflowRun({
+      id: 99,
+      name: 'Shadow CI',
+      path: '.github/workflows/shadow.yml',
+    })],
+  }))
+  assert.equal(result.outcome, 'succeeded')
+  assert.equal(result.runId, 42)
+})
+
 test('maintenance CI rejects every mismatched repository, event, PR, base, head, or workflow path', () => {
   const cases = [
+    ['closed pull request', { pull: { ...pullRequest, state: 'closed' } }],
     ['repository', { repository: 'attacker/controller' }],
     ['run repository', { workflowRuns: [workflowRun({ repository: { full_name: 'attacker/controller' } })] }],
     ['event', { workflowRuns: [workflowRun({ event: 'pull_request_target' })] }],
