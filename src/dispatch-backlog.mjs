@@ -311,6 +311,12 @@ const issues = (await ghPages(`repos/${repository}/issues?state=all&per_page=100
 const trustedBlocked = requestedIssueNumber === null
   ? new Set()
   : await trustedBlockedRepairNumbers(pullRequests)
+const selectionDiagnostics = []
+function reportSelectionDiagnostics() {
+  if (selectionDiagnostics.length > 0) {
+    process.stdout.write(`Backlog dependency diagnostics: ${JSON.stringify(selectionDiagnostics.slice(0, 64))}\n`)
+  }
+}
 const singleSelections = requestedIssueNumber === null ? [] : selectBacklogDispatches({
   requestedIssueNumber,
   selectSingle: () => selectBacklogWork({
@@ -320,12 +326,14 @@ const singleSelections = requestedIssueNumber === null ? [] : selectBacklogDispa
     trustedBlockedRepairNumbers: trustedBlocked,
     includeRepairs: false,
     requestedIssueNumber,
+    diagnostics: selectionDiagnostics,
   }),
   selectBatch: () => [],
 })
 
 if (requestedIssueNumber !== null) {
   const work = singleSelections[0]
+  reportSelectionDiagnostics()
   if (!work) {
     process.stdout.write('No eligible DSH backlog work is ready.\n')
     process.exit(0)
@@ -361,8 +369,10 @@ const selections = selectBacklogDispatches({
     issues,
     workflowLimits,
     maximumBatchSize,
+    diagnostics: selectionDiagnostics,
   }),
 })
+reportSelectionDiagnostics()
 if (!selections.length) {
   process.stdout.write('No eligible DSH backlog work is ready.\n')
   process.exit(0)
