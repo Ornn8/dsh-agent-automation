@@ -1,0 +1,177 @@
+// @ts-check
+
+import { capacityEligibility, parseCapacityRecord } from './capacity-registry.mjs'
+import { capacityResumeRequestId, parseCapacityWaitProjection } from './capacity-wait-projection.mjs'
+import { resolveWorkerCandidates } from './machine-config.mjs'
+import { parseAgentWorkRequest } from './work-request.mjs'
+import { parseWorkerRouteDecision } from './worker-routing.mjs'
+import { parseWorkflowDefinition, workflowDefinitionHash } from './workflow-definition.mjs'
+import { resolveWorkflowStage } from './workflow-profile.mjs'
+
+const SHA256 = /^[a-f0-9]{64}$/
+const SHA1 = /^[a-f0-9]{40}$/
+const DECISIONS = new Set(['stale', 'deferred', 'resume'])
+
+/** @typedef {Record<string, any>} AnyObject */
+
+/** @param {unknown} value @returns {string} */
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    const object = /** @type {Record<string, unknown>} */ (value)
+    return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+/** @param {string} identity @param {string} reason @param {string[]} currentCandidates @param {string[]} availableCandidates @param {string|null} generationHash @returns {AnyObject} */
+function decision(identity, reason, currentCandidates = [], availableCandidates = [], generationHash = null) {
+  const selected = availableCandidates.length > 0 ? 'resume' : 'deferred'
+  const result = {
+    version: 1,
+    decision: reason === 'capacity-available' || reason === 'capacity-unavailable' ? selected : 'stale',
+    reason,
+    capacityResumeRequestId: identity,
+    currentCandidates: [...currentCandidates],
+    availableCandidates: [...availableCandidates],
+    capacityGenerationHash: generationHash,
+  }
+  if (!DECISIONS.has(result.decision)) throw new Error('capacity resume decision is invalid')
+  return result
+}
+
+/** @param {unknown} value @returns {AnyObject|null} */
+function objectOrNull(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? /** @type {AnyObject} */ (value)
+    : null
+}
+
+/** @param {AnyObject|null} value @returns {boolean} */
+function validSubject(value) {
+  return Boolean(value
+    && value.type === 'issue'
+    && Number.isSafeInteger(value.number) && value.number > 0
+    && SHA256.test(value.stateVersion || '')
+    && objectOrNull(value.revision)
+    && SHA1.test(value.revision.base || '')
+    && SHA1.test(value.revision.head || ''))
+}
+
+/** @param {unknown} value @returns {boolean} */
+function validNow(value) {
+  return Number.isSafeInteger(value) && /** @type {number} */ (value) >= 0
+}
+
+/**
+ * Evaluate whether a persisted Issue capacity wait is still bound to current trusted state.
+ * The evaluator is pure: callers provide the current WorkRequest, Profile, Issue state,
+ * route decision, machine configuration, capacity records, and observation time.
+ * @param {{projection?: unknown, workRequest?: unknown, profile?: unknown, currentSubject?: unknown, currentRouteDecision?: unknown, machineConfig?: unknown, capacitySnapshot?: unknown, now?: unknown}} input
+ * @returns {AnyObject}
+ */
+export function evaluateCapacityWaitResume({
+  projection, workRequest, profile, currentSubject, currentRouteDecision, machineConfig, capacitySnapshot, now,
+} = {}) {
+  const parsedProjection = parseCapacityWaitProjection(projection)
+  const identity = capacityResumeRequestId(parsedProjection)
+  const stale = (reason, candidates = [], available = [], hash = null) => decision(identity, reason, candidates, available, hash)
+
+  let request
+  try {
+    request = parseAgentWorkRequest(workRequest)
+  } catch {
+    return stale('work-request-invalid')
+  }
+  if (request.role !== 'change' || request.subject.type !== 'issue'
+    || request.requestId !== parsedProjection.workRequestId
+    || request.repository !== parsedProjection.repository
+    || request.profileId !== parsedProjection.profileId
+    || request.workflowId !== parsedProjection.workflowId
+    || request.stageId !== parsedProjection.stageId
+    || request.definitionHash !== parsedProjection.definitionHash
+    || request.role !== parsedProjection.role
+    || canonicalJson(request.revision) !== canonicalJson(parsedProjection.revision)
+    || canonicalJson(request.subject) !== canonicalJson({ type: parsedProjection.subject.type, number: parsedProjection.subject.number })
+    || request.coordinationKey !== parsedProjection.coordinationKey) {
+    return stale('work-request-mismatch')
+  }
+
+  const subject = objectOrNull(currentSubject)
+  if (!validSubject(subject)) return stale('subject-state-invalid')
+  if (subject.type !== parsedProjection.subject.type || subject.number !== parsedProjection.subject.number
+    || subject.stateVersion !== parsedProjection.subject.stateVersion
+    || canonicalJson(subject.revision) !== canonicalJson(parsedProjection.revision)) {
+    return stale('subject-or-revision-stale')
+  }
+
+  const suppliedProfile = objectOrNull(profile)
+  let definition
+  try {
+    definition = parseWorkflowDefinition(suppliedProfile?.definition)
+  } catch {
+    return stale('profile-invalid')
+  }
+  const definitionHash = workflowDefinitionHash(definition)
+  if (definition.profileId !== request.profileId
+    || suppliedProfile?.definitionHash !== definitionHash
+    || definitionHash !== request.definitionHash) {
+    return stale('profile-mismatch')
+  }
+  try {
+    const stage = resolveWorkflowStage(definition, request.workflowId, request.stageId, 'worker')
+    if (stage.role !== request.role) return stale('workflow-stage-mismatch')
+  } catch {
+    return stale('workflow-stage-mismatch')
+  }
+
+  let routeDecision
+  try {
+    routeDecision = parseWorkerRouteDecision(currentRouteDecision, {
+      workRequest: request,
+      stateVersion: subject.stateVersion,
+    })
+  } catch {
+    return stale('route-decision-invalid')
+  }
+  if (canonicalJson(routeDecision) !== canonicalJson(parsedProjection.routeDecision)
+    || routeDecision.taskClass !== parsedProjection.routeDecision.taskClass) {
+    return stale('route-decision-changed')
+  }
+  if (!validNow(now)) return stale('observation-time-invalid')
+
+  let currentCandidates
+  try {
+    currentCandidates = resolveWorkerCandidates({
+      config: structuredClone(machineConfig),
+      role: request.role,
+      routeDecision,
+    })
+  } catch {
+    return stale('candidate-resolution-failed')
+  }
+  if (!currentCandidates.length) return stale('no-matching-candidates')
+
+  const snapshot = objectOrNull(capacitySnapshot)
+  const records = objectOrNull(snapshot?.records)
+  if (!snapshot || !records || !SHA256.test(snapshot.generationHash || '')) {
+    return stale('capacity-snapshot-invalid', currentCandidates)
+  }
+  const availableCandidates = []
+  try {
+    for (const workerId of currentCandidates) {
+      const record = parseCapacityRecord(records[workerId])
+      if (record.sourceWorker !== workerId) return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
+      if (capacityEligibility(record, { now }).eligible) availableCandidates.push(workerId)
+    }
+  } catch {
+    return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
+  }
+  return decision(
+    identity,
+    availableCandidates.length ? 'capacity-available' : 'capacity-unavailable',
+    currentCandidates,
+    availableCandidates,
+    snapshot.generationHash,
+  )
+}
