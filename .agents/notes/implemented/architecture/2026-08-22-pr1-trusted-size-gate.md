@@ -1,6 +1,6 @@
 # Trusted pull request size policy execution
 
-- Decision: move the pull request size decision to a dedicated `pull_request_target` workflow with `contents: read` and `statuses: write`, and execute the locked policy from the exact pull request base commit.
+- Decision: move the pull request size decision to a dedicated `pull_request_target` workflow with `contents: read` and `statuses: write`, and execute the locked policy from the exact pull request base commit. The workflow uses a per-pull-request concurrency group and cancels superseded runs before status publication.
 - Trust model: the base checkout is the only source of Node policy, package metadata, and the guardrail script. The head checkout is isolated in a second directory and is used only as a Git object repository for the measured base/head diff; no head file, action, package, or configuration is executed.
 - The workflow passes the event body only as data and passes the event base/head SHAs to the trusted script. The script continues to validate lowercase full SHAs before measuring the diff. The existing GFM parser, 10/500 target, 40/2,000 caps, and edited-body behavior remain unchanged.
 - The former `controller-ci` pull request scope job is removed so its candidate-owned check cannot collide with the stable `policy/pull-request-size` commit status. After the first merge, repository administrators must require context `policy/pull-request-size` from the GitHub Actions app, not the `pull_request_target` job name; that settings rollout is intentionally outside this PR.

@@ -63,6 +63,7 @@ test('trusted pull request size gate measures the event pair without executing c
   const controllerCi = await readFile(new URL('controller-ci.yml', workflowDirectory), 'utf8')
   const gate = await readFile(new URL('../scripts/check-pr-size.mjs', import.meta.url), 'utf8')
   assert.match(workflow, /pull_request_target:\s*\r?\n\s+types: \[opened, synchronize, reopened, edited\]/)
+  assert.match(workflow, /concurrency:\s*\r?\n\s+group: trusted-pull-request-size-pr-\$\{\{ github\.event\.pull_request\.number \}\}\s*\r?\n\s+cancel-in-progress: true/)
   assert.match(workflow, /permissions:\s*\r?\n\s+contents: read\s*\r?\n\s+statuses: write/)
   assert.doesNotMatch(workflow, /(?:checks|pull-requests|secrets):/)
   assert.match(workflow, /name: trusted pull request size/)
