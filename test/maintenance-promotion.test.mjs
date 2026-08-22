@@ -10,7 +10,6 @@ import { createFaultRecord, parseFaultRecord, recordFaultAttempt } from '../src/
 
 const head = 'a'.repeat(40)
 const otherHead = 'b'.repeat(40)
-const thirdHead = 'c'.repeat(40)
 
 function fault() {
   return createFaultRecord({
@@ -86,7 +85,7 @@ test('maintenance CI rejects a persisted review head drift before trusting the c
 
 test('maintenance promotion rejects CI head drift and unbound old state', () => {
   const drifted = reviewedAndCiRecord(head, otherHead)
-  assert.throws(() => assertMaintenanceHeadContinuity(drifted, thirdHead, ['review', 'ci']), /ci.*head/i)
+  assert.throws(() => assertMaintenanceHeadContinuity(drifted, head, ['review', 'ci']), /ci.*head/i)
 
   const old = parseFaultRecord({
     ...reviewedAndCiRecord(head, head),
@@ -108,6 +107,38 @@ test('successful maintenance promotion proves one exact head across every persis
     record.attempts.filter(attempt => ['review', 'ci', 'promotion'].includes(attempt.kind)).map(attempt => attempt.head),
     [head, head, head],
   )
+})
+
+test('maintenance continuity rejects any earlier succeeded stage head hidden by a later attempt', () => {
+  let record = recordFaultAttempt(fault(), {
+    kind: 'maintenance-worker', target: 'maintenance-worker', sequence: 1,
+    outcome: 'succeeded', repairPullRequest: 1, at: '2026-08-16T00:01:00Z',
+  })
+  record = recordFaultAttempt(record, {
+    kind: 'review', target: 'reviewer-a', sequence: 1, outcome: 'succeeded',
+    head, at: '2026-08-16T00:02:00Z',
+  })
+  record = recordFaultAttempt(record, {
+    kind: 'review', target: 'reviewer-b', sequence: 2, outcome: 'succeeded',
+    head: otherHead, at: '2026-08-16T00:03:00Z',
+  })
+  assert.throws(() => assertMaintenanceHeadContinuity(record, otherHead, ['review']), /review.*head/i)
+})
+
+test('maintenance continuity permits repeated succeeded stage attempts at one exact head', () => {
+  let record = recordFaultAttempt(fault(), {
+    kind: 'maintenance-worker', target: 'maintenance-worker', sequence: 1,
+    outcome: 'succeeded', repairPullRequest: 1, at: '2026-08-16T00:01:00Z',
+  })
+  record = recordFaultAttempt(record, {
+    kind: 'review', target: 'reviewer-a', sequence: 1, outcome: 'succeeded',
+    head, at: '2026-08-16T00:02:00Z',
+  })
+  record = recordFaultAttempt(record, {
+    kind: 'review', target: 'reviewer-b', sequence: 2, outcome: 'succeeded',
+    head, at: '2026-08-16T00:03:00Z',
+  })
+  assert.equal(assertMaintenanceHeadContinuity(record, head, ['review']), head)
 })
 
 test('maintenance runtime confirms the decision before invoking gh pr merge', async () => {

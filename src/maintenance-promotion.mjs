@@ -14,18 +14,18 @@ export function assertMaintenanceHeadContinuity(record, currentHead, stages) {
     throw new Error('Maintenance head continuity stages are invalid')
   }
   if (!FULL_SHA.test(currentHead || '')) throw new Error('Maintenance pull request head is not a full commit SHA')
-  let expectedHead
   for (const stage of stages) {
-    const attempt = normalized.attempts.filter(candidate => candidate.epoch === normalized.epochs.at(-1).number
-      && candidate.kind === stage && candidate.outcome === 'succeeded').at(-1)
-    if (!FULL_SHA.test(attempt?.head || '')) throw new Error(`Maintenance ${stage} attempt has no exact PR head`)
-    if (expectedHead !== undefined && attempt.head !== expectedHead) {
-      throw new Error(`Maintenance ${stage} head drifted from the prior stage`)
+    const attempts = normalized.attempts.filter(candidate => candidate.epoch === normalized.epochs.at(-1).number
+      && candidate.kind === stage && candidate.outcome === 'succeeded')
+    if (attempts.length < 1) throw new Error(`Maintenance ${stage} has no succeeded attempt bound to an exact PR head`)
+    for (const attempt of attempts) {
+      if (!FULL_SHA.test(attempt.head || '')) throw new Error(`Maintenance ${stage} attempt has no exact PR head`)
+      if (attempt.head !== currentHead) {
+        throw new Error(`Maintenance ${stage} head drifted from the current PR head`)
+      }
     }
-    expectedHead = attempt.head
   }
-  if (expectedHead !== currentHead) throw new Error(`Maintenance pull request head drifted from ${stages.at(-1)} head`)
-  return expectedHead
+  return currentHead
 }
 
 /** Decide whether one freshly read maintenance pull request may be promoted. */
