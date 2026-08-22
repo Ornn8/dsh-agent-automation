@@ -13,11 +13,25 @@ import {
 } from '../src/work-request.mjs'
 import { loadWorkflowProfile } from '../src/workflow-profile.mjs'
 import { workflowDefinitionHash } from '../src/workflow-definition.mjs'
+import { verificationContractHash } from '../src/verification-contract.mjs'
 
 const base = 'a'.repeat(40)
 const head = 'b'.repeat(40)
 const reviewObservationId = 'run-31944175917'
 const profile = await loadWorkflowProfile()
+const contract = {
+  version: 1,
+  contractId: 'delivery-v1',
+  entrypoint: 'verify/delivery',
+  requiredChecks: ['build'],
+  requiredEvidence: ['test-report'],
+}
+const configuredDefinition = { ...profile.definition, verificationContract: { path: 'verification.json' } }
+const configuredProfile = {
+  definition: configuredDefinition,
+  definitionHash: workflowDefinitionHash(configuredDefinition),
+  verificationContract: { contract, hash: verificationContractHash(contract) },
+}
 
 test('review repair is an immutable Stage request rather than an agent command', () => {
   const request = createReviewRepairRequest({
@@ -111,6 +125,76 @@ test('Issue requests resolve their root Stage and bind the Profile hash', () => 
   assert.deepEqual(request.subject, { type: 'issue', number: 7 })
 })
 
+test('configured Profiles bind one immutable contract identity to WorkRequests and their generated id', () => {
+  const request = createIssueImplementationRequest({
+    ...configuredProfile,
+    workflowId: 'default',
+    repository: 'owner/repository',
+    issueNumber: 7,
+    base,
+  })
+  assert.deepEqual(request.verificationContract, {
+    contractId: 'delivery-v1',
+    hash: verificationContractHash(contract),
+  })
+  assert.ok(Object.isFrozen(request.verificationContract))
+  assert.notEqual(
+    request.requestId,
+    createIssueImplementationRequest({
+      ...profile,
+      workflowId: 'default',
+      repository: 'owner/repository',
+      issueNumber: 7,
+      base,
+    }).requestId,
+  )
+  assert.deepEqual(parseAgentWorkRequest(request, { trustedVerificationContract: configuredProfile.verificationContract }), request)
+  const withoutIdentity = { ...request }
+  delete withoutIdentity.verificationContract
+  assert.throws(() => parseAgentWorkRequest(withoutIdentity, {
+    trustedVerificationContract: configuredProfile.verificationContract,
+  }), /is missing for the trusted Profile/)
+  assert.throws(() => parseAgentWorkRequest({
+    ...request,
+    verificationContract: { contractId: 'delivery-v1', hash: '0'.repeat(64) },
+  }, { trustedVerificationContract: configuredProfile.verificationContract }), /does not match the trusted Profile/)
+  assert.throws(() => parseAgentWorkRequest({
+    ...createIssueImplementationRequest({
+      ...profile,
+      workflowId: 'default',
+      repository: 'owner/repository',
+      issueNumber: 7,
+      base,
+    }),
+    verificationContract: request.verificationContract,
+  }, { trustedVerificationContract: undefined }), /unexpected for the unconfigured trusted Profile/)
+  assert.throws(() => createIssueImplementationRequest({
+    ...configuredProfile,
+    verificationContract: { contract, hash: '0'.repeat(64) },
+    workflowId: 'default',
+    repository: 'owner/repository',
+    issueNumber: 7,
+    base,
+  }), /does not match the contract contents/)
+  const { verificationContract: omittedContract, ...withoutContract } = configuredProfile
+  assert.equal(omittedContract.hash, verificationContractHash(contract))
+  assert.throws(() => createIssueImplementationRequest({
+    ...withoutContract,
+    workflowId: 'default',
+    repository: 'owner/repository',
+    issueNumber: 7,
+    base,
+  }), /does not match the Profile configuration/)
+  assert.throws(() => createIssueImplementationRequest({
+    ...profile,
+    verificationContract: configuredProfile.verificationContract,
+    workflowId: 'default',
+    repository: 'owner/repository',
+    issueNumber: 7,
+    base,
+  }), /does not match the Profile configuration/)
+})
+
 test('repository dispatch transports the complete WorkRequest', () => {
   const request = createReviewRepairRequest({
     ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head, reviewObservationId,
@@ -129,6 +213,14 @@ test('WorkRequest parsing fails closed on unknown fields and mutable identities'
   assert.throws(() => parseAgentWorkRequest({ ...request, command: 'npm test' }), /unknown field command/)
   assert.throws(() => parseAgentWorkRequest({ ...request, revision: { base, head: 'main' } }), /revision/)
   assert.throws(() => parseAgentWorkRequest({ ...request, definitionHash: '0'.repeat(63) }), /definitionHash/)
+  assert.throws(() => parseAgentWorkRequest({
+    ...request,
+    verificationContract: { contractId: 'delivery-v1', hash: '0'.repeat(64), extra: true },
+  }), /unknown field extra/)
+  assert.throws(() => parseAgentWorkRequest({
+    ...request,
+    verificationContract: { contractId: 'delivery-v1', hash: 'bad' },
+  }), /SHA-256 digest/)
 })
 
 test('Stage requests reject Profile hashes or Adapter kinds that do not match trusted data', () => {

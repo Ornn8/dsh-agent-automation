@@ -8,6 +8,7 @@ const MAX_IDENTIFIER_LENGTH = 128
 const MAX_SOURCE_BYTES = 16 * 1024
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const FULL_SHA = /^[0-9a-f]{40}$/
+const SHA256 = /^[0-9a-f]{64}$/
 
 function requireObject(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -92,6 +93,29 @@ export function parseVerificationContract(value) {
 /** Return the stable SHA-256 identity of one normalized verification contract. */
 export function verificationContractHash(value) {
   return createHash('sha256').update(canonicalJson(parseVerificationContract(value))).digest('hex')
+}
+
+/** Parse one bounded immutable identity that names a verification contract. */
+export function parseVerificationContractIdentity(value) {
+  const object = requireFields(
+    value,
+    ['contractId', 'hash'],
+    new Set(['contractId', 'hash']),
+    'WorkRequest verificationContract',
+  )
+  const contractId = identifier(object.contractId, 'WorkRequest verificationContract contractId')
+  if (!SHA256.test(object.hash || '')) {
+    throw new Error('WorkRequest verificationContract hash must be a SHA-256 digest')
+  }
+  return deepFreeze({ contractId, hash: object.hash })
+}
+
+/** Derive the immutable WorkRequest identity from one trusted loaded contract. */
+export function verificationContractIdentity(value) {
+  const contract = parseVerificationContract(value?.contract)
+  const hash = verificationContractHash(contract)
+  if (value?.hash !== hash) throw new Error('Trusted Verification Contract hash does not match the contract contents')
+  return parseVerificationContractIdentity({ contractId: contract.contractId, hash })
 }
 
 /** Parse one bounded verification-contract JSON source. */
