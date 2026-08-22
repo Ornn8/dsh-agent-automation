@@ -885,6 +885,29 @@ test('completed replay for a non-receipt skill preserves durable output', async 
   assert.equal(replay.automationResult, undefined)
 })
 
+test('distinct trusted review request ids cannot replay one completed review', async () => {
+  const provider = attemptProvider()
+  let calls = 0
+  const runReview = requestId => runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'review', workRequest: { requestId, role: 'review' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => {
+      calls += 1
+      return { sessionId: `review-${calls}`, outcome: 'completed', output: `review-${calls}` }
+    } },
+  })
+
+  const first = await runReview('review-contract-v1')
+  const rotated = await runReview('review-contract-v2')
+
+  assert.equal(first.outcome, 'completed')
+  assert.equal(rotated.outcome, 'completed')
+  assert.equal(calls, 2)
+})
+
 test('completed replay rehydrates its parsed automation result without starting a Worker', async () => {
   const localConfig = config()
   localConfig.workers.first.capabilities.skills = [AGENT_ISSUE_SKILL]

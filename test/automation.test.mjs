@@ -1416,6 +1416,10 @@ test('review uses one controller-owned slot and verifies the exact pair before t
 test('review production path routes through the controller-owned capacity claim', async () => {
   const source = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
   const checkSource = await readFile(new URL('../src/review-check.mjs', import.meta.url), 'utf8')
+  assert.match(source, /createStageWorkRequest/)
+  assert.match(source, /verificationContract: profile\.verificationContract/)
+  assert.match(source, /workRequest\.requestId/)
+  assert.match(source, /Trusted Verification Contract/)
   assert.match(source, /createWorkerExecutionClaim/)
   assert.match(source, /runRoleWorker/)
   assert.match(source, /trustedTaskSnapshot: \{ workflowStage: stageId \}/)
