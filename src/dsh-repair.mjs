@@ -56,6 +56,7 @@ import {
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { githubPages } from './supervision-github.mjs'
+import { renderWorkerVerificationObservation } from './workflow-identity.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -208,7 +209,7 @@ if (pullRequestNumber === 0) {
   pullRequestNumber = matches[0].number
 }
 
-async function upsertStatus(status, branch, detail, failureClass) {
+async function upsertStatus(status, branch, detail, failureClass, verification) {
   const runUrl = requiredEnv('RUN_URL')
   const body = [
     marker,
@@ -230,6 +231,7 @@ async function upsertStatus(status, branch, detail, failureClass) {
     `- Run: ${runUrl}`,
     ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
     `- Detail: ${detail}`,
+    ...(verification ? ['', renderWorkerVerificationObservation(verification)] : []),
     '',
     '_DSH owns the technical response and any implementation changes._',
     '',
@@ -744,7 +746,7 @@ try {
         const acceptedReceipt = bindConfiguredReceipt(effectiveReceipt, current.head.sha)
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
+        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`, undefined, acceptedReceipt.automationResult?.verification)
         process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
       } else if (ciRequest && trustedCiRerunSuccess({
         priorRun: ciRun,
@@ -755,13 +757,13 @@ try {
       })) {
         const acceptedReceipt = bindConfiguredReceipt(effectiveReceipt, current.head.sha)
         await setRepairLabels({ remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
+        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`, undefined, acceptedReceipt.automationResult?.verification)
         process.stdout.write(`The change Worker repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
       } else if (!ciRequest && !mergeRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
         const acceptedReceipt = bindConfiguredReceipt(effectiveReceipt, current.head.sha)
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} posted a technical rebuttal and requested one same-head review.`)
+        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} posted a technical rebuttal and requested one same-head review.`, undefined, acceptedReceipt.automationResult?.verification)
         process.stdout.write(`The change Worker requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
       } else {
         throw new Error('DSH exited successfully without advancing the head or proving the documented same-head completion')

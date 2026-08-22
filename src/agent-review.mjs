@@ -3,13 +3,14 @@ import { createHash } from 'node:crypto'
 import {
   authenticatedMarker,
   actionsCredentialEnvironment,
+  githubLogin,
   loadConfig,
   parseJson,
   requiredEnv,
   run,
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
-import { AGENT_REVIEW_SKILL } from './agent-work-result.mjs'
+import { AGENT_REVIEW_SKILL, bindAgentAutomationVerification } from './agent-work-result.mjs'
 import {
   githubReviewBody,
   parseReviewMessage,
@@ -29,6 +30,7 @@ import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { resolveGithubPrCycle } from './github-pr-cycle.mjs'
 import { reviewMarker } from './review-authority.mjs'
 import { reviewObservations } from './review-observations.mjs'
+import { trustedWorkerIdentity } from './workflow-identity.mjs'
 import { agentFailureCode, classifyAgentFailure } from './failure-classification.mjs'
 import {
   acquireReviewWorkspace,
@@ -49,6 +51,7 @@ const runId = Number.parseInt(requiredEnv('GITHUB_RUN_ID'), 10)
 const runAttempt = Number.parseInt(requiredEnv('GITHUB_RUN_ATTEMPT'), 10)
 const marker = reviewMarker(expectedHead)
 const githubEnvironment = actionsCredentialEnvironment()
+const trustedControllerLogin = githubLogin(config)
 const reviewTimeoutMs = 60 * 60 * 1000
 
 if (!config.repositories.includes(repository)) throw new Error(`${repository} is not in the runner allowlist`)
@@ -65,6 +68,64 @@ if (!Number.isSafeInteger(runId) || runId < 1 || String(runId) !== process.env.G
 async function ghJson(args, description) {
   const result = await run(config.ghExecutable, args, { env: githubEnvironment })
   return parseJson(result.stdout, description)
+}
+
+async function trustedWorkerVerificationFromComments(comments, subject, operation, branch, profile) {
+  const ordered = [...comments].sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)))
+  for (const comment of ordered) {
+    const identity = await trustedWorkerIdentity(
+      comment,
+      subject,
+      operation,
+      repository,
+      workerRunId => ghJson([
+        'api', `repos/${repository}/actions/runs/${workerRunId}`,
+      ], `Worker run ${workerRunId}`),
+      trustedControllerLogin,
+    )
+    if (!identity || identity.branch !== branch || !identity.verification) continue
+    const bound = await Promise.resolve().then(() => bindAgentAutomationVerification({
+        version: 2,
+        outcome: 'completed',
+        summary: 'Persisted Worker verification receipt',
+        verification: identity.verification,
+      }, {
+        expectedRevision: expectedHead,
+        trustedVerificationContract: profile.verificationContract,
+      })).catch(() => null)
+    if (bound) return bound.verification
+  }
+  return null
+}
+
+async function trustedWorkerVerification(profile, pullRequest, pullRequestComments) {
+  if (!profile.verificationContract) return undefined
+  const repairObservation = await trustedWorkerVerificationFromComments(
+    pullRequestComments,
+    { type: 'pull-request', number: pullRequest.number },
+    'repair-worker',
+    pullRequest.headRefName,
+    profile,
+  )
+  if (repairObservation) return repairObservation
+  const references = await ghJson([
+    'pr', 'view', String(pullRequest.number), '--repo', repository,
+    '--json', 'closingIssuesReferences',
+  ], 'closing Issue references')
+  for (const reference of references.closingIssuesReferences || []) {
+    const issueComments = (await ghJson([
+      'api', `repos/${repository}/issues/${reference.number}/comments?per_page=100`, '--paginate', '--slurp',
+    ], `Issue #${reference.number} comments`)).flat()
+    const changeObservation = await trustedWorkerVerificationFromComments(
+      issueComments,
+      { type: 'issue', number: reference.number },
+      'change-worker',
+      pullRequest.headRefName,
+      profile,
+    )
+    if (changeObservation) return changeObservation
+  }
+  return null
 }
 
 async function targetProfile() {
@@ -188,6 +249,7 @@ const observations = reviewObservations({
   head: expectedHead,
   checkRuns: observationChecks,
   comments: observationComments.flat(),
+  workerVerification: await trustedWorkerVerification(profile, pullRequest, observationComments.flat()),
 })
 
 const deferredReviewCheckId = trustedDeferredReviewCheckId(observationChecks, {

@@ -1236,6 +1236,10 @@ test('contracted Issue and repair completions bind v2 receipts to accepted exact
   assert.match(repairSource, /bindConfiguredReceipt\(effectiveReceipt, current\.head\.sha\)/)
   assert.match(repairSource, /expectedRevision,/)
   assert.match(repairSource, /trustedVerificationContract: transportedProfile\.verificationContract/)
+  assert.match(issueSource, /renderWorkerVerificationObservation/)
+  assert.match(issueSource, /acceptedReceipt\.automationResult\?\.verification/)
+  assert.match(repairSource, /renderWorkerVerificationObservation/)
+  assert.match(repairSource, /acceptedReceipt\.automationResult\?\.verification/)
   for (const skill of [issueSkill, repairSkill]) {
     assert.match(skill, /verificationContract/)
     assert.match(skill, /contract\.requiredEvidence/)
@@ -1245,6 +1249,25 @@ test('contracted Issue and repair completions bind v2 receipts to accepted exact
     assert.match(skill, /completed run without `verificationContract` uses the v1 completed form/)
     assert.doesNotMatch(skill, /Use exactly one of these forms/)
   }
+})
+
+test('configured review consumes only trusted exact-head Worker receipt observations', async () => {
+  const reviewSource = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
+  const observationsSource = await readFile(new URL('../src/review-observations.mjs', import.meta.url), 'utf8')
+  assert.match(reviewSource, /trustedWorkerIdentity/)
+  assert.match(reviewSource, /repair-worker/)
+  assert.match(reviewSource, /change-worker/)
+  assert.match(reviewSource, /expectedRevision: expectedHead/)
+  assert.match(reviewSource, /trustedVerificationContract: profile\.verificationContract/)
+  assert.match(reviewSource, /workerVerification: await trustedWorkerVerification/)
+  assert.match(observationsSource, /observations\.workerVerification = workerVerification/)
+})
+
+test('duplicate Issue wake preserves the existing authenticated Worker status comment', async () => {
+  const issueSource = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
+  assert.match(issueSource, /async function upsertStatus\(body, \{ preserveExisting = false \} = \{\}\)/)
+  assert.match(issueSource, /if \(preserveExisting\) return/)
+  assert.match(issueSource, /preserveExisting: true/)
 })
 
 test('scheduled reconciliation recovers a custom repair workflow after a new head', async () => {

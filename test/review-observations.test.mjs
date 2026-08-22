@@ -122,3 +122,22 @@ test('a renamed legacy review marker remains non-authoritative rereview context'
   assert.equal(observations.priorReview, '## Previous review: BLOCK')
   assert.equal(observations.reviewResponses.length, 1)
 })
+
+test('review observations carry a supplied Worker receipt as evidence only', () => {
+  const workerVerification = {
+    revision: head,
+    contract: { contractId: 'delivery-v1', hash: 'b'.repeat(64) },
+    procedure: 'verify/delivery',
+    result: 'passed',
+    evidence: ['test-report'],
+  }
+  const observations = reviewObservations({
+    repository,
+    head,
+    checkRuns: { total_count: 0, check_runs: [] },
+    comments: [],
+    workerVerification,
+  })
+  assert.deepEqual(observations.workerVerification, workerVerification)
+  assert.equal(observations.version, 1)
+})

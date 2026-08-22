@@ -26,6 +26,7 @@ import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseAgentWorkRequest } from './work-request.mjs'
 import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
 import { capacityWaitStatusLine, createIssueCapacityWaitProjection } from './capacity-wait-projection.mjs'
+import { renderWorkerVerificationObservation } from './workflow-identity.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
@@ -75,12 +76,13 @@ async function targetProfile() {
 
 await verifyGithubIdentity({ config })
 
-async function upsertStatus(body) {
+async function upsertStatus(body, { preserveExisting = false } = {}) {
   const comments = (await ghJson([
     'api', `repos/${repository}/issues/${issueNumber}/comments?per_page=100`, '--paginate', '--slurp',
   ], 'Issue comments')).flat()
   const prior = comments.find(comment => authenticatedMarker(comment, marker, markerAuthor))
   if (prior) {
+    if (preserveExisting) return
     await run(config.ghExecutable, [
       'api', '--method', 'PATCH', `repos/${repository}/issues/comments/${prior.id}`, '-f', `body=${body}`,
     ], { env: hostCredentialEnvironment() })
@@ -91,7 +93,7 @@ async function upsertStatus(body) {
   }
 }
 
-function statusBody(status, branch, detail, failureClass) {
+function statusBody(status, branch, detail, failureClass, verification) {
   const runUrl = requiredEnv('RUN_URL')
   return [
     marker,
@@ -105,6 +107,7 @@ function statusBody(status, branch, detail, failureClass) {
     `- Run: ${runUrl}`,
     ...(failureClass ? [`- Failure class: \`${failureClass}\``] : []),
     `- Detail: ${detail}`,
+    ...(verification ? ['', renderWorkerVerificationObservation(verification)] : []),
     '',
     '_The selected change Worker owns implementation, validation, commits, pushes, and the pull request._',
     '',
@@ -216,7 +219,7 @@ const validExisting = existing.find(pr => pr.headRefName === branch
   && pr.baseRefName === defaultBranch
   && closesIssue(pr))
 if (validExisting) {
-  await upsertStatus(statusBody('complete', branch, `Existing pull request: ${validExisting.url}`))
+  await upsertStatus(statusBody('complete', branch, `Existing pull request: ${validExisting.url}`), { preserveExisting: true })
   process.stdout.write(`Issue #${issueNumber} already has ${validExisting.url}\n`)
   process.exit(0)
 }
@@ -362,7 +365,7 @@ try {
           }),
         }
       : effectiveReceipt
-    await upsertStatus(statusBody('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} produced a pull request for independent review: ${pullRequest.url}`))
+    await upsertStatus(statusBody('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} produced a pull request for independent review: ${pullRequest.url}`, undefined, acceptedReceipt.automationResult?.verification))
     process.stdout.write(`The change Worker produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
   }
 } catch (error) {
