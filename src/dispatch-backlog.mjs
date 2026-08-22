@@ -3,10 +3,12 @@ import {
   parseJson,
   requiredEnv,
   run,
+  trustedAssociation,
 } from './common.mjs'
 import {
   activeWorkflowIssueNumbers,
   independentIssueObservationNumber,
+  selectBacklogBatch,
   selectBacklogWork,
   trustedBlockedReviewProof,
 } from './dispatch-policy.mjs'
@@ -24,7 +26,12 @@ import {
   pullRequestGovernorSubject,
   trustedGovernorRecords,
 } from './governor-state.mjs'
-import { agentWorkRequestId } from './agent-work.mjs'
+import { agentWorkRequestId, parseAgentWork } from './agent-work.mjs'
+import {
+  parseMaximumBatchSize,
+  runBacklogBatch,
+  selectBacklogDispatches,
+} from './dispatch-backlog-helper.mjs'
 import { loadTrustedWorkflowProfile, resolveWorkflow } from './workflow-profile.mjs'
 import { createIssueImplementationRequest, repositoryDispatchBody } from './work-request.mjs'
 
@@ -57,6 +64,7 @@ const requestedIssueNumber = (() => {
   }
   return number === 0 ? null : number
 })()
+const maximumBatchSize = parseMaximumBatchSize(process.env.MAXIMUM_BATCH_SIZE)
 
 if (!/^[0-9a-f]{40}$/i.test(trustedReview.controllerSha)) {
   throw new Error('TRUSTED_CONTROLLER_SHA must be a full commit SHA')
@@ -125,6 +133,39 @@ async function targetProfile(profileId, revision) {
       return Buffer.from(content.content.replace(/\s/g, ''), 'base64').toString('utf8')
     },
   })
+}
+
+async function batchWorkflowLimits({ issues, revision, profileCache }) {
+  const limits = {}
+  for (const issue of issues) {
+    if (issue.state !== 'open' || !trustedAssociation(issue.author_association)) continue
+    let work
+    try { work = parseAgentWork(issue.body) } catch { continue }
+    if (!work || work.dispatch !== 'ready') continue
+    if (!profileCache.has(work.profile)) {
+      try { profileCache.set(work.profile, await targetProfile(work.profile, revision)) } catch { profileCache.set(work.profile, null) }
+    }
+    const profile = profileCache.get(work.profile)
+    if (!profile) continue
+    try {
+      const workflow = resolveWorkflow(profile.definition, work.workflow)
+      limits[`${work.profile}/${work.workflow}`] = workflow.coordination.limit
+    } catch {
+      // The batch policy excludes declarations whose trusted Workflow is unavailable.
+    }
+  }
+  return limits
+}
+
+async function defaultBranchCommit() {
+  const repositoryState = await ghJson(['api', `repos/${repository}`], 'repository state')
+  const defaultBranch = repositoryState.default_branch
+  if (typeof defaultBranch !== 'string' || !defaultBranch) throw new Error('Repository default branch is missing')
+  const baseCommit = await ghJson([
+    'api', `repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`,
+  ], `default branch ${defaultBranch}`)
+  if (!/^[0-9a-f]{40}$/.test(baseCommit?.sha || '')) throw new Error('Default branch head is not a full SHA')
+  return baseCommit
 }
 
 async function governorComments(number) {
@@ -233,44 +274,7 @@ async function recordApplied(work, admission) {
   })
 }
 
-const pullRequests = await ghPages(`repos/${repository}/pulls?state=open&per_page=100`, 'open pull requests')
-const issues = (await ghPages(`repos/${repository}/issues?state=all&per_page=100`, 'Issues'))
-  .filter(issue => !issue.pull_request)
-const work = selectBacklogWork({
-  repository,
-  pullRequests,
-  issues,
-  trustedBlockedRepairNumbers: await trustedBlockedRepairNumbers(pullRequests),
-  includeRepairs: false,
-  requestedIssueNumber,
-})
-
-if (!work) {
-  process.stdout.write('No eligible DSH backlog work is ready.\n')
-  process.exit(0)
-}
-
-if (work.type === 'issue') {
-  const repositoryState = await ghJson(['api', `repos/${repository}`], 'repository state')
-  const defaultBranch = repositoryState.default_branch
-  if (typeof defaultBranch !== 'string' || !defaultBranch) throw new Error('Repository default branch is missing')
-  const baseCommit = await ghJson([
-    'api', `repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`,
-  ], `default branch ${defaultBranch}`)
-  if (!/^[0-9a-f]{40}$/.test(baseCommit?.sha || '')) throw new Error('Default branch head is not a full SHA')
-  const profile = await targetProfile(work.work.profile, baseCommit.sha)
-  const workflow = resolveWorkflow(profile.definition, work.work.workflow)
-  const active = activeWorkflowIssueNumbers({
-    issues,
-    pullRequests,
-    profileId: profile.definition.profileId,
-    workflowId: work.work.workflow,
-    excludeIssueNumber: requestedIssueNumber === work.number ? work.number : null,
-  })
-  if (active.size >= workflow.coordination.limit) {
-    process.stdout.write(`Workflow ${profile.definition.profileId}/${work.work.workflow} is at its coordination limit ${workflow.coordination.limit}.\n`)
-    process.exit(0)
-  }
+async function dispatchIssueSelection(work, profile, baseCommit, pullRequests, issues) {
   const requestId = agentWorkRequestId(work.work, profile.definitionHash)
   work.request = createIssueImplementationRequest({
     ...profile,
@@ -280,22 +284,9 @@ if (work.type === 'issue') {
     base: baseCommit.sha,
     requestId,
   })
-}
+  const admission = await admittedWork(work, pullRequests, issues)
+  if (!admission) return { status: 'observed' }
 
-const admission = await admittedWork(work, pullRequests, issues)
-if (!admission) process.exit(0)
-
-if (work.type === 'repair') {
-  await recordApplied(work, admission)
-  await run(githubExecutable, [
-    'api', '--method', 'POST', `repos/${repository}/dispatches`,
-    '-f', 'event_type=dsh-repair',
-    '-F', `client_payload[pr_number]=${work.number}`,
-    '-f', `client_payload[head_sha]=${work.head}`,
-    '-f', 'client_payload[request_id]=backlog',
-  ], { env: githubEnvironment })
-  process.stdout.write(`Dispatched blocked pull request #${work.number} at ${work.head}.\n`)
-} else {
   await run(githubExecutable, [
     'issue', 'edit', String(work.number), '--repo', repository, '--add-label', 'agent/dsh',
   ], { env: githubEnvironment })
@@ -311,4 +302,81 @@ if (work.type === 'repair') {
   }
   await recordApplied(work, admission)
   process.stdout.write(`Dispatched Issue #${work.number} as ${work.request.profileId}/${work.request.workflowId}/${work.request.stageId}.\n`)
+  return { status: 'applied' }
+}
+
+const pullRequests = await ghPages(`repos/${repository}/pulls?state=open&per_page=100`, 'open pull requests')
+const issues = (await ghPages(`repos/${repository}/issues?state=all&per_page=100`, 'Issues'))
+  .filter(issue => !issue.pull_request)
+const trustedBlocked = requestedIssueNumber === null
+  ? new Set()
+  : await trustedBlockedRepairNumbers(pullRequests)
+const singleSelections = requestedIssueNumber === null ? [] : selectBacklogDispatches({
+  requestedIssueNumber,
+  selectSingle: () => selectBacklogWork({
+    repository,
+    pullRequests,
+    issues,
+    trustedBlockedRepairNumbers: trustedBlocked,
+    includeRepairs: false,
+    requestedIssueNumber,
+  }),
+  selectBatch: () => [],
+})
+
+if (requestedIssueNumber !== null) {
+  const work = singleSelections[0]
+  if (!work) {
+    process.stdout.write('No eligible DSH backlog work is ready.\n')
+    process.exit(0)
+  }
+  const baseCommit = await defaultBranchCommit()
+  const profile = await targetProfile(work.work.profile, baseCommit.sha)
+  const workflow = resolveWorkflow(profile.definition, work.work.workflow)
+  const active = activeWorkflowIssueNumbers({
+    issues,
+    pullRequests,
+    profileId: profile.definition.profileId,
+    workflowId: work.work.workflow,
+    excludeIssueNumber: work.number,
+  })
+  if (active.size >= workflow.coordination.limit) {
+    process.stdout.write(`Workflow ${profile.definition.profileId}/${work.work.workflow} is at its coordination limit ${workflow.coordination.limit}.\n`)
+    process.exit(0)
+  }
+  await dispatchIssueSelection(work, profile, baseCommit, pullRequests, issues)
+  process.exit(0)
+}
+
+const baseCommit = await defaultBranchCommit()
+const profileCache = new Map()
+const workflowLimits = await batchWorkflowLimits({
+  issues, revision: baseCommit.sha, profileCache,
+})
+const selections = selectBacklogDispatches({
+  selectSingle: () => null,
+  selectBatch: () => selectBacklogBatch({
+    repository,
+    pullRequests,
+    issues,
+    workflowLimits,
+    maximumBatchSize,
+  }),
+})
+if (!selections.length) {
+  process.stdout.write('No eligible DSH backlog work is ready.\n')
+  process.exit(0)
+}
+
+try {
+  await runBacklogBatch(selections, selection => dispatchIssueSelection(
+    selection,
+    profileCache.get(selection.work.profile),
+    baseCommit,
+    pullRequests,
+    issues,
+  ))
+} catch (error) {
+  process.stderr.write(`${error.message}\n`)
+  process.exitCode = 1
 }
