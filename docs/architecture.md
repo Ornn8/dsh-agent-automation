@@ -18,6 +18,8 @@ Completed Agent automation results support a strict v2 verification receipt cont
 
 When a trusted target Profile has a loaded Verification Contract, the issue and transported repair Worker Skill payloads carry that immutable context as structured data. Unconfigured Profiles omit it, and repair paths do not reread candidate content to reconstruct it.
 
+Durable completed Worker replays reparse a stored final output with the existing Agent automation-result parser before returning. Malformed stored output fails closed without starting another Worker, while older completed records without stored output retain their prior replay behavior.
+
 ### Agent Adapters
 
 Adapters translate the Worker Interface to one runtime:

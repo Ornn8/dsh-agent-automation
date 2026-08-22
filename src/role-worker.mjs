@@ -7,9 +7,11 @@ import { capacityEligibility, projectWorkerCapacityIdentity } from './capacity-r
 import { capacityRecordKey, createCapacityAttempt, createCapacityRegistry, parseCapacityAttempt } from './capacity-registry-store.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
 import { runAgentWorker } from './agent-worker.mjs'
+import { AGENT_ISSUE_SKILL, AGENT_REPAIR_SKILL, parseAgentAutomationResult } from './agent-work-result.mjs'
 import { createLocalWorkerRoutingExecution } from './worker-routing.mjs'
 
 const START_STATES = new Set(['available', 'cooldown', 'half-open', 'disabled'])
+const AUTOMATION_RESULT_SKILLS = new Set([AGENT_ISSUE_SKILL, AGENT_REPAIR_SKILL])
 const DIGEST = /^[a-f0-9]{64}$/
 const EXECUTION_CLAIMS = new WeakSet()
 const EXECUTION_STATES = new WeakMap()
@@ -445,6 +447,11 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
         recordDeferredCapacitySnapshot(deferredCapacitySnapshots, prepared.capacity)
         continue
       }
+      const automationResult = priorOutcome === 'completed'
+        && AUTOMATION_RESULT_SKILLS.has(invocation?.requiredSkill)
+        && typeof admission.attempt.result.output === 'string'
+        ? parseAgentAutomationResult(admission.attempt.result.output)
+        : undefined
       if (priorOutcome !== 'claimed') await commitExecution(state, onExecutionCommitted)
       return {
         version: 1,
@@ -458,6 +465,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
         candidates: [...state.candidates],
         priorOutcome,
         ...(typeof admission.attempt.result.output === 'string' ? { output: admission.attempt.result.output } : {}),
+        ...(automationResult === undefined ? {} : { automationResult }),
         detail: 'This trusted routing claim was already durably claimed; no Worker was started.',
       }
     }
