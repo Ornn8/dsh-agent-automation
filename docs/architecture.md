@@ -14,6 +14,8 @@ The repository defines one pure pull-request advancement decision seam. Pull-req
 
 This Module owns the stable invocation and terminal receipt Interface. Its Depth comes from hiding provider sessions, process protocols, model configuration, and local UI persistence behind one small call. Controllers know a worker id and role; they do not know how the Implementation starts or observes a session.
 
+Completed Agent automation results support a strict v2 verification receipt containing one exact lowercase revision, one trusted Verification Contract identity, the contract-selected procedure or entrypoint, a `passed` result, and bounded evidence identifiers. The pure binding helper compares that receipt with the expected revision and trusted contract; v1 completed and blocked results remain an explicit finite migration input, and this slice does not enforce v2 in Workers, CI, review, or landing.
+
 ### Agent Adapters
 
 Adapters translate the Worker Interface to one runtime:

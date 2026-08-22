@@ -68,6 +68,7 @@ import {
   AGENT_ISSUE_SKILL,
   AGENT_REPAIR_SKILL,
   agentWorkPrompt,
+  bindAgentAutomationVerification,
   parseAgentAutomationResult as parseAgentWorkResult,
 } from '../src/agent-work-result.mjs'
 import {
@@ -83,6 +84,7 @@ import {
 import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-state.mjs'
 import { parseAgentWork } from '../src/agent-work.mjs'
 import { intentionalReviewBlock } from '../src/recovery-policy.mjs'
+import { verificationContractHash } from '../src/verification-contract.mjs'
 import { parseWorkflowIdentity } from '../src/workflow-identity.mjs'
 
 function rpcResponse(request, value, ok = true) {
@@ -635,6 +637,107 @@ test('DSH terminal automation results are strict and fail closed', () => {
     version: 1, outcome: 'blocked', summary: '非规范 URL', blockedReason: 'ci-baseline',
     issue: { number: 7, url: 'HTTPS://github.com/owner/repository/issues/7' },
   })), /canonical GitHub HTTPS/)
+})
+
+test('v2 completed automation results carry one bounded verification receipt', () => {
+  const result = parseAgentWorkResult(dshFinalMessage({
+    version: 2,
+    outcome: 'completed',
+    summary: '任务已完成',
+    verification: {
+      revision: 'a'.repeat(40),
+      contract: { contractId: 'delivery-v1', hash: 'b'.repeat(64) },
+      procedure: 'verify/delivery',
+      result: 'passed',
+      evidence: ['test-report', 'changed-paths'],
+    },
+  }))
+  assert.deepEqual(result, {
+    version: 2,
+    outcome: 'completed',
+    summary: '任务已完成',
+    verification: {
+      revision: 'a'.repeat(40),
+      contract: { contractId: 'delivery-v1', hash: 'b'.repeat(64) },
+      procedure: 'verify/delivery',
+      result: 'passed',
+      evidence: ['changed-paths', 'test-report'],
+    },
+  })
+})
+
+test('v2 verification receipts reject malformed or partial machine evidence', () => {
+  const receipt = {
+    version: 2,
+    outcome: 'completed',
+    summary: '任务已完成',
+    verification: {
+      revision: 'a'.repeat(40),
+      contract: { contractId: 'delivery-v1', hash: 'b'.repeat(64) },
+      procedure: 'verify/delivery',
+      result: 'passed',
+      evidence: ['test-report'],
+    },
+  }
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({ ...receipt, version: 2, outcome: 'blocked' })), /only supports completed/)
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
+    ...receipt, verification: { ...receipt.verification, revision: 'A'.repeat(40) },
+  })), /full lowercase SHA/)
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
+    ...receipt, verification: { ...receipt.verification, result: 'failed' },
+  })), /result must be passed/)
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
+    ...receipt, verification: { ...receipt.verification, evidence: ['test-report', 'test-report'] },
+  })), /must not contain duplicates/)
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
+    ...receipt, verification: { ...receipt.verification, procedure: 'verify/delivery', entrypoint: 'verify/delivery' },
+  })), /exactly one of procedure or entrypoint/)
+  assert.throws(() => parseAgentWorkResult(dshFinalMessage({
+    ...receipt, verification: { ...receipt.verification, extra: true },
+  })), /unexpected fields/)
+})
+
+test('pure v2 verification binding rejects stale, wrong-contract, and partial receipts', () => {
+  const contract = {
+    version: 1,
+    contractId: 'delivery-v1',
+    procedure: 'verify/delivery',
+    requiredChecks: ['build'],
+    requiredEvidence: ['changed-paths', 'test-report'],
+  }
+  const trustedVerificationContract = { contract, hash: verificationContractHash(contract) }
+  const parsed = parseAgentWorkResult(dshFinalMessage({
+    version: 2,
+    outcome: 'completed',
+    summary: '任务已完成',
+    verification: {
+      revision: 'a'.repeat(40),
+      contract: { contractId: contract.contractId, hash: trustedVerificationContract.hash },
+      procedure: contract.procedure,
+      result: 'passed',
+      evidence: ['test-report', 'changed-paths'],
+    },
+  }))
+  const bound = bindAgentAutomationVerification(parsed, {
+    expectedRevision: 'a'.repeat(40),
+    trustedVerificationContract,
+  })
+  assert.deepEqual(bound, parsed)
+  assert.throws(() => bindAgentAutomationVerification(parsed, {
+    expectedRevision: 'b'.repeat(40), trustedVerificationContract,
+  }), /does not match the expected revision/)
+  assert.throws(() => bindAgentAutomationVerification(parsed, {
+    expectedRevision: 'a'.repeat(40),
+    trustedVerificationContract: { contract: { ...contract, contractId: 'other-v1' }, hash: trustedVerificationContract.hash },
+  }), /does not match the contract contents/)
+  assert.throws(() => bindAgentAutomationVerification({
+    ...parsed,
+    verification: { ...parsed.verification, evidence: ['test-report'] },
+  }, { expectedRevision: 'a'.repeat(40), trustedVerificationContract }), /missing required evidence/)
+  assert.throws(() => bindAgentAutomationVerification({
+    ...parsed,
+    verification: { ...parsed.verification, procedure: 'verify/other' },
+  }, { expectedRevision: 'a'.repeat(40), trustedVerificationContract }), /does not match the trusted Verification Contract/)
 })
 
 test('DSH Web refuses a receipt from an earlier turn', async () => {
