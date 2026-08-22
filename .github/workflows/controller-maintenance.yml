@@ -41,6 +41,10 @@ jobs:
           path: controller
           persist-credentials: false
 
+      - name: Install locked production dependencies
+        working-directory: controller
+        run: npm ci --omit=dev --ignore-scripts
+
       - name: Advance at most one trusted transition per root fault
         env:
           CONTROLLER_REPOSITORY: ${{ github.repository }}
