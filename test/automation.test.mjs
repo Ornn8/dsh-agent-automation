@@ -84,7 +84,7 @@ import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-st
 import { parseAgentWork } from '../src/agent-work.mjs'
 import { intentionalReviewBlock } from '../src/recovery-policy.mjs'
 import { parseWorkflowIdentity } from '../src/workflow-identity.mjs'
-import { dispatchReceiptState, dispatchWithReceipt } from '../src/dispatch-receipt.mjs'
+import { dispatchWithReceipt } from '../src/dispatch-receipt.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -2354,31 +2354,75 @@ function failedDispatchRun(id, requestId, title) {
   }
 }
 
-test('queued, running, and successful matching dispatch runs are durable receipts', () => {
-  const requestId = 'capacity-receipt-state'
-  const base = { display_title: `Agent Issues request:${requestId}` }
-  assert.deepEqual(dispatchReceiptState([{ ...base, status: 'queued' }]), { kind: 'active', failureCount: 0 })
-  assert.deepEqual(dispatchReceiptState([{ ...base, status: 'in_progress' }]), { kind: 'active', failureCount: 0 })
-  assert.deepEqual(dispatchReceiptState([{ ...base, status: 'completed', conclusion: 'success' }]), { kind: 'success', failureCount: 0 })
+test('exact capacity receipt identity survives an old failure leaving the recent run window', async () => {
+  for (const [workflowFile, title] of [['agent-issues.yml', 'Agent Issues'], ['agent-pr-rework.yml', 'Agent PR Rework']]) {
+    const requestId = `capacity-exact-${workflowFile.replaceAll('.', '-')}`
+    const exactRuns = new Map([
+      [1, failedDispatchRun(1, requestId, title)],
+    ])
+    let journalState = {
+      pending: false,
+      dispatches: [{ runId: 1, runAttempt: 1 }],
+    }
+    let postSeen = false
+    const calls = []
+    const journal = {
+      read: async () => structuredClone(journalState),
+      reserve: async () => { journalState = { ...journalState, pending: true } },
+      commit: async dispatches => { journalState = { pending: false, dispatches } },
+    }
+    const execute = async (_executable, args) => {
+      calls.push(args)
+      if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
+        return { stdout: JSON.stringify({ workflow_runs: postSeen ? [exactRuns.get(2)] : [] }) }
+      }
+      if (args[0] === 'api' && args[1]?.includes('/actions/runs/')) {
+        const runId = Number(args[1].split('/').at(-1))
+        return { stdout: JSON.stringify(exactRuns.get(runId)) }
+      }
+      if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
+        postSeen = true
+        exactRuns.set(2, failedDispatchRun(2, requestId, title))
+        return { stdout: '' }
+      }
+      throw new Error(`unexpected gh invocation: ${args.join(' ')}`)
+    }
+    const dispatch = () => dispatchWithReceipt({
+      executable: 'gh', environment: {}, repository: 'owner/repository',
+      workflowFile, payload: {}, requestId, journal,
+      runCommand: execute, sleep: async () => undefined,
+    })
+
+    await assert.rejects(dispatch(), /retry budget exhausted/)
+    assert.equal(journalState.dispatches.length, 2)
+    assert.equal(calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST').length, 1)
+    await assert.rejects(dispatch(), /retry budget exhausted/)
+    assert.equal(calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST').length, 1)
+  }
 })
 
-test('receipt polling tolerates old terminal failure visibility before the retry run appears', async () => {
-  const requestId = 'capacity-receipt-visibility'
+test('exact capacity receipt polling waits for the new run after a retry', async () => {
+  const requestId = 'capacity-exact-visibility'
   const workflowFile = 'agent-issues.yml'
-  const runs = [failedDispatchRun(1, requestId, 'Agent Issues')]
-  const calls = []
+  const oldRun = failedDispatchRun(41, requestId, 'Agent Issues')
+  const newRun = { id: 42, run_attempt: 1, status: 'in_progress', display_title: `Agent Issues request:${requestId}` }
+  let state = { pending: false, dispatches: [{ runId: 41, runAttempt: 1 }] }
   let postSeen = false
-  let listCallsAfterPost = 0
+  let afterPost = 0
+  const journal = {
+    read: async () => structuredClone(state),
+    reserve: async () => { state = { ...state, pending: true } },
+    commit: async dispatches => { state = { pending: false, dispatches } },
+    release: async () => { state = { ...state, pending: false } },
+  }
   const execute = async (_executable, args) => {
-    calls.push(args)
     if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
-      if (postSeen) {
-        listCallsAfterPost += 1
-        if (listCallsAfterPost === 2) runs.push({
-          id: 2, run_attempt: 1, status: 'in_progress', display_title: `Agent Issues request:${requestId}`,
-        })
-      }
-      return { stdout: JSON.stringify({ workflow_runs: runs }) }
+      if (!postSeen) return { stdout: JSON.stringify({ workflow_runs: [oldRun] }) }
+      afterPost += 1
+      return { stdout: JSON.stringify({ workflow_runs: afterPost === 1 ? [oldRun] : [newRun] }) }
+    }
+    if (args[0] === 'api' && args[1]?.includes('/actions/runs/')) {
+      return { stdout: JSON.stringify(args[1].endsWith('/41') ? oldRun : newRun) }
     }
     if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
       postSeen = true
@@ -2388,41 +2432,59 @@ test('receipt polling tolerates old terminal failure visibility before the retry
   }
   await dispatchWithReceipt({
     executable: 'gh', environment: {}, repository: 'owner/repository',
-    workflowFile, payload: {}, requestId,
+    workflowFile, payload: {}, requestId, journal,
     runCommand: execute, sleep: async () => undefined,
   })
-  assert.equal(calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST').length, 1)
-  assert.equal(listCallsAfterPost, 2)
+  assert.equal(afterPost, 2)
+  assert.deepEqual(state.dispatches, [{ runId: 41, runAttempt: 1 }, { runId: 42, runAttempt: 1 }])
 })
 
-test('terminal Issue and repair dispatch failures permit one bounded retry and then suppress repeats', async () => {
-  for (const [workflowFile, title] of [['agent-issues.yml', 'Agent Issues'], ['agent-pr-rework.yml', 'Agent PR Rework']]) {
-    const requestId = `capacity-resume-${workflowFile.replaceAll('.', '-')}`
-    const runs = []
-    const calls = []
-    const execute = async (_executable, args) => {
-      calls.push(args)
-      if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
-        return { stdout: JSON.stringify({ workflow_runs: runs }) }
+test('a failed journal write is recovered from the pending exact request without a second dispatch', async () => {
+  const requestId = 'capacity-exact-journal-recovery'
+  const workflowFile = 'agent-pr-rework.yml'
+  const oldRun = failedDispatchRun(51, requestId, 'Agent PR Rework')
+  const newRun = { id: 52, run_attempt: 1, status: 'in_progress', display_title: `Agent PR Rework request:${requestId}` }
+  let state = { pending: false, dispatches: [{ runId: 51, runAttempt: 1 }] }
+  let postSeen = false
+  let commitFailures = 1
+  let postCount = 0
+  const journal = {
+    read: async () => structuredClone(state),
+    reserve: async () => { state = { ...state, pending: true } },
+    commit: async dispatches => {
+      if (commitFailures) {
+        commitFailures -= 1
+        throw new Error('simulated journal write failure')
       }
-      if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
-        runs.push(failedDispatchRun(runs.length + 1, requestId, title))
-        return { stdout: '' }
-      }
-      throw new Error(`unexpected gh invocation: ${args.join(' ')}`)
-    }
-    const dispatch = () => dispatchWithReceipt({
-      executable: 'gh', environment: {}, repository: 'owner/repository',
-      workflowFile, payload: {}, requestId,
-      runCommand: execute, sleep: async () => undefined,
-    })
-
-    await assert.rejects(dispatch(), /terminal failure/)
-    await assert.rejects(dispatch(), /retry budget exhausted/)
-    const dispatchCalls = calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST')
-    assert.equal(dispatchCalls.length, 2)
-
-    await assert.rejects(dispatch(), /retry budget exhausted/)
-    assert.equal(calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST').length, 2)
+      state = { pending: false, dispatches }
+    },
+    release: async () => { state = { ...state, pending: false } },
   }
+  const execute = async (_executable, args) => {
+    if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
+      return { stdout: JSON.stringify({ workflow_runs: postSeen ? [newRun] : [oldRun] }) }
+    }
+    if (args[0] === 'api' && args[1]?.includes('/actions/runs/')) {
+      return { stdout: JSON.stringify(args[1].endsWith('/51') ? oldRun : newRun) }
+    }
+    if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
+      postSeen = true
+      postCount += 1
+      return { stdout: '' }
+    }
+    throw new Error(`unexpected gh invocation: ${args.join(' ')}`)
+  }
+  await assert.rejects(dispatchWithReceipt({
+    executable: 'gh', environment: {}, repository: 'owner/repository',
+    workflowFile, payload: {}, requestId, journal,
+    runCommand: execute, sleep: async () => undefined,
+  }), /simulated journal write failure/)
+  assert.equal(state.pending, true)
+  await dispatchWithReceipt({
+    executable: 'gh', environment: {}, repository: 'owner/repository',
+    workflowFile, payload: {}, requestId, journal,
+    runCommand: execute, sleep: async () => undefined,
+  })
+  assert.equal(postCount, 1)
+  assert.deepEqual(state.dispatches, [{ runId: 51, runAttempt: 1 }, { runId: 52, runAttempt: 1 }])
 })

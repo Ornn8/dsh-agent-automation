@@ -13,7 +13,7 @@ import {
 } from './dispatch-policy.mjs'
 import { capacityResumeRequestId, parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
 import { trustedControllerMutation } from './controller-mutation-marker.mjs'
-import { dispatchWithReceipt } from './dispatch-receipt.mjs'
+import { createDispatchJournal, dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import {
   governorBudgetDecision,
@@ -163,6 +163,44 @@ async function governorRecords(number) {
   })
 }
 
+function capacityDispatchJournal(work, workflowFile, requestId) {
+  const subject = {
+    type: work.type === 'repair' ? 'pull-request' : 'issue',
+    number: work.number,
+  }
+  const commentId = work.statusComment?.id
+  if (!Number.isSafeInteger(commentId) || commentId < 1) throw new Error('Capacity wait status comment is missing its id')
+  const readComment = () => ghJson([
+    'api', `repos/${repository}/issues/comments/${commentId}`,
+  ], `capacity wait status comment ${commentId}`)
+  return createDispatchJournal({
+    requestId,
+    workflowFile,
+    subject,
+    readComment,
+    verifyComment: async comment => {
+      if (comment?.issue_url !== `https://api.github.com/repos/${repository}/issues/${work.number}`) {
+        throw new Error('Capacity wait status comment is bound to another subject')
+      }
+      await trustedControllerMutation({
+        comment,
+        expectedControllerLogin: trustedControllerLogin,
+        expectedRepository: repository,
+        expectedSubject: subject,
+        loadRun: runId => ghJson(
+          ['api', `repos/${repository}/actions/runs/${runId}`],
+          `capacity wait worker run ${runId}`,
+        ),
+      })
+    },
+    updateComment: async (commentId, body) => {
+      await run(githubExecutable, [
+        'api', '--method', 'PATCH', `repos/${repository}/issues/comments/${commentId}`, '--input', '-',
+      ], { env: githubEnvironment, input: JSON.stringify({ body }) })
+    },
+  })
+}
+
 const CAPACITY_ISSUE_URL = /^https:\/\/api\.github\.com\/repos\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)$/
 
 function capacityCommentReference(comment) {
@@ -246,7 +284,7 @@ async function capacitySnapshot() {
     const subject = expectedSubject.type === 'pull-request'
       ? pullRequestGovernorSubject(candidate)
       : issueGovernorSubject(candidate)
-    waits.push({ repository, projection, currentStateVersion: subjectStateVersion(subject) })
+    waits.push({ repository, projection, statusComment: status, currentStateVersion: subjectStateVersion(subject) })
     if (expectedSubject.type === 'pull-request') pullRequests.push(candidate)
     else issues.push(candidate)
   }
@@ -518,6 +556,11 @@ if (capacityResumeOnly) {
     workflowFile: work.type === 'repair' ? 'agent-pr-rework.yml' : 'agent-issues.yml',
     payload,
     requestId: resumeRequestId,
+    journal: capacityDispatchJournal(
+      work,
+      work.type === 'repair' ? 'agent-pr-rework.yml' : 'agent-issues.yml',
+      resumeRequestId,
+    ),
   })
   process.stdout.write(`Resumed capacity-waiting ${work.type === 'repair' ? 'pull request' : 'Issue'} #${work.number}.\n`)
   process.exit(0)
