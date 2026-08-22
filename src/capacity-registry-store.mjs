@@ -755,7 +755,7 @@ async function reserveLeaseFence(paths, lease) {
 }
 
 /** @typedef {(pid: number) => Promise<string|null>} ProcessIdentityVerifier */
-/** @typedef {{waitMs?: number, leaseMs?: number, now?: number|(() => number), processIdentity?: ProcessIdentityVerifier, persistProcessIdentity?: boolean}} RegistryLockOptions */
+/** @typedef {{waitMs?: number, leaseMs?: number, now?: number|(() => number), processIdentity?: ProcessIdentityVerifier}} RegistryLockOptions */
 
 /** @param {RegistryLockOptions} options @returns {() => number} */
 function lockClock(options) {
@@ -1253,7 +1253,7 @@ export async function withCapacityRegistryLock(stateRoot, operation, options = {
     : /** @type {ProcessIdentityVerifier} */ (pid => boundedProcessIdentity(injectedVerifier, pid))
   const deadline = Date.now() + waitMs
   // A synthetic lock clock cannot be compared with an OS process start time.
-  const persistProcessIdentity = options.persistProcessIdentity ?? options.now !== undefined
+  const persistProcessIdentity = options.now !== undefined
   const acquired = await acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier, persistProcessIdentity)
   if (!acquired) throw new Error('Capacity registry lock is busy')
   const ownerPath = join(paths.directory, `${paths.leasePrefix}.${acquired.ownerToken}.json`)
@@ -1340,7 +1340,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
   }
   const identity = { configurationHash, credentialGeneration }
   const clock = typeof now === 'function' ? now : now === undefined ? () => Date.now() : () => now
-  const lockOptions = { now: clock, persistProcessIdentity: now !== undefined }
+  const lockOptions = now === undefined ? {} : { now: clock }
   return {
     async records() {
       return withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
