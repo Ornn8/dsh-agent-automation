@@ -106,7 +106,7 @@ test('maintenance CI rejects every mismatched repository, event, PR, base, head,
   }
 })
 
-test('maintenance CI rejects failed workflow or check conclusions and unbound check URLs', () => {
+test('maintenance CI rejects failed workflow or check conclusions and only-unbound checks', () => {
   assert.equal(assessMaintenanceCi(input({
     workflowRuns: [workflowRun({ conclusion: 'failure' })],
   })).outcome, 'failed')
@@ -116,7 +116,28 @@ test('maintenance CI rejects failed workflow or check conclusions and unbound ch
   assert.equal(assessMaintenanceCi(input({
     checkRuns: [checkRun({ details_url: `https://github.com/${repository}/actions/runs/99/job/701` })],
   })).outcome, 'failed')
+})
+
+test('maintenance CI does not let a newer unbound CheckRun obscure the exact PR CheckRun', () => {
   assert.equal(assessMaintenanceCi(input({
     checkRuns: [checkRun(), checkRun({ id: 702, details_url: `https://github.com/${repository}/actions/runs/99/job/702` })],
-  })).outcome, 'failed')
+  })).outcome, 'succeeded')
+})
+
+test('maintenance CI ignores a later push aggregate for the same head', () => {
+  const result = assessMaintenanceCi(input({
+    checkRuns: [
+      checkRun(),
+      checkRun({ id: 703, details_url: `https://github.com/${repository}/actions/runs/43/job/703` }),
+    ],
+  }))
+  assert.equal(result.outcome, 'succeeded')
+  assert.equal(result.runId, 42)
+})
+
+test('maintenance CI fails closed on duplicate identities within the exact workflow run', () => {
+  const result = assessMaintenanceCi(input({
+    checkRuns: [checkRun(), checkRun({ id: 701, details_url: `https://github.com/${repository}/actions/runs/42/job/702` })],
+  }))
+  assert.equal(result.outcome, 'failed')
 })

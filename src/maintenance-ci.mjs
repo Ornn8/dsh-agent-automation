@@ -35,7 +35,8 @@ function isExactWorkflowRun(run, pull, repository, workflowName) {
 function latestRun(runs, workflowName) {
   const candidates = runs.filter(run => run?.name === workflowName && run?.path === MAINTENANCE_CI_WORKFLOW_PATH)
   return candidates.length > 0
-    ? [...candidates].sort((left, right) => (right?.id || 0) - (left?.id || 0))[0]
+    ? [...candidates].sort((left, right) => (right?.id || 0) - (left?.id || 0)
+      || (right?.run_attempt || 0) - (left?.run_attempt || 0))[0]
     : null
 }
 
@@ -73,16 +74,18 @@ export function assessMaintenanceCi({
   for (const requiredCheckName of requiredCheckNames) {
     const namedChecks = checkRuns.filter(check => check?.name === requiredCheckName)
     if (namedChecks.length === 0) return { outcome: 'waiting', runId: run.id }
-    const checkIds = namedChecks.map(check => check?.id)
+    const boundChecks = namedChecks.filter(check => check?.head_sha === pull.head.sha
+      && check.app?.id === GITHUB_ACTIONS_APP_ID
+      && reviewRunIdFromDetailsUrl(check.details_url, repository) === run.id)
+    if (boundChecks.length === 0) {
+      return failed(`maintenance CI CheckRun ${requiredCheckName} is not bound to the fixed Controller workflow run`)
+    }
+    const checkIds = boundChecks.map(check => check?.id)
     if (checkIds.some(id => !Number.isSafeInteger(id) || id < 1) || new Set(checkIds).size !== checkIds.length) {
       return failed(`maintenance CI CheckRun ${requiredCheckName} has an ambiguous identity`)
     }
-    const check = [...namedChecks].sort((left, right) => right.id - left.id)[0]
-    if (check.head_sha !== pull.head.sha
-      || check.app?.id !== GITHUB_ACTIONS_APP_ID
-      || reviewRunIdFromDetailsUrl(check.details_url, repository) !== run.id) {
-      return failed(`maintenance CI CheckRun ${requiredCheckName} is not bound to the fixed Controller workflow run`)
-    }
+    const check = [...boundChecks].sort((left, right) => right.id - left.id
+      || (right?.run_attempt || 0) - (left?.run_attempt || 0))[0]
     if (check.status !== 'completed') return { outcome: 'waiting', runId: run.id }
     if (check.conclusion !== 'success') return failed(`maintenance CI required CheckRun ${requiredCheckName} did not succeed`)
   }
