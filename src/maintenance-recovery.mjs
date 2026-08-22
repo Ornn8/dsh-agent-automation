@@ -28,6 +28,7 @@ import { parseFaultProjection } from './fault-projection.mjs'
 import { trustedFaultProjectionRun } from './fault-observation.mjs'
 import { observeFaultHealth, parseFaultHealthState } from './fault-health.mjs'
 import { parseMaintenanceProfile } from './maintenance-profile.mjs'
+import { assessMaintenancePromotion, confirmMaintenancePromotionHead } from './maintenance-promotion.mjs'
 import { parseReviewMessage } from './review-protocol.mjs'
 import { validateReviewFindings } from './review-evidence.mjs'
 
@@ -306,11 +307,16 @@ async function checkMaintenanceCi(record) {
 
 async function promoteMaintenance(record) {
   const pull = await ghJson(['api', `repos/${controllerRepository}/pulls/${record.repairPullRequest}`], 'maintenance pull request')
-  await validateMaintenancePullRequest(record, pull)
+  const files = await validateMaintenancePullRequest(record, pull)
+  const decision = assessMaintenancePromotion({ pull, files })
+  const current = await ghJson(['api', `repos/${controllerRepository}/pulls/${pull.number}`], 'maintenance pull request before merge')
+  confirmMaintenancePromotionHead({ decision, current })
   await run(config.ghExecutable, ['pr', 'merge', String(pull.number), '--repo', controllerRepository,
-    '--squash', '--delete-branch', '--match-head-commit', pull.head.sha], { env: environment })
+    '--squash', '--delete-branch', '--match-head-commit', decision.expectedHead], { env: environment })
   const merged = await ghJson(['api', `repos/${controllerRepository}/pulls/${pull.number}`], 'merged maintenance pull request')
-  if (!merged.merged || !/^[0-9a-f]{40}$/.test(merged.merge_commit_sha || '')) throw new Error('Maintenance pull request did not produce a published SHA')
+  if (!merged.merged || merged.head?.sha !== decision.expectedHead || !/^[0-9a-f]{40}$/.test(merged.merge_commit_sha || '')) {
+    throw new Error('Maintenance pull request did not produce a published SHA for the promoted head')
+  }
   return merged.merge_commit_sha
 }
 
