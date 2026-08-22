@@ -157,6 +157,49 @@ export function capacityRecordKey(input) {
   return `record:${createHash('sha256').update(JSON.stringify(tuple)).digest('hex')}`
 }
 
+/** Parse one trusted multi-scope Worker capacity inspection plan. */
+/** @param {unknown} value @returns {Record<string, any>} */
+export function parseWorkerCapacityInspection(value) {
+  const object = exactKeys(value, [
+    'workerId', 'capacityGroup', 'identity', 'eligible', 'startState', 'capacityGeneration', 'records', 'probeScopes',
+  ], 'Worker capacity inspection')
+  for (const field of ['workerId', 'capacityGroup', 'identity', 'eligible', 'startState', 'capacityGeneration', 'records', 'probeScopes']) {
+    if (!Object.hasOwn(object, field)) throw new Error(`Worker capacity inspection is missing ${field}`)
+  }
+  const workerId = identifier(object.workerId, 'Worker capacity inspection workerId')
+  const capacityGroup = identifier(object.capacityGroup, 'Worker capacity inspection capacityGroup')
+  const identity = scopeCapacityIdentity('worker', object.identity)
+  if (identity.worker !== workerId) throw new Error('Worker capacity inspection identity does not match workerId')
+  if (typeof object.eligible !== 'boolean' || !STATE_SET.has(object.startState)) throw new Error('Worker capacity inspection state is invalid')
+  if (!Number.isSafeInteger(object.capacityGeneration) || object.capacityGeneration < 0) throw new Error('Worker capacity inspection generation is invalid')
+  if (!Array.isArray(object.records) || object.records.length > CAPACITY_RECORD_SCOPES.length) throw new Error('Worker capacity inspection records are invalid')
+  const records = object.records.map((value, index) => {
+    const entry = exactKeys(value, ['key', 'scope', 'record', 'requiresProbe', 'identity'], `Worker capacity inspection records[${index}]`)
+    for (const field of ['key', 'scope', 'record', 'requiresProbe', 'identity']) {
+      if (!Object.hasOwn(entry, field)) throw new Error(`Worker capacity inspection records[${index}] is missing ${field}`)
+    }
+    const scope = entry.scope
+    if (!SCOPE_SET.has(scope) || typeof entry.requiresProbe !== 'boolean') throw new Error(`Worker capacity inspection records[${index}] is invalid`)
+    const record = parseCapacityRecord(entry.record)
+    const expectedIdentity = scopeCapacityIdentity(scope, identity)
+    const recordKey = capacityRecordKey({ capacityGroup, scope, identity: expectedIdentity })
+    if (record.scope !== scope || record.capacityGroup !== capacityGroup
+      || JSON.stringify(record.capacityIdentity) !== JSON.stringify(expectedIdentity)
+      || JSON.stringify(scopeCapacityIdentity(scope, entry.identity)) !== JSON.stringify(expectedIdentity)
+      || entry.key !== recordKey) {
+      throw new Error(`Worker capacity inspection records[${index}] identity is invalid`)
+    }
+    return { key: recordKey, scope, record, requiresProbe: entry.requiresProbe, identity: expectedIdentity }
+  })
+  if (new Set(records.map(entry => entry.scope)).size !== records.length) throw new Error('Worker capacity inspection records contain duplicate scopes')
+  if (!Array.isArray(object.probeScopes) || object.probeScopes.some(scope => !SCOPE_SET.has(scope))
+    || new Set(object.probeScopes).size !== object.probeScopes.length
+    || JSON.stringify(object.probeScopes) !== JSON.stringify(records.filter(entry => entry.requiresProbe).map(entry => entry.scope))) {
+    throw new Error('Worker capacity inspection probeScopes are invalid')
+  }
+  return { workerId, capacityGroup, identity, eligible: object.eligible, startState: object.startState, capacityGeneration: object.capacityGeneration, records, probeScopes: [...object.probeScopes] }
+}
+
 /** Strictly validate one bounded attempt journal entry. */
 /** @param {unknown} value @returns {Record<string, any>} */
 export function parseCapacityAttempt(value) {
@@ -1364,7 +1407,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
     /** @param {{workerId: string, now?: number}} input */
     async inspect({ workerId, now: inspectionTime }) {
       const decision = await inspectWorkerScopes(workerId, inspectionTime ?? clock())
-      return {
+      return parseWorkerCapacityInspection({
         workerId,
         capacityGroup: decision.snapshot.capacityGroup,
         identity: decision.snapshot.identity,
@@ -1373,7 +1416,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         capacityGeneration: decision.capacityGeneration,
         records: decision.entries,
         probeScopes: decision.due.map(entry => entry.scope),
-      }
+      })
     },
     /** @param {RegistryFailureInput} input */
     async recordFailure({ key, capacityGroup, scope, sourceWorker, failure, now: observationTime, cooldownMs }) {

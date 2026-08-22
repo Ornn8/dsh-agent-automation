@@ -10,6 +10,7 @@
     "types": ["node"]
   },
   "files": [
+    "src/capacity-resume-policy.mjs",
     "src/capacity-failure.mjs",
     "src/capacity-wait-projection.mjs",
     "src/capacity-registry.mjs",
