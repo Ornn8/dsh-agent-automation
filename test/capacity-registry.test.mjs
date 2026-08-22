@@ -516,6 +516,66 @@ test('identity probe failure fails acquisition without reclaiming the old gate',
   }
 })
 
+test('Windows leases defer local identity probing until an expired owner must be checked', { skip: process.platform !== 'win32' }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-windows-local-identity-'))
+  try {
+    let lease
+    await withCapacityRegistryLock(stateRoot, async (paths) => {
+      const ownerName = (await readdir(paths.lockPath)).find(name => name.startsWith('registry-owner.') && name.endsWith('.json'))
+      assert.ok(ownerName)
+      lease = JSON.parse(await readFile(join(paths.lockPath, ownerName), 'utf8'))
+    })
+    assert.equal(lease.pid, process.pid)
+    assert.equal(lease.processIdentity, undefined)
+    assert.match(lease.acquiredAt, /^20\d\d-/)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('Windows timestamp identity keeps an active PID and rejects reuse when the lease has no stored identity', { skip: process.platform !== 'win32', timeout: 10_000 }, async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-windows-timestamp-identity-'))
+  const acquiredAt = Date.parse('2026-08-21T00:00:00.000Z')
+  const writeExpiredOwner = async (ownerToken) => {
+    const paths = capacityRegistryPaths(stateRoot)
+    await mkdir(paths.directory, { recursive: true })
+    await mkdir(paths.lockPath)
+    await writeFile(join(paths.lockPath, `registry-owner.${ownerToken}.json`), `${JSON.stringify({
+      version: 1, ownerToken, fence: 10, pid: process.pid,
+      acquiredAt: new Date(acquiredAt).toISOString(),
+      expiresAt: new Date(acquiredAt + 1).toISOString(),
+    })}\n`, 'utf8')
+  }
+  try {
+    await writeExpiredOwner('active')
+    await assert.rejects(withCapacityRegistryLock(stateRoot, async () => undefined, {
+      now: acquiredAt + 1_000,
+      waitMs: 20,
+      processIdentity: async () => `windows:${new Date(acquiredAt - 1).toISOString()}`,
+    }), /busy/)
+    assert.equal((await readdir(capacityRegistryPaths(stateRoot).lockPath)).length, 1)
+
+    await rm(capacityRegistryPaths(stateRoot).lockPath, { recursive: true, force: true })
+    await writeExpiredOwner('reused')
+    let callbacks = 0
+    await withCapacityRegistryLock(stateRoot, async () => { callbacks += 1 }, {
+      now: acquiredAt + 2_000,
+      processIdentity: async () => `windows:${new Date(acquiredAt + 1).toISOString()}`,
+    })
+    assert.equal(callbacks, 1)
+
+    await rm(capacityRegistryPaths(stateRoot).lockPath, { recursive: true, force: true })
+    await writeExpiredOwner('dead')
+    await withCapacityRegistryLock(stateRoot, async () => { callbacks += 1 }, {
+      now: acquiredAt + 3_000,
+      processIdentity: async () => null,
+    })
+    assert.equal(callbacks, 2)
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
 test('a suspended owner remains exclusive after its lease duration', { timeout: 60_000 }, async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-suspended-'))
   try {
