@@ -9,6 +9,7 @@ const MAX_WORKFLOWS = 32
 const MAX_STAGES = 64
 const MAX_RETRIES = 10
 const MAX_BACKOFF_SECONDS = 86_400
+const CONTRACT_PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/
 
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0
@@ -44,6 +45,21 @@ function boundedText(value, name, maximum) {
     throw new Error(`${name} must be non-empty one-line text of at most ${maximum} characters`)
   }
   return value.trim()
+}
+
+function verificationContractLocator(value) {
+  const object = requireFields(
+    value,
+    ['path'],
+    new Set(['path']),
+    'Workflow Definition verificationContract',
+  )
+  const path = object.path
+  if (typeof path !== 'string' || !CONTRACT_PATH.test(path)
+    || path.split('/').some(part => part === '.' || part === '..')) {
+    throw new Error('Workflow Definition verificationContract.path must be a safe relative path')
+  }
+  return { path }
 }
 
 function uniqueIdentifiers(value, name) {
@@ -231,7 +247,7 @@ export function parseWorkflowDefinition(value) {
   const object = requireFields(
     value,
     ['version', 'profileId', 'workflows'],
-    new Set(['version', 'profileId', 'workflows']),
+    new Set(['version', 'profileId', 'workflows', 'verificationContract']),
     'Workflow Definition',
   )
   if (object.version !== 1) throw new Error('Workflow Definition version must be 1')
@@ -246,7 +262,14 @@ export function parseWorkflowDefinition(value) {
     const id = identifier(rawId, 'Workflow Definition workflow id')
     return [id, workflowDefinition(workflow, id)]
   }).sort(([left], [right]) => compareText(left, right))
-  return { version: 1, profileId, workflows: Object.fromEntries(normalized) }
+  return {
+    version: 1,
+    profileId,
+    ...(Object.hasOwn(object, 'verificationContract')
+      ? { verificationContract: verificationContractLocator(object.verificationContract) }
+      : {}),
+    workflows: Object.fromEntries(normalized),
+  }
 }
 
 /** Return the stable SHA-256 identity of one normalized Workflow Definition. */
