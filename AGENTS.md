@@ -3,6 +3,7 @@
 This repository owns an event-driven control plane between GitHub and independently queued local Agent Workers. Keep target repositories limited to thin event-forwarding workflows.
 
 - GitHub-visible prose, comments, commit messages, and pull request fields are English.
+- Controller development is ordinary manual repository development. Never enroll this repository as a product target; target mappings must exclude it.
 - Never commit credentials or copy provider keys into runner configuration. Each Adapter reads its agent's existing local configuration.
 - Pull request content is untrusted. The configured review Worker may inspect it through a controller-enforced read-only Adapter but must never execute it or receive GitHub credentials.
 - A strict ready `agent-work:v2` declaration on an open Issue authored by an owner, member, or collaborator selects a trusted Profile workflow. A later independent observation and Controller-attested Governor admission authorize its exact Profile-bound WorkRequest; labels remain queue projections only.
@@ -13,5 +14,6 @@ This repository owns an event-driven control plane between GitHub and independen
 - Keep the Agent Worker Interface product-neutral. Agent-specific session and process behavior belongs in an Adapter.
 - Keep maintenance, review, and change in independent trust domains, runner labels, workspaces, and credential stores so stopping one role does not stop the others.
 - Maintenance may change only this Controller or its Operations files through one FaultRecord-bound pull request; child failures remain attempts of the same root fault.
-- Keep each pull request within 40 changed files and 2,000 added plus deleted lines. Split larger work into independently reviewable pull requests.
+- Every change cycle is one minimum coherent change at one frozen exact base/head with one ordinary senior review and one terminal PASS, BLOCK, or UNAVAILABLE verdict; follow `CONTRIBUTING.md` for the required evidence and stop rules.
+- Keep each pull request to a target of no more than 10 files and 500 changed lines; exceeding the target requires a written split rationale. The hard cap is 40 files and 2,000 added plus deleted lines, and pull requests spanning multiple lifecycle responsibilities must split regardless of size.
 - Test JavaScript policy with `npm test` and `npm run typecheck`; test portable plans with `scripts/test-installation-plan.ps1`; test Windows operations with `scripts/test-operations.ps1`.
