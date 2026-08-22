@@ -4,6 +4,7 @@ import {
   capacityResumeRequestId,
   capacityWaitStatusLine,
   createCapacityWaitProjection,
+  createIssueCapacityWaitProjection,
   parseCapacityWaitProjection,
   parseCapacityWaitStatus,
 } from '../src/capacity-wait-projection.mjs'
@@ -36,6 +37,78 @@ test('CapacityWaitProjection v1 round-trips a sanitized exact request and route'
   const parsed = parseCapacityWaitProjection(projection)
   assert.deepEqual(parsed, { version: 1, ...projectionInput })
   assert.deepEqual(parseCapacityWaitStatus(capacityWaitStatusLine(projection)), parsed)
+})
+
+test('Issue capacity-deferred publication carries the trusted WorkRequest and current subject state', () => {
+  const projection = createIssueCapacityWaitProjection({
+    workRequest: {
+      requestId: projectionInput.workRequestId,
+      profileId: projectionInput.profileId,
+      workflowId: projectionInput.workflowId,
+      stageId: projectionInput.stageId,
+      definitionHash: projectionInput.definitionHash,
+      role: projectionInput.role,
+      repository: projectionInput.repository,
+      subject: { type: 'issue', number: projectionInput.subject.number },
+      revision: projectionInput.revision,
+      coordinationKey: projectionInput.coordinationKey,
+    },
+    issueNumber: projectionInput.subject.number,
+    subjectStateVersion: stateVersion,
+    routeDecision: projectionInput.routeDecision,
+    capacityGenerationHash: projectionInput.capacityGenerationHash,
+    observationId: projectionInput.observationId,
+  })
+  assert.deepEqual(projection, createCapacityWaitProjection(projectionInput))
+  assert.equal(capacityWaitStatusLine(projection), capacityWaitStatusLine(createIssueCapacityWaitProjection({
+    workRequest: {
+      requestId: projectionInput.workRequestId,
+      profileId: projectionInput.profileId,
+      workflowId: projectionInput.workflowId,
+      stageId: projectionInput.stageId,
+      definitionHash: projectionInput.definitionHash,
+      role: projectionInput.role,
+      repository: projectionInput.repository,
+      subject: { type: 'issue', number: projectionInput.subject.number },
+      revision: projectionInput.revision,
+      coordinationKey: projectionInput.coordinationKey,
+    },
+    issueNumber: projectionInput.subject.number,
+    subjectStateVersion: stateVersion,
+    routeDecision: projectionInput.routeDecision,
+    capacityGenerationHash: projectionInput.capacityGenerationHash,
+    observationId: projectionInput.observationId,
+  })))
+  assert.doesNotMatch(capacityWaitStatusLine(projection), /provider|model|account|credential|raw response/i)
+})
+
+test('Issue capacity-deferred publication fails closed without trusted route or generation evidence', () => {
+  const input = {
+    workRequest: {
+      requestId: projectionInput.workRequestId,
+      profileId: projectionInput.profileId,
+      workflowId: projectionInput.workflowId,
+      stageId: projectionInput.stageId,
+      definitionHash: projectionInput.definitionHash,
+      role: projectionInput.role,
+      repository: projectionInput.repository,
+      subject: { type: 'issue', number: projectionInput.subject.number },
+      revision: projectionInput.revision,
+      coordinationKey: projectionInput.coordinationKey,
+    },
+    issueNumber: projectionInput.subject.number,
+    subjectStateVersion: stateVersion,
+    routeDecision: projectionInput.routeDecision,
+    capacityGenerationHash: projectionInput.capacityGenerationHash,
+    observationId: projectionInput.observationId,
+  }
+  assert.throws(() => createIssueCapacityWaitProjection({ ...input, routeDecision: undefined }), /routeDecision/i)
+  assert.throws(() => createIssueCapacityWaitProjection({
+    ...input,
+    routeDecision: { ...projectionInput.routeDecision, workRequestId: 'other-request' },
+  }), /routeDecision/i)
+  assert.throws(() => createIssueCapacityWaitProjection({ ...input, capacityGenerationHash: undefined }), /capacityGenerationHash/i)
+  assert.throws(() => createIssueCapacityWaitProjection({ ...input, capacityGenerationHash: 'not-a-digest' }), /capacityGenerationHash/i)
 })
 test('CapacityWaitProjection rejects identity, subject, route, and secret-like fields', () => {
   const projection = createCapacityWaitProjection(projectionInput)

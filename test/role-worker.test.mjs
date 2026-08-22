@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -496,6 +497,64 @@ test('a pre-session capacity failure continues once to the next candidate', asyn
   assert.deepEqual(calls, ['first', 'second'])
 })
 
+test('capacity-deferred receipt hashes the post-failure capacity generation', async () => {
+  const provider = attemptProvider({ available: true, generation: 3 })
+  const inspect = provider.inspect
+  provider.inspect = async input => {
+    const value = await inspect(input)
+    return {
+      ...value,
+      capacityGenerationHash: value.generation === 3 ? 'a'.repeat(64) : 'b'.repeat(64),
+    }
+  }
+  const recordFailure = provider.recordFailure
+  provider.recordFailure = async input => {
+    await recordFailure(input)
+    provider.setGeneration(4)
+    provider.setAvailable(false)
+  }
+  const localConfig = config()
+  localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+
+  const result = await runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-post-failure', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => { throw quotaError() } },
+  })
+
+  const expected = createHash('sha256').update(JSON.stringify([{
+    generation: 4, generationHash: 'b'.repeat(64), state: 'disabled',
+  }])).digest('hex')
+  assert.equal(result.outcome, 'capacity-deferred')
+  assert.equal(result.capacityGenerationHash, expected)
+  assert.equal(provider.failures.length, 1)
+})
+
+test('capacity-deferred fails closed when the post-failure snapshot is unavailable', async () => {
+  const provider = attemptProvider({ available: true, generation: 3 })
+  const inspect = provider.inspect
+  const recordFailure = provider.recordFailure
+  provider.recordFailure = async input => {
+    await recordFailure(input)
+    provider.inspect = async () => { throw new Error('post-failure snapshot unavailable') }
+  }
+  const localConfig = config()
+  localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+
+  await assert.rejects(runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-missing-post-snapshot', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => { throw quotaError() } },
+  }), /post-failure snapshot unavailable/)
+  provider.inspect = inspect
+})
+
 test('a quota failure after onStarted returns the original failure without failover', async () => {
   const provider = attemptProvider()
   const calls = []
@@ -568,6 +627,21 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(committed, 0)
   assert.equal(provider.claims.size, 3)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
+  assert.equal(result.routeDecision.workRequestId, 'request-deferred')
+  assert.equal(result.routeDecision.role, 'change')
+  assert.match(result.capacityGenerationHash, /^[a-f0-9]{64}$/)
+  assert.match(result.observationId, /^capacity-deferred-local-/)
+  assert.doesNotMatch(JSON.stringify(result), /provider|model|account|credential/i)
+
+  const laterGeneration = await runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-deferred', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: attemptProvider({ available: false, generation: 4 }),
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => assert.fail('capacity-deferred must not start a Worker') },
+  })
+  assert.notEqual(laterGeneration.capacityGenerationHash, result.capacityGenerationHash)
 })
 
 test('recovery source identity reaches the original terminal journal and fills its missing commit once', async () => {
@@ -825,6 +899,9 @@ test('all previously capacity-deferred candidates replay as deferred without sta
   assert.equal(first.outcome, 'capacity-deferred')
   assert.equal(replay.outcome, 'capacity-deferred')
   assert.deepEqual(replay.unavailable, ['first', 'second', 'third'])
+  assert.equal(replay.capacityGenerationHash, first.capacityGenerationHash)
+  assert.equal(replay.observationId, first.observationId)
+  assert.deepEqual(replay.routeDecision, first.routeDecision)
   assert.equal(calls, 0)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
 })

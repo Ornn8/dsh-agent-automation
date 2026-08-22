@@ -157,6 +157,41 @@ export function createCapacityWaitProjection(value = {}) {
   return parseCapacityWaitProjection({ version: 1, ...value })
 }
 /**
+ * Build one Issue change-role capacity wait from trusted WorkRequest and receipt fields.
+ * @param {{ workRequest?: AnyObject, issueNumber?: unknown, subjectStateVersion?: unknown, routeDecision?: unknown, capacityGenerationHash?: unknown, observationId?: unknown }} input
+ * @returns {AnyObject}
+ */
+export function createIssueCapacityWaitProjection({
+  workRequest, issueNumber, subjectStateVersion, routeDecision, capacityGenerationHash, observationId,
+} = {}) {
+  const subject = workRequest && typeof workRequest === 'object' && !Array.isArray(workRequest)
+    && workRequest.subject && typeof workRequest.subject === 'object' && !Array.isArray(workRequest.subject)
+    ? /** @type {AnyObject} */ (workRequest.subject)
+    : undefined
+  if (!workRequest || typeof workRequest !== 'object' || Array.isArray(workRequest)
+    || workRequest.role !== 'change'
+    || !subject
+    || subject.type !== 'issue'
+    || subject.number !== issueNumber) {
+    throw new Error('Issue capacity wait requires the current change WorkRequest')
+  }
+  return createCapacityWaitProjection({
+    workRequestId: workRequest.requestId,
+    repository: workRequest.repository,
+    role: workRequest.role,
+    profileId: workRequest.profileId,
+    workflowId: workRequest.workflowId,
+    stageId: workRequest.stageId,
+    definitionHash: workRequest.definitionHash,
+    revision: workRequest.revision,
+    coordinationKey: workRequest.coordinationKey,
+    subject: { type: 'issue', number: issueNumber, stateVersion: subjectStateVersion },
+    routeDecision,
+    capacityGenerationHash,
+    observationId,
+  })
+}
+/**
  * Return the stable identity for one complete capacity resume projection.
  * @param {AnyObject} value
  * @returns {string}

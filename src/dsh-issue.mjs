@@ -25,6 +25,7 @@ import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-pro
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseAgentWorkRequest } from './work-request.mjs'
 import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
+import { capacityWaitStatusLine, createIssueCapacityWaitProjection } from './capacity-wait-projection.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
@@ -168,6 +169,23 @@ if (!governorRecords.some(record => (record.status === 'applied' || record.statu
   throw new Error(`Issue #${issueNumber} has no current controller-attested work admission`)
 }
 
+function issueCapacityWaitDetail(receipt) {
+  try {
+    return capacityWaitStatusLine(createIssueCapacityWaitProjection({
+      workRequest,
+      issueNumber,
+      subjectStateVersion: governorStateVersion,
+      routeDecision: receipt.routeDecision,
+      capacityGenerationHash: receipt.capacityGenerationHash,
+      observationId: receipt.observationId,
+    }))
+  } catch (cause) {
+    const error = new Error('Verified capacity-deferred receipt cannot be durably projected', { cause })
+    error.code = 'capacity-projection-invalid'
+    throw error
+  }
+}
+
 const agentDispatch = resolveAgentWorkDispatch(
   issue.body || '',
   issueNumber,
@@ -291,7 +309,7 @@ try {
 
   if (effectiveReceipt.outcome === 'capacity-deferred') {
     await upsertStatus(statusBody('capacity-waiting', branch,
-      'All admitted change Workers are currently unavailable due to verified capacity state; the original WorkRequest remains eligible.'))
+      issueCapacityWaitDetail(effectiveReceipt)))
     process.stdout.write(`Issue #${issueNumber} is waiting for an available change Worker; no product failure was recorded.\n`)
   } else if (workerReceipt.outcome === 'blocked' || effectiveReceipt.outcome === 'blocked') {
     await run(config.ghExecutable, [
@@ -331,9 +349,11 @@ try {
     process.stdout.write(`The change Worker produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
   }
 } catch (error) {
-  const failureClass = classifyAgentFailure(error)
-  await upsertStatus(statusBody('failed', branch, `The run failed: ${String(error.message).slice(0, 1000)}`, failureClass))
-    .catch(() => undefined)
+  if (error?.code !== 'capacity-projection-invalid') {
+    const failureClass = classifyAgentFailure(error)
+    await upsertStatus(statusBody('failed', branch, `The run failed: ${String(error.message).slice(0, 1000)}`, failureClass))
+      .catch(() => undefined)
+  }
   await run(config.ghExecutable, [
     'issue', 'edit', String(issueNumber), '--repo', repository,
     '--remove-label', 'agent/dsh', '--remove-label', 'agent/dsh-blocked',
