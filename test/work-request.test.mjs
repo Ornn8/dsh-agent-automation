@@ -195,6 +195,48 @@ test('configured Profiles bind one immutable contract identity to WorkRequests a
   }), /does not match the Profile configuration/)
 })
 
+test('review Stage WorkRequests rotate identity with the trusted verification contract', () => {
+  const requestInput = {
+    workflowId: 'default',
+    stageId: 'review',
+    repository: 'owner/repository',
+    subject: { type: 'pull-request', number: 12 },
+    revision: { base, head },
+    coordinationKey: 'owner/repository:github-pr-cycle:default',
+  }
+  const unconfigured = createStageWorkRequest({
+    ...profile,
+    ...requestInput,
+    requestId: `review-pr-12-${base}-${head}`,
+  })
+  const configured = createStageWorkRequest({
+    ...configuredProfile,
+    ...requestInput,
+    verificationContract: configuredProfile.verificationContract,
+  })
+  assert.equal(unconfigured.requestId, `review-pr-12-${base}-${head}`)
+  assert.notEqual(configured.requestId, unconfigured.requestId)
+  assert.deepEqual(configured.verificationContract, {
+    contractId: 'delivery-v1',
+    hash: verificationContractHash(contract),
+  })
+
+  const rotatedContract = { ...contract, contractId: 'delivery-v2' }
+  const rotated = {
+    ...configuredProfile,
+    verificationContract: { contract: rotatedContract, hash: verificationContractHash(rotatedContract) },
+  }
+  const rotatedRequest = createStageWorkRequest({
+    ...rotated,
+    ...requestInput,
+    verificationContract: rotated.verificationContract,
+  })
+  assert.notEqual(rotatedRequest.requestId, configured.requestId)
+  assert.throws(() => parseAgentWorkRequest(configured, {
+    trustedVerificationContract: rotated.verificationContract,
+  }), /does not match the trusted Profile/)
+})
+
 test('repository dispatch transports the complete WorkRequest', () => {
   const request = createReviewRepairRequest({
     ...profile, repository: 'owner/repository', pullRequestNumber: 12, base, head, reviewObservationId,
