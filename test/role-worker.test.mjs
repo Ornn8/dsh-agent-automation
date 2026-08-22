@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -494,6 +495,64 @@ test('a pre-session capacity failure continues once to the next candidate', asyn
 
   assert.equal(result.workerId, 'second')
   assert.deepEqual(calls, ['first', 'second'])
+})
+
+test('capacity-deferred receipt hashes the post-failure capacity generation', async () => {
+  const provider = attemptProvider({ available: true, generation: 3 })
+  const inspect = provider.inspect
+  provider.inspect = async input => {
+    const value = await inspect(input)
+    return {
+      ...value,
+      capacityGenerationHash: value.generation === 3 ? 'a'.repeat(64) : 'b'.repeat(64),
+    }
+  }
+  const recordFailure = provider.recordFailure
+  provider.recordFailure = async input => {
+    await recordFailure(input)
+    provider.setGeneration(4)
+    provider.setAvailable(false)
+  }
+  const localConfig = config()
+  localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+
+  const result = await runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-post-failure', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => { throw quotaError() } },
+  })
+
+  const expected = createHash('sha256').update(JSON.stringify([{
+    generation: 4, generationHash: 'b'.repeat(64), state: 'disabled',
+  }])).digest('hex')
+  assert.equal(result.outcome, 'capacity-deferred')
+  assert.equal(result.capacityGenerationHash, expected)
+  assert.equal(provider.failures.length, 1)
+})
+
+test('capacity-deferred fails closed when the post-failure snapshot is unavailable', async () => {
+  const provider = attemptProvider({ available: true, generation: 3 })
+  const inspect = provider.inspect
+  const recordFailure = provider.recordFailure
+  provider.recordFailure = async input => {
+    await recordFailure(input)
+    provider.inspect = async () => { throw new Error('post-failure snapshot unavailable') }
+  }
+  const localConfig = config()
+  localConfig.operations.routing.change.routes.default.selectors = [{ worker: 'first' }]
+
+  await assert.rejects(runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-missing-post-snapshot', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => { throw quotaError() } },
+  }), /post-failure snapshot unavailable/)
+  provider.inspect = inspect
 })
 
 test('a quota failure after onStarted returns the original failure without failover', async () => {

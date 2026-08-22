@@ -24,6 +24,7 @@ function stableDigest(value) {
 
 /** @param {{ generation: number, generationHash: string, state: string }[]} snapshots @returns {string} */
 function deferredCapacityGenerationHash(snapshots) {
+  if (snapshots.length === 0) throw new Error('Capacity deferral requires a trusted capacity snapshot')
   return stableDigest([...snapshots].sort((left, right) => left.generationHash.localeCompare(right.generationHash)
     || left.generation - right.generation || left.state.localeCompare(right.state)))
 }
@@ -549,7 +550,14 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
       } else {
         await recordAttemptFailure(state, prepared.claim, failure)
       }
-      recordDeferredCapacitySnapshot(deferredCapacitySnapshots, prepared.capacity)
+      const postFailureCapacity = await inspectCapacity(
+        state.provider,
+        state.config,
+        state.config.workers[prepared.workerId],
+        prepared.workerId,
+      )
+      unavailable.push(workerId)
+      recordDeferredCapacitySnapshot(deferredCapacitySnapshots, postFailureCapacity)
       probeFinalized = true
       await finishAttempt(state, prepared.claim, {
         outcome: 'capacity-failure', category: failure.category, reason: failure.reason,
@@ -559,6 +567,9 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
     }
   }
 
+  if (unavailable.length === 0 || deferredCapacitySnapshots.length !== unavailable.length) {
+    throw new Error('Capacity deferral requires exactly one trusted snapshot per unavailable candidate')
+  }
   return {
     version: 1,
     outcome: 'capacity-deferred',
