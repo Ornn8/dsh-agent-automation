@@ -23,25 +23,6 @@ jobs:
       capacity_resume_only: ${{ github.event_name == 'schedule' }}
       controller_login: ${{ vars.AGENT_AUTOMATION_CONTROLLER_LOGIN }}
 
-  issue-capacity-resume:
-    if: needs.backlog.outputs.resume_type == 'issue'
-    needs: backlog
-    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-issue.yml@{{CONTROLLER_SHA}}
-    with:
-      work_request: ${{ needs.backlog.outputs.work_request }}
-      capacity_resume_id: ${{ needs.backlog.outputs.capacity_resume_id }}
-
-  repair-capacity-resume:
-    if: needs.backlog.outputs.resume_type == 'repair'
-    needs: backlog
-    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-repair.yml@{{CONTROLLER_SHA}}
-    with:
-      pull_request_number: ${{ fromJSON(needs.backlog.outputs.pull_request_number) }}
-      head_sha: ${{ needs.backlog.outputs.head_sha }}
-      request_id: ${{ needs.backlog.outputs.capacity_resume_id }}
-      capacity_resume_id: ${{ needs.backlog.outputs.capacity_resume_id }}
-      work_request: ${{ needs.backlog.outputs.work_request }}
-
   review-reconcile:
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/reconcile-reviews.yml@{{CONTROLLER_SHA}}
 

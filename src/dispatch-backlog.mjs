@@ -4,7 +4,6 @@ import {
   requiredEnv,
   run,
 } from './common.mjs'
-import { appendFile } from 'node:fs/promises'
 import {
   activeWorkflowIssueNumbers,
   independentIssueObservationNumber,
@@ -77,6 +76,10 @@ const capacityRunNumber = (() => {
 })()
 const capacityRotatingPage = capacityResumeOnly ? ((capacityRunNumber - 1) % 16) + 1 : 1
 const capacityPageSize = 100
+const capacityResumeWorkflows = Object.freeze({
+  issue: 'agent-issues.yml',
+  repair: 'agent-pr-rework.yml',
+})
 const trustedControllerLogin = capacityResumeOnly ? requiredEnv('TRUSTED_CONTROLLER_LOGIN') : ''
 if (capacityResumeOnly && !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(trustedControllerLogin)) {
   throw new Error('TRUSTED_CONTROLLER_LOGIN is invalid')
@@ -267,8 +270,7 @@ async function currentDefaultBranchCommit() {
   return { name: repositoryState.default_branch, sha: commit.sha }
 }
 
-async function currentCapacityWaits(capacity) {
-  const defaultBranch = await currentDefaultBranchCommit()
+async function currentCapacityWaits(capacity, defaultBranch) {
   const profileCache = new Map()
   const currentIssues = new Map(capacity.issues.map(issue => [issue.number, issue]))
   const currentPullRequests = new Map(capacity.pullRequests.map(pullRequest => [pullRequest.number, pullRequest]))
@@ -364,17 +366,30 @@ function capacityResumeOutput(work) {
   }
 }
 
-async function writeCapacityOutputs(output = null) {
-  const values = {
-    resume_type: output?.type || '',
-    work_request: output ? JSON.stringify(output.work_request) : '',
-    capacity_resume_id: output?.capacity_resume_id || '',
-    pull_request_number: output?.pull_request_number ? String(output.pull_request_number) : '',
-    head_sha: output?.head_sha || '',
-    resume_json: output ? JSON.stringify(output) : '',
+async function dispatchCapacityResume(output, ref) {
+  const workflowFile = capacityResumeWorkflows[output.type]
+  if (!workflowFile || typeof ref !== 'string' || !ref.trim() || !/^[0-9a-f]{40}$/.test(output.head_sha)
+    || (output.type === 'repair' && !Number.isSafeInteger(output.pull_request_number))) {
+    throw new Error('Capacity resume workflow dispatch identity is invalid')
   }
-  const outputPath = process.env.GITHUB_OUTPUT?.trim()
-  if (outputPath) await appendFile(outputPath, `${Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n')}\n`)
+  const inputs = output.type === 'issue'
+    ? {
+        work_request: JSON.stringify(output.work_request),
+        capacity_resume_id: output.capacity_resume_id,
+      }
+    : {
+        pull_request_number: String(output.pull_request_number),
+        head_sha: output.head_sha,
+        request_id: output.capacity_resume_id,
+        work_request: JSON.stringify(output.work_request),
+        capacity_resume_id: output.capacity_resume_id,
+      }
+  await run(githubExecutable, [
+    'api', '--method', 'POST', `repos/${repository}/actions/workflows/${workflowFile}/dispatches`, '--input', '-',
+  ], {
+    env: githubEnvironment,
+    input: JSON.stringify({ ref, inputs }),
+  })
 }
 
 async function writeGovernorRecord(number, record) {
@@ -471,8 +486,9 @@ async function recordApplied(work, admission) {
   })
 }
 
+const capacityDefaultBranch = capacityResumeOnly ? await currentDefaultBranchCommit() : null
 const capacity = capacityResumeOnly ? await capacitySnapshot() : null
-const capacityWaits = capacityResumeOnly ? await currentCapacityWaits(capacity) : null
+const capacityWaits = capacityResumeOnly ? await currentCapacityWaits(capacity, capacityDefaultBranch) : null
 const pullRequests = capacityResumeOnly
   ? capacity.pullRequests
   : await ghPages(`repos/${repository}/pulls?state=open&per_page=${capacityPageSize}`, 'open pull requests')
@@ -497,7 +513,6 @@ const work = capacityResumeOnly
   })
 
 if (!work) {
-  if (capacityResumeOnly) await writeCapacityOutputs()
   process.stdout.write('No eligible DSH backlog work is ready.\n')
   process.exit(0)
 }
@@ -541,8 +556,9 @@ if (work.type === 'issue') {
 
 if (capacityResumeOnly) {
   const output = capacityResumeOutput(work)
-  await writeCapacityOutputs(output)
-  process.stdout.write(`${JSON.stringify(output)}\n`)
+  if (!capacityDefaultBranch?.name) throw new Error('Capacity resume default branch is missing')
+  await dispatchCapacityResume(output, capacityDefaultBranch.name)
+  process.stdout.write(`Dispatched capacity resume for ${output.type} #${work.number} via ${capacityResumeWorkflows[output.type]}.\n`)
   process.exit(0)
 }
 

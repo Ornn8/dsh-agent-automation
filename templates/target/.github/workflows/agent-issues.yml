@@ -1,8 +1,21 @@
 name: Agent Issues
+run-name: >-
+  Agent Issues request:${{ github.event_name == 'workflow_dispatch' && (inputs.capacity_resume_id || github.run_id) || github.event_name == 'repository_dispatch' && (github.event.client_payload.work_request.requestId || github.run_id) || github.run_id }}
 
 on:
   push:
   workflow_dispatch:
+    inputs:
+      work_request:
+        description: Validated capacity-resume WorkRequest JSON.
+        required: false
+        type: string
+        default: ''
+      capacity_resume_id:
+        description: Exact capacity-wait projection identity.
+        required: false
+        type: string
+        default: ''
   repository_dispatch:
     types: [agent_work_requested, agent_backlog_reconcile, automation_fault_recovered]
   issues:
@@ -16,6 +29,10 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
+
+concurrency:
+  group: agent-issues-${{ github.repository }}-${{ github.event_name == 'workflow_dispatch' && (inputs.capacity_resume_id || github.run_id) || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   resume:
@@ -33,7 +50,9 @@ jobs:
     if: >-
       (github.event_name == 'push'
         && github.ref_name == github.event.repository.default_branch)
-      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'workflow_dispatch'
+        && inputs.capacity_resume_id == ''
+        && inputs.work_request == '')
       || (github.event_name == 'repository_dispatch' && github.event.action == 'agent_backlog_reconcile')
       || (github.event_name == 'issues' && contains(fromJSON('["opened","reopened","edited","closed"]'), github.event.action))
       || (github.event_name == 'issues'
@@ -57,13 +76,17 @@ jobs:
 
   dsh-issue:
     if: >-
-      github.event_name == 'repository_dispatch'
-      && github.event.client_payload.work_request.version == 2
-      && github.event.client_payload.work_request.repository == github.repository
-      && github.event.client_payload.work_request.subject.type == 'issue'
+      (github.event_name == 'repository_dispatch'
+        && github.event.client_payload.work_request.version == 2
+        && github.event.client_payload.work_request.repository == github.repository
+        && github.event.client_payload.work_request.subject.type == 'issue')
+      || (github.event_name == 'workflow_dispatch'
+        && inputs.work_request != ''
+        && inputs.capacity_resume_id != '')
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-issue.yml@{{CONTROLLER_SHA}}
     with:
-      work_request: ${{ toJSON(github.event.client_payload.work_request) }}
+      work_request: ${{ github.event_name == 'workflow_dispatch' && inputs.work_request || toJSON(github.event.client_payload.work_request) }}
+      capacity_resume_id: ${{ github.event_name == 'workflow_dispatch' && inputs.capacity_resume_id || '' }}
 
   reconcile-reviews:
     if: >-

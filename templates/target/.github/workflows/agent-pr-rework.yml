@@ -1,10 +1,32 @@
 name: Agent PR Rework
 run-name: >-
-  Agent PR Rework request:${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || 'legacy') || github.run_id }}
+  Agent PR Rework request:${{ github.event_name == 'workflow_dispatch' && (inputs.capacity_resume_id || inputs.request_id || github.run_id) || github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || 'legacy') || github.run_id }}
 
 # Configure DSH_AUTOMATION_CI_WORKFLOWS before enabling CI repair requests.
 
 on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Exact pull request number for a capacity resume.
+        required: true
+        type: number
+      head_sha:
+        description: Exact pull request head for a capacity resume.
+        required: true
+        type: string
+      request_id:
+        description: Capacity resume request identity.
+        required: true
+        type: string
+      work_request:
+        description: Validated capacity-resume WorkRequest JSON.
+        required: true
+        type: string
+      capacity_resume_id:
+        description: Exact capacity-wait projection identity.
+        required: true
+        type: string
   issue_comment:
     types: [created]
   repository_dispatch:
@@ -18,10 +40,27 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: agent-pr-rework-${{ github.repository }}-${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || github.run_id) || github.run_id }}
+  group: agent-pr-rework-${{ github.repository }}-${{ github.event_name == 'workflow_dispatch' && (inputs.capacity_resume_id || inputs.request_id || github.run_id) || github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || github.run_id) || github.run_id }}
   cancel-in-progress: false
 
 jobs:
+  dsh-capacity-repair:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && inputs.pull_request_number != ''
+      && inputs.head_sha != ''
+      && inputs.request_id != ''
+      && inputs.work_request != ''
+      && inputs.capacity_resume_id != ''
+      && inputs.request_id == inputs.capacity_resume_id
+    uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/dsh-repair.yml@{{CONTROLLER_SHA}}
+    with:
+      pull_request_number: ${{ inputs.pull_request_number }}
+      head_sha: ${{ inputs.head_sha }}
+      request_id: ${{ inputs.request_id }}
+      capacity_resume_id: ${{ inputs.capacity_resume_id }}
+      work_request: ${{ inputs.work_request }}
+
   advancement-repair-reconcile:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'agent-review-reconcile'
     uses: {{CONTROLLER_REPOSITORY}}/.github/workflows/reconcile-reviews.yml@{{CONTROLLER_SHA}}

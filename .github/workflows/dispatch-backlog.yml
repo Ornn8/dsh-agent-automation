@@ -18,25 +18,6 @@ on:
         required: false
         default: ''
         type: string
-    outputs:
-      resume_type:
-        description: Closed capacity-resume target type, or empty when no waiter is selected.
-        value: ${{ jobs.dispatch.outputs.resume_type }}
-      work_request:
-        description: Exact validated WorkRequest JSON for the selected capacity waiter.
-        value: ${{ jobs.dispatch.outputs.work_request }}
-      capacity_resume_id:
-        description: Exact capacity projection identity for the selected waiter.
-        value: ${{ jobs.dispatch.outputs.capacity_resume_id }}
-      pull_request_number:
-        description: Exact pull request number for a repair waiter, or empty for an Issue.
-        value: ${{ jobs.dispatch.outputs.pull_request_number }}
-      head_sha:
-        description: Exact selected subject head or Issue WorkRequest revision head.
-        value: ${{ jobs.dispatch.outputs.head_sha }}
-      resume_json:
-        description: Bounded machine JSON for the selected capacity waiter.
-        value: ${{ jobs.dispatch.outputs.resume_json }}
 
 concurrency:
   group: dsh-backlog-${{ github.repository }}
@@ -47,15 +28,8 @@ jobs:
     name: dsh/backlog-dispatch
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    outputs:
-      resume_type: ${{ steps.dispatch.outputs.resume_type }}
-      work_request: ${{ steps.dispatch.outputs.work_request }}
-      capacity_resume_id: ${{ steps.dispatch.outputs.capacity_resume_id }}
-      pull_request_number: ${{ steps.dispatch.outputs.pull_request_number }}
-      head_sha: ${{ steps.dispatch.outputs.head_sha }}
-      resume_json: ${{ steps.dispatch.outputs.resume_json }}
     permissions:
-      actions: read
+      actions: write
       checks: read
       contents: write
       issues: write
