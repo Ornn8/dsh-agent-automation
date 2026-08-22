@@ -3,7 +3,6 @@ name: Controller CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
-  push:
   workflow_dispatch:
 
 permissions:

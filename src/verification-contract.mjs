@@ -100,6 +100,34 @@ export function parseVerificationContract(value) {
   return deepFreeze(normalized)
 }
 
+function requiredCheckContexts(value, name) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_IDENTIFIERS) {
+    throw new Error(`${name} must contain from 1 to ${MAX_IDENTIFIERS} checks`)
+  }
+  return value.map((item, index) => {
+    const context = typeof item === 'string' ? item : item?.context
+    if (typeof context !== 'string' || !context.trim() || context.trim().length > MAX_IDENTIFIER_LENGTH
+      || /[\r\n\u0000-\u001f]/.test(context)) {
+      throw new Error(`${name}[${index}] must contain one bounded check context`)
+    }
+    return context.trim()
+  }).sort()
+}
+
+/** Require configured exact-head check contexts to match a trusted contract. */
+export function assertVerificationContractChecks({ trustedVerificationContract, configuredRequiredChecks }) {
+  if (trustedVerificationContract === undefined) return
+  const contract = parseVerificationContract(trustedVerificationContract?.contract)
+  if (trustedVerificationContract.hash !== verificationContractHash(contract)) {
+    throw new Error('Trusted Verification Contract hash does not match the contract contents')
+  }
+  const expected = requiredCheckContexts(contract.requiredChecks, 'Verification Contract requiredChecks')
+  const actual = requiredCheckContexts(configuredRequiredChecks, 'Configured required checks')
+  if (expected.length !== actual.length || expected.some((context, index) => context !== actual[index])) {
+    throw new Error('Configured required checks do not match trusted Verification Contract')
+  }
+}
+
 /** Return the stable SHA-256 identity of one normalized verification contract. */
 export function verificationContractHash(value) {
   return createHash('sha256').update(canonicalJson(parseVerificationContract(value))).digest('hex')
