@@ -224,3 +224,15 @@ test('enforces bounded Profile, Stage, coordination, checks, text, and retry val
   description.workflows.delivery.description = 'line one\nline two'
   assert.throws(() => parseWorkflowDefinition(description), /one-line text/)
 })
+
+test('normalizes an explicitly configured verification-contract locator', () => {
+  const definition = validDefinition()
+  definition.verificationContract = { path: 'verification.json' }
+  assert.deepEqual(parseWorkflowDefinition(definition).verificationContract, {
+    path: 'verification.json',
+  })
+  assert.throws(() => parseWorkflowDefinition({
+    ...definition,
+    verificationContract: { path: '../head-only.json' },
+  }), /path/)
+})
