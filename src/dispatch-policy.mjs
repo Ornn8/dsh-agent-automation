@@ -1,5 +1,6 @@
 import { trustedAssociation } from './common.mjs'
 import { parseAgentWork } from './agent-work.mjs'
+import { parseCapacityWaitProjection } from './capacity-wait-projection.mjs'
 import { hasTrustedExactReviewRun } from './landing-policy.mjs'
 
 function labelNames(item) {
@@ -125,6 +126,57 @@ export function independentIssueObservationNumber({ work, governorAction }) {
   return work?.type === 'issue' && governorAction === 'record-candidate'
     ? work.number
     : null
+}
+
+function candidateRepository(source, subjectType, trustedRepository) {
+  if (subjectType === 'pull-request') return source.head?.repo?.full_name
+  const direct = typeof source.repository === 'string'
+    ? source.repository
+    : source.repository?.full_name
+  return direct || trustedRepository
+}
+
+/** Select one exact, still-open capacity-waiting subject for a later bounded resume. */
+export function selectCapacityWaitingWork({ repository, pullRequests = [], issues = [], capacityWaits = [] } = {}) {
+  if (typeof repository !== 'string' || !repository) return null
+  const pullRequestByNumber = new Map(pullRequests.map(value => [value.number, value]))
+  const issueByNumber = new Map(issues.map(value => [value.number, value]))
+  const candidates = capacityWaits
+    .map(wait => {
+      let projection
+      try {
+        projection = parseCapacityWaitProjection(wait?.projection)
+      } catch {
+        return null
+      }
+      if (projection.repository !== repository
+        || (wait.repository !== undefined && wait.repository !== repository)) return null
+      if (projection.role !== 'change' || wait.currentStateVersion !== projection.subject.stateVersion) return null
+      const source = projection.subject.type === 'pull-request'
+        ? pullRequestByNumber.get(projection.subject.number)
+        : issueByNumber.get(projection.subject.number)
+      if (!source || source.state !== 'open') return null
+      if (candidateRepository(source, projection.subject.type, repository) !== repository) return null
+      if (projection.subject.type === 'pull-request') {
+        if (source.draft
+          || source.base?.sha !== projection.subject.base
+          || source.head?.sha !== projection.subject.head
+          || labelNames(source).has('automation/paused')
+          || labelNames(source).has('automation/repairing')
+          || labelNames(source).has('automation/repair-blocked')
+          || labelNames(source).has('automation/ci-baseline')
+          || labelNames(source).has('agent/dsh-failed')) return null
+        return { type: 'repair', number: source.number, head: source.head.sha, projection: wait.projection }
+      }
+      if (labelNames(source).has('automation/paused')
+        || labelNames(source).has('agent/dsh-failed')
+        || labelNames(source).has('agent/dsh-blocked')
+        || pullRequests.some(pullRequest => closesIssue(pullRequest, source.number))) return null
+      return { type: 'issue', number: source.number, projection: wait.projection }
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.number - right.number)
+  return candidates[0] || null
 }
 
 /** Select one safe unit of backlog work, preferring blocked PR repairs. */
