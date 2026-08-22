@@ -55,6 +55,7 @@ test('controller CI rejects pull requests that exceed the repository review budg
   assert.match(workflow, /name: pull request scope/)
   assert.match(workflow, /fetch-depth: 0/)
   assert.match(workflow, /node scripts\/check-pr-size\.mjs/)
+  assert.match(workflow, /PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}/)
   assert.match(workflow, /needs: \[pull-request-scope, test\]/)
   assert.match(gate, /git', \['diff', '--numstat', '--find-renames'/)
 })
