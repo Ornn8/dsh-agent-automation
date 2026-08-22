@@ -1,3 +1,5 @@
+import { Lexer } from 'marked'
+
 export const TARGET_PULL_REQUEST_FILES = 10
 export const TARGET_PULL_REQUEST_CHANGED_LINES = 500
 export const MAX_PULL_REQUEST_FILES = 40
@@ -18,85 +20,91 @@ function numstatCount(value, name) {
   return Number.parseInt(value, 10)
 }
 
-function visibleMarkdownLines(body) {
-  const lines = String(body ?? '').split(/\r?\n/)
-  const visible = []
-  let fence = null
-  let commentOpen = false
-
-  for (const line of lines) {
-    if (fence) {
-      const closing = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/)
-      if (closing && closing[1][0] === fence.character && closing[1].length >= fence.length) fence = null
-      continue
-    }
-
-    if (!commentOpen && !/^(?: {4,}|\t)/.test(line)) {
-      const opening = line.match(/^ {0,3}(`{3,}|~{3,})(?:.*)$/)
-      if (opening) {
-        fence = { character: opening[1][0], length: opening[1].length }
-        continue
-      }
-    }
-
-    if (!commentOpen && /^(?: {4,}|\t)/.test(line)) continue
-
-    let index = 0
-    let output = ''
-    while (index < line.length) {
-      if (commentOpen) {
-        const close = line.indexOf('-->', index)
-        if (close < 0) {
-          index = line.length
-          break
-        }
-        commentOpen = false
-        index = close + 3
-        continue
-      }
-
-      const open = line.indexOf('<!--', index)
-      if (open < 0) {
-        output += line.slice(index)
-        break
-      }
-      output += line.slice(index, open)
-      const close = line.indexOf('-->', open + 4)
-      if (close < 0) {
-        commentOpen = true
-        index = line.length
-        break
-      }
-      index = close + 3
-    }
-    visible.push(/^(?: {4,}|\t)/.test(output) ? '' : output)
-  }
-
-  return { lines: visible, invalid: Boolean(fence || commentOpen) }
+function commentDelimitersAreBalanced(value) {
+  const openings = value.match(/<!--/g)?.length ?? 0
+  const closings = value.match(/-->/g)?.length ?? 0
+  return openings === closings
 }
 
-function parseHeading(line) {
-  const match = line.match(/^ {0,3}(#{1,6})(?:[ \t]+(.*))?[ \t]*$/)
-  if (!match) return null
-  const text = (match[2] ?? '').replace(/[ \t]+#+[ \t]*$/, '').trim()
-  return { level: match[1].length, text }
+function inlineText(tokens) {
+  let text = ''
+  for (const token of tokens ?? []) {
+    if (token.type === 'html' || token.type === 'image') continue
+    if (Array.isArray(token.tokens)) {
+      text += inlineText(token.tokens)
+    } else if (typeof token.text === 'string') {
+      text += token.text
+    }
+  }
+  return text
+}
+
+function tokenChildren(token) {
+  const children = []
+  if (Array.isArray(token.tokens)) children.push(...token.tokens)
+  if (Array.isArray(token.items)) children.push(...token.items)
+  if (Array.isArray(token.header)) children.push(...token.header)
+  if (Array.isArray(token.rows)) children.push(...token.rows.flat())
+  return children
+}
+
+function fencedCodeIsClosed(token) {
+  const opening = String(token.raw ?? '').match(/^ {0,3}(`{3,}|~{3,})[^\r\n]*(?:\r?\n|$)/)
+  if (!opening) return true
+  const marker = opening[1][0]
+  const closing = new RegExp(`^ {0,3}${marker}{${opening[1].length},}[ \\t]*$`, 'm')
+  return closing.test(String(token.raw).slice(opening[0].length))
+}
+
+function markdownEvents(body) {
+  const events = []
+  let invalid = false
+
+  function visit(tokens) {
+    for (const token of tokens ?? []) {
+      if (token.type === 'html') {
+        if (!commentDelimitersAreBalanced(token.raw ?? '')) invalid = true
+        continue
+      }
+      if (token.type === 'heading') {
+        events.push({ type: 'heading', level: token.depth, text: inlineText(token.tokens) })
+        continue
+      }
+      if (token.type === 'code') {
+        if (!fencedCodeIsClosed(token)) invalid = true
+        continue
+      }
+      if (token.type === 'image') continue
+
+      const children = tokenChildren(token)
+      if (children.length) {
+        visit(children)
+      } else if (typeof token.text === 'string' && (token.type === 'text' || token.type === 'codespan' || token.type === 'paragraph')) {
+        events.push({ type: 'text', text: token.text })
+      }
+    }
+  }
+
+  try {
+    visit(Lexer.lex(String(body ?? ''), { gfm: true }))
+  } catch {
+    invalid = true
+  }
+  return { events, invalid }
 }
 
 function splitRationale(body) {
-  const parsed = visibleMarkdownLines(body)
+  const parsed = markdownEvents(body)
   if (parsed.invalid) return ''
 
-  const headings = parsed.lines.map(parseHeading)
-  const rationaleHeading = /^split rationale(?:[ \t]*:[ \t]*(.*)|[ \t]+(.*))?$/i
-  const start = headings.findIndex(heading => heading && heading.level === 2 && rationaleHeading.test(heading.text))
+  const start = parsed.events.findIndex(event => event.type === 'heading' && event.level === 2 && event.text.replace(/\s+/g, ' ').trim().toLowerCase() === 'split rationale')
   if (start < 0) return ''
 
-  const match = headings[start].text.match(rationaleHeading)
-  const nextHeading = headings.findIndex((heading, index) => index > start && heading)
-  const section = parsed.lines.slice(start + 1, nextHeading < 0 ? parsed.lines.length : nextHeading)
-  const inline = (match?.[1] ?? match?.[2] ?? '').trim()
-  if (inline) section.unshift(inline)
-
+  const section = []
+  for (const event of parsed.events.slice(start + 1)) {
+    if (event.type === 'heading' && event.level <= 2) break
+    if (event.type === 'text') section.push(event.text)
+  }
   const rationale = section.join('\n').trim()
   if (!rationale || /^\[[^\]]+\]$/.test(rationale) || /^(?:none|n\/a|not applicable|todo|tbd)$/i.test(rationale)) {
     return ''

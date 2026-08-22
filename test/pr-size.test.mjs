@@ -122,6 +122,36 @@ test('pull request size fails closed for an unclosed fence and an indented pseud
   assert.equal(decision.accepted, false)
 })
 
+test('pull request size does not promote a heading inside an unclosed list fence', () => {
+  const decision = evaluatePullRequestSize({
+    files: 11,
+    changedLines: 1,
+    pullRequestBody: '- ```\n  ## Split rationale\n  Reason',
+  })
+
+  assert.equal(decision.accepted, false)
+})
+
+test('pull request size does not promote a heading adjacent to an inline HTML comment', () => {
+  const decision = evaluatePullRequestSize({
+    files: 11,
+    changedLines: 1,
+    pullRequestBody: '<!--x-->## Split rationale\nReason',
+  })
+
+  assert.equal(decision.accepted, false)
+})
+
+test('pull request size fails closed when visible rationale is followed by an unclosed fence', () => {
+  const decision = evaluatePullRequestSize({
+    files: 11,
+    changedLines: 1,
+    pullRequestBody: '## Split rationale\nVisible text.\n```markdown\nunfinished',
+  })
+
+  assert.equal(decision.accepted, false)
+})
+
 test('pull request size does not treat four-space indented headings or content as rationale', () => {
   for (const pullRequestBody of [
     '    ## Split rationale\nThis is code, not a heading.',
@@ -167,4 +197,14 @@ test('pull request size accepts exact absolute caps with a valid split rationale
   assert.equal(decision.accepted, true)
   assert.match(decision.message, /actual 40 files and 2000 changed lines/)
   assert.match(decision.message, /absolute <=40 files and <=2000 changed lines/)
+})
+
+test('pull request size accepts a legal closing-hash heading with visible rationale', () => {
+  const decision = evaluatePullRequestSize({
+    files: 11,
+    changedLines: 1,
+    pullRequestBody: '## Split rationale ##\nThis is one atomic migration.',
+  })
+
+  assert.equal(decision.accepted, true)
 })

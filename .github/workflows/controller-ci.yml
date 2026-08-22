@@ -21,6 +21,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Install controller dependencies for pull request scope
+        if: github.event_name == 'pull_request'
+        run: npm ci --ignore-scripts
       - name: Enforce reviewable pull request size
         if: github.event_name == 'pull_request'
         env:
