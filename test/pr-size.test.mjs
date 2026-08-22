@@ -3,19 +3,80 @@ import test from 'node:test'
 
 import { evaluatePullRequestSize, measureGitNumstat } from '../src/pull-request-size.mjs'
 
-test('pull request size accepts reviewable changes and rejects either exceeded limit', () => {
-  assert.deepEqual(evaluatePullRequestSize({ files: 40, changedLines: 2_000 }), {
-    accepted: true,
-    message: 'Pull request size is reviewable: 40 files and 2000 changed lines.',
+test('pull request size rejects an above-target change without a split rationale', () => {
+  const decision = evaluatePullRequestSize({
+    files: 8,
+    changedLines: 501,
   })
-  assert.deepEqual(evaluatePullRequestSize({ files: 41, changedLines: 1 }), {
-    accepted: false,
-    message: 'Pull request size exceeds the 40-file limit: 41 files and 1 changed line. Split the change into independently reviewable pull requests.',
+
+  assert.equal(decision.accepted, false)
+})
+
+test('pull request size reports actual counts and both thresholds', () => {
+  const decision = evaluatePullRequestSize({ files: 10, changedLines: 500 })
+
+  assert.equal(decision.accepted, true)
+  assert.match(decision.message, /actual 10 files and 500 changed lines/)
+  assert.match(decision.message, /target <=10 files and <=500 changed lines/)
+  assert.match(decision.message, /absolute <=40 files and <=2000 changed lines/)
+})
+
+test('pull request size requires a visible rationale for an above-target change', () => {
+  const rationale = '## Split rationale\nThe change is one atomic migration and cannot be split without breaking its verification path.'
+  const accepted = evaluatePullRequestSize({ files: 8, changedLines: 501, pullRequestBody: rationale })
+  assert.equal(accepted.accepted, true)
+
+  for (const pullRequestBody of ['', '## Split rationale\n', '## Split rationale\n<!-- explain here -->', '## Split rationale\nTBD']) {
+    const rejected = evaluatePullRequestSize({ files: 8, changedLines: 501, pullRequestBody })
+    assert.equal(rejected.accepted, false, pullRequestBody)
+    assert.match(rejected.message, /non-empty.*split rationale/i, pullRequestBody)
+  }
+})
+
+test('pull request size requires an exact visible level-two heading in GFM', () => {
+  const rationale = 'The change is one atomic migration and cannot be split.'
+  const rejectedBodies = [
+    `# Split rationale\n${rationale}`,
+    `### Split rationale\n${rationale}`,
+    `    ## Split rationale\n${rationale}`,
+    `<!--\n## Split rationale\n${rationale}\n-->`,
+    `\`\`\`\n## Split rationale\n${rationale}\n\`\`\``,
+    `- item\n  ## Split rationale\n  ${rationale}`,
+    `- item\n  \`\`\`\n  ## Split rationale\n  ${rationale}`,
+    `## Split rationale <!-- hidden -->\n${rationale}`,
+    `## Split rationale\n<!-- hidden -->\n${rationale}`,
+    `## Split rationale\n${rationale}\n<!--`,
+    `## Split rationale\n${rationale}\n\`\`\``,
+  ]
+
+  for (const pullRequestBody of rejectedBodies) {
+    assert.equal(evaluatePullRequestSize({ files: 8, changedLines: 501, pullRequestBody }).accepted, false, pullRequestBody)
+  }
+  assert.equal(evaluatePullRequestSize({
+    files: 8,
+    changedLines: 501,
+    pullRequestBody: `## Split rationale ##\n${rationale}`,
+  }).accepted, true)
+})
+
+test('pull request size rejects absolute caps even with a rationale', () => {
+  const pullRequestBody = '## Split rationale\nThe change is one atomic migration and cannot be split.'
+  for (const counts of [{ files: 41, changedLines: 1 }, { files: 1, changedLines: 2_001 }]) {
+    const decision = evaluatePullRequestSize({ ...counts, pullRequestBody })
+    assert.equal(decision.accepted, false, JSON.stringify(counts))
+    assert.match(decision.message, /absolute .*cap/i)
+  }
+})
+
+test('pull request size accepts exact absolute caps with a rationale', () => {
+  const decision = evaluatePullRequestSize({
+    files: 40,
+    changedLines: 2_000,
+    pullRequestBody: '## Split rationale\nThe change is one atomic migration and cannot be split.',
   })
-  assert.deepEqual(evaluatePullRequestSize({ files: 1, changedLines: 2_001 }), {
-    accepted: false,
-    message: 'Pull request size exceeds the 2000-line limit: 1 file and 2001 changed lines. Split the change into independently reviewable pull requests.',
-  })
+
+  assert.equal(decision.accepted, true)
+  assert.match(decision.message, /absolute <=40 files and <=2000 changed lines/)
 })
 
 test('git numstat counts files and text changes without treating binary bytes as lines', () => {
