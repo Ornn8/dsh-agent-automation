@@ -1209,6 +1209,15 @@ test('an opened PR recovers its custom workflow from the linked Issue Worker rec
   assert.match(issueSource, /workRequest\.workflowId/)
 })
 
+test('issue and transported repair Worker payloads carry loaded verification context only when configured', async () => {
+  const issueSource = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
+  const repairSource = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')
+  assert.match(issueSource, /verificationContract: profile\.verificationContract/)
+  assert.match(repairSource, /verificationContract: transportedProfile\.verificationContract/)
+  assert.match(issueSource, /profile\.verificationContract \?/)
+  assert.match(repairSource, /transportedProfile\?\.verificationContract \?/)
+})
+
 test('scheduled reconciliation recovers a custom repair workflow after a new head', async () => {
   const source = await readFile(new URL('../src/reconcile-reviews.mjs', import.meta.url), 'utf8')
   const repairSource = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')

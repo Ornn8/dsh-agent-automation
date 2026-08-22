@@ -16,6 +16,8 @@ This Module owns the stable invocation and terminal receipt Interface. Its Depth
 
 Completed Agent automation results support a strict v2 verification receipt containing one exact lowercase revision, one trusted Verification Contract identity, the contract-selected procedure or entrypoint, a `passed` result, and bounded evidence identifiers. The pure binding helper compares that receipt with the expected revision and trusted contract; v1 completed and blocked results remain an explicit finite migration input, and this slice does not enforce v2 in Workers, CI, review, or landing.
 
+When a trusted target Profile has a loaded Verification Contract, the issue and transported repair Worker Skill payloads carry that immutable context as structured data. Unconfigured Profiles omit it, and repair paths do not reread candidate content to reconstruct it.
+
 ### Agent Adapters
 
 Adapters translate the Worker Interface to one runtime:

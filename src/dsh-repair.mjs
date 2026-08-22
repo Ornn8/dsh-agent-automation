@@ -653,6 +653,7 @@ try {
     expectedHead,
     requestKind: repairClass === 'automatic-ci' ? 'ci' : mergeRequest ? 'merge-conflict' : explicitRequest ? 'explicit' : 'review',
     requestId: executionRequestId || `review-${expectedHead}`,
+    ...(transportedProfile?.verificationContract ? { verificationContract: transportedProfile.verificationContract } : {}),
     ...(repairClass === 'automatic-ci' ? { ciRunId: ciRun.id, ciRunAttempt: ciRun.run_attempt } : {}),
   })
 
