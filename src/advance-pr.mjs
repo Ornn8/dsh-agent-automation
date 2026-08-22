@@ -21,6 +21,7 @@ import { parseReviewCheckIdentity } from './review-check.mjs'
 import { terminalReviewSource, trustedReviewRunProfile } from './advancement-source.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { trustedWorkerIdentity } from './workflow-identity.mjs'
+import { assertVerificationContractChecks } from './verification-contract.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const requestedNumber = Number.parseInt(process.env.PR_NUMBER || '0', 10)
@@ -285,6 +286,10 @@ if (persistedIdentity && profile.definitionHash !== persistedIdentity.definition
   throw new Error('Worker status Profile hash does not match the trusted target base')
 }
 const requiredCheckDefinitions = configuredRequiredChecks(requiredChecks)
+assertVerificationContractChecks({
+  trustedVerificationContract: profile.verificationContract,
+  configuredRequiredChecks: requiredChecks,
+})
 if (verifiedTerminalReviewSource) {
   const sourceChecks = checkResults.filter(check => check.head_sha === expectedHead
     && parseReviewCheckIdentity(check)?.runId === sourceRunId

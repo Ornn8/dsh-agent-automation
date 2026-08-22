@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  assertVerificationContractChecks,
   loadTrustedVerificationContract,
   parseVerificationContract,
   verificationContractHash,
@@ -60,6 +61,48 @@ test('canonical hash ignores permitted formatting but changes on semantic edits'
     ...first,
     requiredEvidence: ['changed-paths', 'security-report'],
   }))
+})
+
+test('requires configured CI checks to equal the trusted contract checks', () => {
+  const contract = {
+    contract: parseVerificationContract(validContract()),
+    hash: verificationContractHash(validContract()),
+  }
+  assert.doesNotThrow(() => assertVerificationContractChecks({
+    trustedVerificationContract: contract,
+    configuredRequiredChecks: [{ context: 'unit-tests', app_id: 15368 }, 'build'],
+  }))
+  assert.throws(() => assertVerificationContractChecks({
+    trustedVerificationContract: contract,
+    configuredRequiredChecks: ['build'],
+  }), /do not match trusted Verification Contract/)
+  assert.throws(() => assertVerificationContractChecks({
+    trustedVerificationContract: contract,
+    configuredRequiredChecks: ['build', 'unit-tests', 'security'],
+  }), /do not match trusted Verification Contract/)
+  assert.throws(() => assertVerificationContractChecks({
+    trustedVerificationContract: { ...contract, hash: '0'.repeat(64) },
+    configuredRequiredChecks: ['build', 'unit-tests'],
+  }), /hash does not match/)
+  assert.doesNotThrow(() => assertVerificationContractChecks({
+    trustedVerificationContract: undefined,
+    configuredRequiredChecks: ['unconfigured-check'],
+  }))
+})
+
+test('rejects an extra independent branch-protection check before app binding', () => {
+  const contract = {
+    contract: parseVerificationContract(validContract()),
+    hash: verificationContractHash(validContract()),
+  }
+  assert.throws(() => assertVerificationContractChecks({
+    trustedVerificationContract: contract,
+    configuredRequiredChecks: [
+      { context: 'build', app_id: 15368 },
+      { context: 'unit-tests', app_id: 15368 },
+      { context: 'security', app_id: 15368 },
+    ],
+  }), /do not match trusted Verification Contract/)
 })
 
 test('loads one immutable contract only from the supplied trusted revision', async () => {

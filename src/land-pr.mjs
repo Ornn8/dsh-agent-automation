@@ -12,6 +12,7 @@ import { parseReviewCheckIdentity } from './review-check.mjs'
 import { trustedReviewRunProfile } from './advancement-source.mjs'
 import { sameRepositoryClosingIssues } from './closing-issues.mjs'
 import { writeLandingResult } from './landing-result.mjs'
+import { assertVerificationContractChecks } from './verification-contract.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const expectedHead = requiredEnv('HEAD_SHA')
@@ -148,8 +149,8 @@ async function targetProfile(revision) {
   })
 }
 
-async function protectedChecks(checksStage) {
-  if (checksStage.source === 'branch-protection') return []
+async function protectedChecks(checksStage, trustedVerificationContract) {
+  if (checksStage.source === 'branch-protection' && trustedVerificationContract === undefined) return []
   const protection = await ghJson([
     'api', `repos/${repository}/branches/${encodeURIComponent(defaultBranch)}/protection/required_status_checks`,
   ], `required checks for ${defaultBranch}`)
@@ -157,7 +158,14 @@ async function protectedChecks(checksStage) {
     ? protection.checks
     : (protection?.contexts || []).map(context => ({ context, app_id: null }))
   const independent = configured.filter(check => check?.context !== 'agent/review')
-  return checksStage.names.map(name => {
+  assertVerificationContractChecks({
+    trustedVerificationContract,
+    configuredRequiredChecks: independent,
+  })
+  const names = checksStage.source === 'branch-protection'
+    ? trustedVerificationContract.contract.requiredChecks
+    : checksStage.names
+  return names.map(name => {
     const matching = independent.filter(check => check.context === name)
     if (matching.length !== 1) throw new Error(`Profile check ${name} is not uniquely required by branch protection`)
     return matching[0]
@@ -201,7 +209,11 @@ if (cycle.review.id !== reviewIdentity.stageId) {
 if (cycle.merge.mode !== 'auto') {
   deferred(`Landing deferred for pull request #${pullRequestNumber}: Profile requires manual merge.`)
 }
-const requiredChecks = await protectedChecks(cycle.checks)
+const requiredChecks = await protectedChecks(cycle.checks, profile.verificationContract)
+assertVerificationContractChecks({
+  trustedVerificationContract: profile.verificationContract,
+  configuredRequiredChecks: requiredChecks,
+})
 
 const decision = evaluateLanding({ pullRequest, expectedHead, requiredChecks, checkRuns, reviewProof, trustedReview })
 if (!decision.ready) {

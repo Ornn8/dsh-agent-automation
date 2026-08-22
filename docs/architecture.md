@@ -22,6 +22,8 @@ Durable completed Worker replays reparse a stored final output with the existing
 
 Configured Issue and transported repair Skills run the trusted named procedure or entrypoint, collect its required evidence, and return a v2 automation result. The Controller binds that result to the exact accepted revision and trusted Verification Contract before accepting the PR advancement. Unconfigured Profiles retain v1 behavior, and blocked or baseline outcomes do not enter this binding path.
 
+When configured, the trusted Verification Contract's required check contexts must equal the target's configured exact-head CI checks before advancement or landing; Controller CI runs only for pull-request events, with no duplicate push trigger for the same head.
+
 ### Agent Adapters
 
 Adapters translate the Worker Interface to one runtime:
