@@ -31,7 +31,19 @@ test('repair Skill hands a proven CI baseline failure to a same-repository Issue
 test('repair Skill defines one hidden, authorization-free completion receipt', () => {
   assert.match(repairSkill, /concise Chinese report followed by exactly one hidden local automation receipt/)
   assert.match(repairSkill, /`<!-- agent-automation-result`, then one strict JSON object on its own line, then `-->/)
-  const [completed, baseline, external, cannotComplete] = examples(repairSkill)
+  const [contracted, completed, baseline, external, cannotComplete] = examples(repairSkill)
+  assert.deepEqual(contracted, {
+    version: 2,
+    outcome: 'completed',
+    summary: 'Repair completed and the exact PR head was published.',
+    verification: {
+      revision: '<exact resulting PR head>',
+      contract: { contractId: '<contract.contractId>', hash: '<verificationContract.hash>' },
+      procedure: '<contract.procedure>',
+      result: 'passed',
+      evidence: ['<contract.requiredEvidence identifiers>'],
+    },
+  })
   assert.deepEqual(completed, { version: 1, outcome: 'completed', summary: '已推进 PR 新提交或已请求同一提交复审。' })
   assert.equal(baseline.outcome, 'blocked')
   assert.equal(baseline.blockedReason, 'ci-baseline')
@@ -44,7 +56,19 @@ test('repair Skill defines one hidden, authorization-free completion receipt', (
 })
 
 test('Issue Skill owns its terminal receipt instead of relying on controller prompt prose', () => {
-  const [completed, external, cannotComplete] = examples(issueSkill)
+  const [contracted, completed, external, cannotComplete] = examples(issueSkill)
+  assert.deepEqual(contracted, {
+    version: 2,
+    outcome: 'completed',
+    summary: 'Issue completed and PR published.',
+    verification: {
+      revision: '<exact pushed PR head>',
+      contract: { contractId: '<contract.contractId>', hash: '<verificationContract.hash>' },
+      procedure: '<contract.procedure>',
+      result: 'passed',
+      evidence: ['<contract.requiredEvidence identifiers>'],
+    },
+  })
   assert.equal(completed.outcome, 'completed')
   assert.equal(external.blockedReason, 'external')
   assert.equal(cannotComplete.blockedReason, 'cannot-complete')
