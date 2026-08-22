@@ -47,7 +47,7 @@ test('CapacityWaitProjection rejects identity, subject, route, and secret-like f
   assert.throws(() => parseCapacityWaitStatus(`${capacityWaitStatusLine(projection)}\n${capacityWaitStatusLine(projection)}`), /exactly one/)
 })
 
-test('capacity resume receipt identity binds the root request, subject state, and generation', () => {
+test('capacity resume identity binds the root request, subject state, and generation', () => {
   const projection = createCapacityWaitProjection(projectionInput)
   const requestId = capacityResumeRequestId(projection)
   assert.match(requestId, /^capacity-resume-[0-9a-f]{64}$/)

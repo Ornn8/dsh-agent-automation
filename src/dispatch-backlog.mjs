@@ -4,6 +4,7 @@ import {
   requiredEnv,
   run,
 } from './common.mjs'
+import { appendFile } from 'node:fs/promises'
 import {
   activeWorkflowIssueNumbers,
   independentIssueObservationNumber,
@@ -13,7 +14,6 @@ import {
 } from './dispatch-policy.mjs'
 import { capacityResumeRequestId, parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
 import { trustedControllerMutation } from './controller-mutation-marker.mjs'
-import { createDispatchJournal, dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import {
   governorBudgetDecision,
@@ -77,8 +77,8 @@ const capacityRunNumber = (() => {
 })()
 const capacityRotatingPage = capacityResumeOnly ? ((capacityRunNumber - 1) % 16) + 1 : 1
 const capacityPageSize = 100
-const trustedControllerLogin = requiredEnv('TRUSTED_CONTROLLER_LOGIN')
-if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(trustedControllerLogin)) {
+const trustedControllerLogin = capacityResumeOnly ? requiredEnv('TRUSTED_CONTROLLER_LOGIN') : ''
+if (capacityResumeOnly && !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(trustedControllerLogin)) {
   throw new Error('TRUSTED_CONTROLLER_LOGIN is invalid')
 }
 
@@ -160,44 +160,6 @@ async function governorRecords(number) {
     comments: await governorComments(number),
     trust: governorTrust,
     loadRun: runId => ghJson(['api', `repos/${repository}/actions/runs/${runId}`], `governor workflow run ${runId}`),
-  })
-}
-
-function capacityDispatchJournal(work, workflowFile, requestId) {
-  const subject = {
-    type: work.type === 'repair' ? 'pull-request' : 'issue',
-    number: work.number,
-  }
-  const commentId = work.statusComment?.id
-  if (!Number.isSafeInteger(commentId) || commentId < 1) throw new Error('Capacity wait status comment is missing its id')
-  const readComment = () => ghJson([
-    'api', `repos/${repository}/issues/comments/${commentId}`,
-  ], `capacity wait status comment ${commentId}`)
-  return createDispatchJournal({
-    requestId,
-    workflowFile,
-    subject,
-    readComment,
-    verifyComment: async comment => {
-      if (comment?.issue_url !== `https://api.github.com/repos/${repository}/issues/${work.number}`) {
-        throw new Error('Capacity wait status comment is bound to another subject')
-      }
-      await trustedControllerMutation({
-        comment,
-        expectedControllerLogin: trustedControllerLogin,
-        expectedRepository: repository,
-        expectedSubject: subject,
-        loadRun: runId => ghJson(
-          ['api', `repos/${repository}/actions/runs/${runId}`],
-          `capacity wait worker run ${runId}`,
-        ),
-      })
-    },
-    updateComment: async (commentId, body) => {
-      await run(githubExecutable, [
-        'api', '--method', 'PATCH', `repos/${repository}/issues/comments/${commentId}`, '--input', '-',
-      ], { env: githubEnvironment, input: JSON.stringify({ body }) })
-    },
   })
 }
 
@@ -284,7 +246,7 @@ async function capacitySnapshot() {
     const subject = expectedSubject.type === 'pull-request'
       ? pullRequestGovernorSubject(candidate)
       : issueGovernorSubject(candidate)
-    waits.push({ repository, projection, statusComment: status, currentStateVersion: subjectStateVersion(subject) })
+    waits.push({ repository, projection, currentStateVersion: subjectStateVersion(subject) })
     if (expectedSubject.type === 'pull-request') pullRequests.push(candidate)
     else issues.push(candidate)
   }
@@ -364,6 +326,55 @@ async function currentCapacityWaits(capacity) {
     }
   }
   return waits
+}
+
+function capacityResumeOutput(work) {
+  if (!work || !['issue', 'repair'].includes(work.type) || !work.projection || !work.request) {
+    throw new Error('Capacity resume output requires one selected WorkRequest')
+  }
+  const expectedSubjectType = work.type === 'repair' ? 'pull-request' : 'issue'
+  const request = work.request
+  const projection = work.projection
+  if (work.number !== projection.subject.number
+    || request.role !== 'change' || request.repository !== repository
+    || request.requestId !== projection.workRequestId
+    || request.profileId !== projection.profileId
+    || request.workflowId !== projection.workflowId
+    || request.stageId !== projection.stageId
+    || request.definitionHash !== projection.definitionHash
+    || request.coordinationKey !== `${repository}:${projection.profileId}:${projection.workflowId}`
+    || request.subject.type !== expectedSubjectType
+    || request.subject.number !== projection.subject.number
+    || request.revision.base !== projection.revision.base
+    || request.revision.head !== projection.revision.head) {
+    throw new Error('Capacity resume output WorkRequest does not match its projection')
+  }
+  const capacityResumeId = capacityResumeRequestId(projection)
+  const headSha = work.type === 'repair' ? projection.subject.head : request.revision.head
+  if (!/^capacity-resume-[0-9a-f]{64}$/.test(capacityResumeId) || !/^[0-9a-f]{40}$/.test(headSha)) {
+    throw new Error('Capacity resume output identity is invalid')
+  }
+  return {
+    version: 1,
+    type: work.type,
+    work_request: request,
+    capacity_resume_id: capacityResumeId,
+    pull_request_number: work.type === 'repair' ? work.number : null,
+    head_sha: headSha,
+  }
+}
+
+async function writeCapacityOutputs(output = null) {
+  const values = {
+    resume_type: output?.type || '',
+    work_request: output ? JSON.stringify(output.work_request) : '',
+    capacity_resume_id: output?.capacity_resume_id || '',
+    pull_request_number: output?.pull_request_number ? String(output.pull_request_number) : '',
+    head_sha: output?.head_sha || '',
+    resume_json: output ? JSON.stringify(output) : '',
+  }
+  const outputPath = process.env.GITHUB_OUTPUT?.trim()
+  if (outputPath) await appendFile(outputPath, `${Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n')}\n`)
 }
 
 async function writeGovernorRecord(number, record) {
@@ -486,6 +497,7 @@ const work = capacityResumeOnly
   })
 
 if (!work) {
+  if (capacityResumeOnly) await writeCapacityOutputs()
   process.stdout.write('No eligible DSH backlog work is ready.\n')
   process.exit(0)
 }
@@ -528,41 +540,9 @@ if (work.type === 'issue') {
 }
 
 if (capacityResumeOnly) {
-  if (!work.request) throw new Error('Capacity wait WorkRequest was not prepared')
-  const resumeRequestId = capacityResumeRequestId(work.projection)
-  const issuePayload = work.type === 'issue' ? repositoryDispatchBody(work.request) : null
-  const payload = work.type === 'repair'
-    ? {
-        event_type: 'dsh-repair',
-        client_payload: {
-          pr_number: work.number,
-          head_sha: work.projection.subject.head,
-          request_id: resumeRequestId,
-          capacity_resume_id: resumeRequestId,
-          work_request: work.request,
-        },
-    }
-    : {
-        ...issuePayload,
-        client_payload: {
-          ...issuePayload.client_payload,
-          capacity_resume_id: resumeRequestId,
-        },
-      }
-  await dispatchWithReceipt({
-    executable: githubExecutable,
-    environment: githubEnvironment,
-    repository,
-    workflowFile: work.type === 'repair' ? 'agent-pr-rework.yml' : 'agent-issues.yml',
-    payload,
-    requestId: resumeRequestId,
-    journal: capacityDispatchJournal(
-      work,
-      work.type === 'repair' ? 'agent-pr-rework.yml' : 'agent-issues.yml',
-      resumeRequestId,
-    ),
-  })
-  process.stdout.write(`Resumed capacity-waiting ${work.type === 'repair' ? 'pull request' : 'Issue'} #${work.number}.\n`)
+  const output = capacityResumeOutput(work)
+  await writeCapacityOutputs(output)
+  process.stdout.write(`${JSON.stringify(output)}\n`)
   process.exit(0)
 }
 

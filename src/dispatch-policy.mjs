@@ -149,13 +149,13 @@ export function selectCapacityWaitingWork({ pullRequests, issues, capacityWaits 
           || labelNames(source).has('automation/repair-blocked')
           || labelNames(source).has('automation/ci-baseline')
           || labelNames(source).has('agent/dsh-failed')) return null
-        return { type: 'repair', number: source.number, head: source.head.sha, projection, request: wait.request, statusComment: wait.statusComment }
+        return { type: 'repair', number: source.number, head: source.head.sha, projection, request: wait.request }
       }
       if (labelNames(source).has('automation/paused')
         || labelNames(source).has('agent/dsh-failed')
         || labelNames(source).has('agent/dsh-blocked')
         || pullRequests.some(pullRequest => closesIssue(pullRequest, source.number))) return null
-      return { type: 'issue', number: source.number, projection, request: wait.request, statusComment: wait.statusComment }
+      return { type: 'issue', number: source.number, projection, request: wait.request }
     })
     .filter(Boolean)
     .sort((left, right) => left.number - right.number

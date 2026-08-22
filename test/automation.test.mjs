@@ -84,7 +84,6 @@ import { interruptedRepairMayRetry, recordedRepairState } from '../src/repair-st
 import { parseAgentWork } from '../src/agent-work.mjs'
 import { intentionalReviewBlock } from '../src/recovery-policy.mjs'
 import { parseWorkflowIdentity } from '../src/workflow-identity.mjs'
-import { dispatchWithReceipt } from '../src/dispatch-receipt.mjs'
 
 function rpcResponse(request, value, ok = true) {
   return {
@@ -1182,13 +1181,26 @@ test('capacity reconciliation uses one trusted bounded wake source', async () =>
     backlogSource.indexOf('async function capacityComments'),
     backlogSource.indexOf('async function writeGovernorRecord'),
   )
+  const capacityResumeSource = backlogSource.slice(
+    backlogSource.indexOf('if (!work)'),
+    backlogSource.indexOf('const admission'),
+  )
   const reviewSource = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
   const repairSource = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')
   const issueSource = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
   const issueCaller = await readFile(new URL('../templates/target/.github/workflows/agent-issues.yml', import.meta.url), 'utf8')
   const landingCaller = await readFile(new URL('../templates/target/.github/workflows/agent-landing-reconcile.yml', import.meta.url), 'utf8')
+  const backlogWorkflow = await readFile(new URL('../.github/workflows/dispatch-backlog.yml', import.meta.url), 'utf8')
+  const issueResumeCaller = await readFile(new URL('../.github/workflows/dsh-issue.yml', import.meta.url), 'utf8')
+  const repairResumeCaller = await readFile(new URL('../.github/workflows/dsh-repair.yml', import.meta.url), 'utf8')
   assert.match(backlogSource, /trustedControllerMutation/)
-  assert.match(backlogSource, /dispatchWithReceipt/)
+  assert.doesNotMatch(backlogSource, /dispatchWithReceipt|createDispatchJournal/)
+  assert.doesNotMatch(capacitySource, /repos\/\$\{repository\}\/dispatches/)
+  assert.match(backlogSource, /writeCapacityOutputs/)
+  assert.match(backlogSource, /capacityResumeOutput/)
+  assert.match(backlogSource, /resume_type|work_request|capacity_resume_id|pull_request_number|head_sha/)
+  assert.doesNotMatch(capacityResumeSource, /repositoryDispatchBody|dispatchWithReceipt|actions\/workflows|\/dispatches/)
+  assert.match(capacityResumeSource, /JSON\.stringify\(output\)/)
   assert.match(backlogSource, /capacityResumeRequestId/)
   assert.match(backlogSource, /resolveAgentWorkDispatch/)
   assert.match(backlogSource, /parseWorkerRouteDecision/)
@@ -1202,6 +1214,10 @@ test('capacity reconciliation uses one trusted bounded wake source', async () =>
   assert.match(capacitySource, /seenCommentIds/)
   assert.match(backlogSource, /issue_url/)
   assert.match(backlogSource, /current capacity subject/)
+  assert.match(backlogWorkflow, /outputs:/)
+  assert.match(backlogWorkflow, /resume_type:/)
+  assert.match(backlogWorkflow, /work_request:/)
+  assert.match(backlogWorkflow, /capacity_resume_id:/)
   assert.doesNotMatch(capacitySource, /pulls\?state=open|issues\?state=all/)
   assert.doesNotMatch(capacitySource, /capacity-wait comments for #/)
   assert.match(reviewSource, /hasTrustedExactReviewInvocation/)
@@ -1209,7 +1225,19 @@ test('capacity reconciliation uses one trusted bounded wake source', async () =>
   assert.doesNotMatch(issueCaller, /schedule:/)
   assert.doesNotMatch(issueCaller, /capacity_resume_only:/)
   assert.match(landingCaller, /schedule:/)
+  assert.match(landingCaller, /actions: write/)
   assert.match(landingCaller, /capacity_resume_only:/)
+  assert.match(landingCaller, /needs: backlog/)
+  assert.match(landingCaller, /if: needs\.backlog\.outputs\.resume_type == 'issue'/)
+  assert.match(landingCaller, /if: needs\.backlog\.outputs\.resume_type == 'repair'/)
+  assert.match(landingCaller, /dsh-issue/)
+  assert.match(landingCaller, /dsh-repair/)
+  assert.match(landingCaller, /needs\.backlog\.outputs\.work_request/)
+  assert.match(landingCaller, /fromJSON\(needs\.backlog\.outputs\.pull_request_number\)/)
+  assert.match(landingCaller, /needs\.backlog\.outputs\.head_sha/)
+  assert.match(landingCaller, /cancel-in-progress: false/)
+  assert.match(issueResumeCaller, /capacity_resume_id/)
+  assert.match(repairResumeCaller, /capacity_resume_id/)
   assert.match(repairSource, /trustedRepairSourceComment/)
   assert.match(repairSource, /capacitySource\.repairClass/)
   assert.match(repairSource, /capacityResumeRequestId\(priorCapacityProjection\)/)
@@ -2342,149 +2370,4 @@ test('a marker is auditable but never becomes review-failure authorization', () 
   assert.equal(hasExactReviewVerdict([{ user: { login: 'github-actions[bot]' }, body: `<!-- agent-review:${head} -->\n## Agent review: BLOCK` }], head), true)
   assert.equal(hasExactReviewVerdict([{ user: { login: 'pr-author' }, body: `<!-- agent-review:${head} -->\n## Agent review: BLOCK` }], head), false)
   assert.equal(hasExactReviewVerdict([{ body: '<!-- agent-review:other -->' }], head), false)
-})
-
-function failedDispatchRun(id, requestId, title) {
-  return {
-    id,
-    run_attempt: 1,
-    status: 'completed',
-    conclusion: 'failure',
-    display_title: `${title} request:${requestId}`,
-  }
-}
-
-test('exact capacity receipt identity survives an old failure leaving the recent run window', async () => {
-  for (const [workflowFile, title] of [['agent-issues.yml', 'Agent Issues'], ['agent-pr-rework.yml', 'Agent PR Rework']]) {
-    const requestId = `capacity-exact-${workflowFile.replaceAll('.', '-')}`
-    const exactRuns = new Map([
-      [1, failedDispatchRun(1, requestId, title)],
-    ])
-    let journalState = {
-      pending: false,
-      dispatches: [{ runId: 1, runAttempt: 1 }],
-    }
-    let postSeen = false
-    const calls = []
-    const journal = {
-      read: async () => structuredClone(journalState),
-      reserve: async () => { journalState = { ...journalState, pending: true } },
-      commit: async dispatches => { journalState = { pending: false, dispatches } },
-    }
-    const execute = async (_executable, args) => {
-      calls.push(args)
-      if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
-        return { stdout: JSON.stringify({ workflow_runs: postSeen ? [exactRuns.get(2)] : [] }) }
-      }
-      if (args[0] === 'api' && args[1]?.includes('/actions/runs/')) {
-        const runId = Number(args[1].split('/').at(-1))
-        return { stdout: JSON.stringify(exactRuns.get(runId)) }
-      }
-      if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
-        postSeen = true
-        exactRuns.set(2, failedDispatchRun(2, requestId, title))
-        return { stdout: '' }
-      }
-      throw new Error(`unexpected gh invocation: ${args.join(' ')}`)
-    }
-    const dispatch = () => dispatchWithReceipt({
-      executable: 'gh', environment: {}, repository: 'owner/repository',
-      workflowFile, payload: {}, requestId, journal,
-      runCommand: execute, sleep: async () => undefined,
-    })
-
-    await assert.rejects(dispatch(), /retry budget exhausted/)
-    assert.equal(journalState.dispatches.length, 2)
-    assert.equal(calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST').length, 1)
-    await assert.rejects(dispatch(), /retry budget exhausted/)
-    assert.equal(calls.filter(args => args[0] === 'api' && args[1] === '--method' && args[2] === 'POST').length, 1)
-  }
-})
-
-test('exact capacity receipt polling waits for the new run after a retry', async () => {
-  const requestId = 'capacity-exact-visibility'
-  const workflowFile = 'agent-issues.yml'
-  const oldRun = failedDispatchRun(41, requestId, 'Agent Issues')
-  const newRun = { id: 42, run_attempt: 1, status: 'in_progress', display_title: `Agent Issues request:${requestId}` }
-  let state = { pending: false, dispatches: [{ runId: 41, runAttempt: 1 }] }
-  let postSeen = false
-  let afterPost = 0
-  const journal = {
-    read: async () => structuredClone(state),
-    reserve: async () => { state = { ...state, pending: true } },
-    commit: async dispatches => { state = { pending: false, dispatches } },
-    release: async () => { state = { ...state, pending: false } },
-  }
-  const execute = async (_executable, args) => {
-    if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
-      if (!postSeen) return { stdout: JSON.stringify({ workflow_runs: [oldRun] }) }
-      afterPost += 1
-      return { stdout: JSON.stringify({ workflow_runs: afterPost === 1 ? [oldRun] : [newRun] }) }
-    }
-    if (args[0] === 'api' && args[1]?.includes('/actions/runs/')) {
-      return { stdout: JSON.stringify(args[1].endsWith('/41') ? oldRun : newRun) }
-    }
-    if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
-      postSeen = true
-      return { stdout: '' }
-    }
-    throw new Error(`unexpected gh invocation: ${args.join(' ')}`)
-  }
-  await dispatchWithReceipt({
-    executable: 'gh', environment: {}, repository: 'owner/repository',
-    workflowFile, payload: {}, requestId, journal,
-    runCommand: execute, sleep: async () => undefined,
-  })
-  assert.equal(afterPost, 2)
-  assert.deepEqual(state.dispatches, [{ runId: 41, runAttempt: 1 }, { runId: 42, runAttempt: 1 }])
-})
-
-test('a failed journal write is recovered from the pending exact request without a second dispatch', async () => {
-  const requestId = 'capacity-exact-journal-recovery'
-  const workflowFile = 'agent-pr-rework.yml'
-  const oldRun = failedDispatchRun(51, requestId, 'Agent PR Rework')
-  const newRun = { id: 52, run_attempt: 1, status: 'in_progress', display_title: `Agent PR Rework request:${requestId}` }
-  let state = { pending: false, dispatches: [{ runId: 51, runAttempt: 1 }] }
-  let postSeen = false
-  let commitFailures = 1
-  let postCount = 0
-  const journal = {
-    read: async () => structuredClone(state),
-    reserve: async () => { state = { ...state, pending: true } },
-    commit: async dispatches => {
-      if (commitFailures) {
-        commitFailures -= 1
-        throw new Error('simulated journal write failure')
-      }
-      state = { pending: false, dispatches }
-    },
-    release: async () => { state = { ...state, pending: false } },
-  }
-  const execute = async (_executable, args) => {
-    if (args[0] === 'api' && args[1]?.includes(`/actions/workflows/${workflowFile}/runs?`)) {
-      return { stdout: JSON.stringify({ workflow_runs: postSeen ? [newRun] : [oldRun] }) }
-    }
-    if (args[0] === 'api' && args[1]?.includes('/actions/runs/')) {
-      return { stdout: JSON.stringify(args[1].endsWith('/51') ? oldRun : newRun) }
-    }
-    if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
-      postSeen = true
-      postCount += 1
-      return { stdout: '' }
-    }
-    throw new Error(`unexpected gh invocation: ${args.join(' ')}`)
-  }
-  await assert.rejects(dispatchWithReceipt({
-    executable: 'gh', environment: {}, repository: 'owner/repository',
-    workflowFile, payload: {}, requestId, journal,
-    runCommand: execute, sleep: async () => undefined,
-  }), /simulated journal write failure/)
-  assert.equal(state.pending, true)
-  await dispatchWithReceipt({
-    executable: 'gh', environment: {}, repository: 'owner/repository',
-    workflowFile, payload: {}, requestId, journal,
-    runCommand: execute, sleep: async () => undefined,
-  })
-  assert.equal(postCount, 1)
-  assert.deepEqual(state.dispatches, [{ runId: 51, runAttempt: 1 }, { runId: 52, runAttempt: 1 }])
 })

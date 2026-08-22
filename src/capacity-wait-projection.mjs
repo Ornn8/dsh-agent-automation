@@ -140,7 +140,7 @@ export function createCapacityWaitProjection(value = {}) {
 }
 
 /**
- * Return the durable receipt identity for one exact capacity resume.
+ * Return the exact identity for one capacity resume projection.
  * @param {AnyObject} value
  * @returns {string}
  */

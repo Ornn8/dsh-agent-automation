@@ -1,6 +1,6 @@
 name: Agent PR Rework
 run-name: >-
-  Agent PR Rework request:${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.capacity_resume_id || github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || 'legacy') || github.run_id }}
+  Agent PR Rework request:${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || 'legacy') || github.run_id }}
 
 # Configure DSH_AUTOMATION_CI_WORKFLOWS before enabling CI repair requests.
 
@@ -18,7 +18,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: agent-pr-rework-${{ github.repository }}-${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.capacity_resume_id || github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || github.run_id) || github.run_id }}
+  group: agent-pr-rework-${{ github.repository }}-${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.request_id || github.event.client_payload.work_request.requestId || github.run_id) || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -55,7 +55,6 @@ jobs:
       pull_request_number: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.work_request.subject.number || github.event.client_payload.pr_number }}
       head_sha: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.work_request.revision.head || github.event.client_payload.head_sha }}
       request_id: ${{ github.event.action == 'agent_work_requested' && github.event.client_payload.work_request.requestId || github.event.client_payload.request_id }}
-      capacity_resume_id: ${{ github.event.client_payload.capacity_resume_id || '' }}
       ci_workflow_name: ${{ github.event.client_payload.ci_workflow_name || '' }}
       repair_cause: ${{ github.event.client_payload.repair_cause || '' }}
       work_request: ${{ github.event.action == 'agent_work_requested' && toJSON(github.event.client_payload.work_request) || '' }}
