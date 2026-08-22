@@ -279,6 +279,36 @@ async function waitForFile(path, timeoutMs = 5_000) {
   throw new Error(`Timed out waiting for ${path}`)
 }
 
+async function observePublicLease(stateRoot, operation) {
+  const paths = capacityRegistryPaths(stateRoot)
+  let observing = true
+  let observed = null
+  const poll = (async () => {
+    while (observing && observed === null) {
+      try {
+        const ownerName = (await readdir(paths.lockPath)).find(name => name.startsWith('registry-owner.') && name.endsWith('.json'))
+        if (ownerName) {
+          try {
+            observed = JSON.parse(await readFile(join(paths.lockPath, ownerName), 'utf8'))
+          } catch (error) {
+            if (error?.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
+          }
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+      if (observed === null) await new Promise(resolve => setTimeout(resolve, 0))
+    }
+  })()
+  try {
+    await operation()
+  } finally {
+    observing = false
+  }
+  await poll
+  return observed
+}
+
 test('durable registry derives opaque keys from complete identity and persists records', async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-store-'))
   try {
@@ -786,6 +816,38 @@ test('registry default clock is evaluated for each decision', async () => {
     assert.ok(await registry.acquireHalfOpenLease({ key, leaseId: 'live-probe', owner: 'worker-1' }))
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('public registry preserves live-clock identity probe suppression and injected-clock identity', { skip: process.platform !== 'win32', timeout: 30_000 }, async () => {
+  const defaultStateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-public-live-identity-'))
+  const injectedStateRoot = await mkdtemp(join(tmpdir(), 'dsh-capacity-public-injected-identity-'))
+  const workers = { 'worker-1': { adapter: 'dsh-web', provider: 'provider-1', model: 'model-1', capacityGroup: 'public-identity-group' } }
+  const failure = capacityFailure()
+  try {
+    const liveRegistry = createCapacityRegistry({
+      stateRoot: defaultStateRoot, configurationHash, credentialGeneration, workers,
+    })
+    const liveLease = await observePublicLease(defaultStateRoot, () => Promise.all(Array.from({ length: 24 }, () => liveRegistry.recordFailure({
+      capacityGroup: 'public-identity-group', sourceWorker: 'worker-1', failure,
+    }))))
+    assert.ok(liveLease)
+    assert.equal(liveLease.processIdentity, undefined)
+
+    const injectedNow = Date.now()
+    const injectedRegistry = createCapacityRegistry({
+      stateRoot: injectedStateRoot, configurationHash, credentialGeneration, workers, now: () => injectedNow,
+    })
+    const injectedLease = await observePublicLease(injectedStateRoot, () => injectedRegistry.recordFailure({
+      capacityGroup: 'public-identity-group', sourceWorker: 'worker-1', failure,
+    }))
+    assert.ok(injectedLease)
+    assert.equal(injectedLease.processIdentity, await resolveProcessIdentity(process.pid))
+  } finally {
+    await Promise.all([
+      rm(defaultStateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
+      rm(injectedStateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
+    ])
   }
 })
 

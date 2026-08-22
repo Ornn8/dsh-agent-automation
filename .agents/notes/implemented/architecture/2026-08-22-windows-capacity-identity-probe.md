@@ -6,7 +6,7 @@ On Windows, every independent capacity-registry contender launched a PowerShell 
 
 ## Decision
 
-Fresh Windows leases using the live clock store the owner PID and acquisition timestamp without probing the owner process. When an expired lease is inspected, the trusted Windows start-time probe is required and the lease remains held only when the observed process started no later than the recorded acquisition. Existing leases with an explicit process identity continue to use exact identity equality. Unknown, malformed, timed-out, or inaccessible identity evidence keeps the lease held or fails the acquisition; it never authorizes reclamation. Deterministic injected clocks retain the explicit identity field so timestamp comparisons do not depend on a synthetic wall clock.
+Fresh Windows leases using the live clock store the owner PID and acquisition timestamp without probing the owner process. When an expired lease is inspected, the trusted Windows start-time probe is required and the lease remains held only when the observed process started no later than the recorded acquisition. Existing leases with an explicit process identity continue to use exact identity equality. Unknown, malformed, timed-out, or inaccessible identity evidence keeps the lease held or fails the acquisition; it never authorizes reclamation. Deterministic injected clocks retain the explicit identity field so timestamp comparisons do not depend on a synthetic wall clock. The public facade preserves whether its caller supplied that clock when it normalizes the lock options.
 
 ## Alternatives considered
 

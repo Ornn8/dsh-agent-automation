@@ -755,7 +755,7 @@ async function reserveLeaseFence(paths, lease) {
 }
 
 /** @typedef {(pid: number) => Promise<string|null>} ProcessIdentityVerifier */
-/** @typedef {{waitMs?: number, leaseMs?: number, now?: number|(() => number), processIdentity?: ProcessIdentityVerifier}} RegistryLockOptions */
+/** @typedef {{waitMs?: number, leaseMs?: number, now?: number|(() => number), processIdentity?: ProcessIdentityVerifier, persistProcessIdentity?: boolean}} RegistryLockOptions */
 
 /** @param {RegistryLockOptions} options @returns {() => number} */
 function lockClock(options) {
@@ -1253,7 +1253,7 @@ export async function withCapacityRegistryLock(stateRoot, operation, options = {
     : /** @type {ProcessIdentityVerifier} */ (pid => boundedProcessIdentity(injectedVerifier, pid))
   const deadline = Date.now() + waitMs
   // A synthetic lock clock cannot be compared with an OS process start time.
-  const persistProcessIdentity = options.now !== undefined
+  const persistProcessIdentity = options.persistProcessIdentity ?? options.now !== undefined
   const acquired = await acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier, persistProcessIdentity)
   if (!acquired) throw new Error('Capacity registry lock is busy')
   const ownerPath = join(paths.directory, `${paths.leasePrefix}.${acquired.ownerToken}.json`)
@@ -1340,6 +1340,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
   }
   const identity = { configurationHash, credentialGeneration }
   const clock = typeof now === 'function' ? now : now === undefined ? () => Date.now() : () => now
+  const lockOptions = { now: clock, persistProcessIdentity: now !== undefined }
   return {
     async records() {
       return withCapacityRegistryLock(stateRoot, async (_paths, lease) => {
@@ -1352,7 +1353,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         }
         if (changed) await writeCapacityRegistry(stateRoot, document.document, lease)
         return document.document.records
-      }, { now: clock })
+      }, lockOptions)
     },
     /** @param {string} key */
     async get(key) {
@@ -1389,7 +1390,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         document.document.records[recordKey] = recordCapacityFailure(current, normalizedFailure, { sourceWorker: snapshot.workerId, capacityIdentity: snapshot.identity, now: observationTime ?? clock(), cooldownMs })
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return document.document.records[recordKey]
-      }, { now: clock })
+      }, lockOptions)
     },
     /** @param {RegistryLeaseInput} input */
     async acquireHalfOpenLease({ key, leaseId, owner, now: leaseTime, leaseMs }) {
@@ -1403,7 +1404,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         document.document.records[key] = acquired.record
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return acquired
-      }, { now: clock })
+      }, lockOptions)
     },
     /** Atomically claim all expired applicable scopes for one trusted Worker. */
     /** @param {RegistryProbeClaimInput} input */
@@ -1464,7 +1465,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
           })),
           probe: { workerId, capacityGroup: snapshot.capacityGroup, identity: snapshot.identity, leases: acquired },
         }
-      }, { now: clock })
+      }, lockOptions)
     },
     /** Complete or abandon every lease from one trusted multi-scope probe. */
     /** @param {RegistryProbeCompletionInput} input */
@@ -1533,7 +1534,7 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         }
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return records
-      }, { now: clock })
+      }, lockOptions)
     },
     /** @param {RegistryCompletionInput} input */
     async completeHalfOpenLease({ key, leaseId, outcome, failure, now: completionTime, cooldownMs }) {
@@ -1545,15 +1546,15 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
         document.document.records[key] = completeHalfOpenLease(current, { leaseId, outcome, failure, now: completionTime ?? clock(), cooldownMs })
         await writeCapacityRegistry(stateRoot, document.document, lease)
         return document.document.records[key]
-      }, { now: clock })
+      }, lockOptions)
     },
     /** @param {Record<string, any>} attempt */
     async appendAttempt(attempt) {
-      return withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, attempt, lease), { now: clock })
+      return withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, attempt, lease), lockOptions)
     },
     /** @param {Record<string, any>} attempt */
     async claimAttempt(attempt) {
-      return withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, attempt, lease), { now: clock })
+      return withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, attempt, lease), lockOptions)
     },
     async attempts() {
       return readCapacityAttempts(stateRoot)
