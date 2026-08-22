@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { createWorkerExecutionClaim, runRoleWorker } from '../src/role-worker.mjs'
+import { AGENT_ISSUE_SKILL, AGENT_MAINTENANCE_SKILL, parseAgentAutomationResult } from '../src/agent-work-result.mjs'
 import { classifyAndCreateWorkerRouteDecision, createLocalWorkerRoutingExecution } from '../src/worker-routing.mjs'
 import { capacityRecordKey, createCapacityRegistry } from '../src/capacity-registry-store.mjs'
 import { recoverableRepairIdentity } from '../src/repair-state.mjs'
@@ -786,7 +787,7 @@ test('a completed replay with a missing execution commit invokes the hook withou
     invocation: invocation(),
     adapters: { fake: async () => {
       calls += 1
-      return { sessionId: 'completed-session', outcome: 'completed', output: 'durable result' }
+      return { sessionId: 'completed-session', outcome: 'completed' }
     } },
   }
 
@@ -861,14 +862,16 @@ test('execution commit failure leaves the durable result for a later replay with
   assert.equal(commitAttempts, 2)
 })
 
-test('completed Worker output is durably available to a replay', async () => {
+test('completed replay for a non-receipt skill preserves durable output', async () => {
+  const localConfig = config()
+  localConfig.workers.first.capabilities.skills = [AGENT_MAINTENANCE_SKILL]
   const provider = attemptProvider()
   const input = {
     executionClaim: createWorkerExecutionClaim({
-      config: config(), role: 'review', workRequest: { requestId: 'request-replay-output', role: 'review' },
+      config: localConfig, role: 'review', workRequest: { requestId: 'request-replay-output', role: 'review' },
       subjectStateVersion: stateVersion, capacityProvider: provider,
     }),
-    invocation: invocation(),
+    invocation: { ...invocation(), requiredSkill: AGENT_MAINTENANCE_SKILL },
     adapters: { fake: async () => ({ sessionId: 'review-session', outcome: 'completed', output: 'machine review result' }) },
   }
 
@@ -879,6 +882,61 @@ test('completed Worker output is durably available to a replay', async () => {
   assert.equal(replay.outcome, 'replayed')
   assert.equal(replay.priorOutcome, 'completed')
   assert.equal(replay.output, 'machine review result')
+  assert.equal(replay.automationResult, undefined)
+})
+
+test('completed replay rehydrates its parsed automation result without starting a Worker', async () => {
+  const localConfig = config()
+  localConfig.workers.first.capabilities.skills = [AGENT_ISSUE_SKILL]
+  const provider = attemptProvider()
+  const finalMessage = 'Done.\n<!-- agent-automation-result\n{"version":1,"outcome":"completed","summary":"Published the change."}\n-->'
+  const automationResult = parseAgentAutomationResult(finalMessage)
+  let calls = 0
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-replay-result', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: { ...invocation(), requiredSkill: AGENT_ISSUE_SKILL },
+    adapters: { fake: async () => {
+      calls += 1
+      return { sessionId: 'result-session', outcome: 'completed', output: finalMessage, automationResult }
+    } },
+  }
+
+  const first = await runRoleWorker(input)
+  const replay = await runRoleWorker({
+    ...input,
+    adapters: { fake: async () => { calls += 1; throw new Error('replay must not invoke Worker') } },
+  })
+
+  assert.deepEqual(replay.automationResult, first.automationResult)
+  assert.equal(calls, 1)
+})
+
+test('malformed completed replay output fails closed before starting a Worker', async () => {
+  const localConfig = config()
+  localConfig.workers.first.capabilities.skills = [AGENT_ISSUE_SKILL]
+  const provider = attemptProvider()
+  let calls = 0
+  const input = {
+    executionClaim: createWorkerExecutionClaim({
+      config: localConfig, role: 'change', workRequest: { requestId: 'request-malformed-replay-output', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: provider,
+    }),
+    invocation: { ...invocation(), requiredSkill: AGENT_ISSUE_SKILL },
+    adapters: { fake: async () => {
+      calls += 1
+      return { sessionId: 'malformed-session', outcome: 'completed', output: 'not an automation result' }
+    } },
+  }
+
+  await runRoleWorker(input)
+  await assert.rejects(runRoleWorker({
+    ...input,
+    adapters: { fake: async () => { calls += 1; throw new Error('replay must not invoke Worker') } },
+  }), /must end with the automation result/)
+  assert.equal(calls, 1)
 })
 
 test('all previously capacity-deferred candidates replay as deferred without starting a Worker', async () => {
