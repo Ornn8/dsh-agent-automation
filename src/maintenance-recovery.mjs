@@ -28,6 +28,7 @@ import { parseFaultProjection } from './fault-projection.mjs'
 import { trustedFaultProjectionRun } from './fault-observation.mjs'
 import { observeFaultHealth, parseFaultHealthState } from './fault-health.mjs'
 import { parseMaintenanceProfile } from './maintenance-profile.mjs'
+import { assessMaintenanceCi, MAINTENANCE_CI_WORKFLOW_PATH } from './maintenance-ci.mjs'
 import { assessMaintenancePromotion, confirmMaintenancePromotionHead } from './maintenance-promotion.mjs'
 import { parseReviewMessage } from './review-protocol.mjs'
 import { validateReviewFindings } from './review-evidence.mjs'
@@ -43,6 +44,7 @@ const config = await loadConfig()
 const profile = parseMaintenanceProfile(JSON.parse(await readFile(
   join(controllerCheckout, '.github', 'agent-automation', 'profiles', 'controller-maintenance.json'), 'utf8',
 )))
+const maintenanceCiWorkflowFile = MAINTENANCE_CI_WORKFLOW_PATH.slice(MAINTENANCE_CI_WORKFLOW_PATH.lastIndexOf('/') + 1)
 const maintenanceWorkers = resolveRoleWorkers(config, 'maintenance')
 const [reviewWorker] = resolveWorkerCandidates({ config, role: 'review', routeDecision: { route: 'default' } })
 const adapters = createAgentAdapters()
@@ -293,16 +295,28 @@ async function reviewMaintenancePullRequest(record) {
 
 async function checkMaintenanceCi(record) {
   const pull = await ghJson(['api', `repos/${controllerRepository}/pulls/${record.repairPullRequest}`], 'maintenance pull request')
+  const files = await validateMaintenancePullRequest(record, pull)
+  const workflowRuns = await pages(
+    `repos/${controllerRepository}/actions/workflows/${maintenanceCiWorkflowFile}/runs?event=pull_request&head_sha=${pull.head.sha}`,
+    'maintenance CI workflow runs', 'workflow_runs',
+  )
   const checks = await pages(`repos/${controllerRepository}/commits/${pull.head.sha}/check-runs`, 'maintenance CI checks', 'check_runs')
-  const missing = profile.checks.requiredChecks.filter(name => !checks.some(check => check.name === name && check.status === 'completed'))
-  if (missing.length) {
+  const ci = assessMaintenanceCi({
+    pull,
+    files,
+    workflowRuns,
+    checkRuns: checks,
+    repository: controllerRepository,
+    workflowName: profile.checks.workflowNames[0],
+    requiredCheckNames: profile.checks.requiredChecks,
+  })
+  if (ci.outcome === 'waiting') {
     const age = Date.now() - Date.parse(pull.created_at)
     return age > profile.checks.waitMinutes * 60 * 1000
-      ? { outcome: 'failed', pull, detail: `required checks missing after ${profile.checks.waitMinutes} minutes: ${missing.join(', ')}` }
+      ? { outcome: 'failed', pull, detail: `trusted Controller CI evidence missing after ${profile.checks.waitMinutes} minutes` }
       : { outcome: 'waiting', pull }
   }
-  const failed = profile.checks.requiredChecks.filter(name => !checks.some(check => check.name === name && check.status === 'completed' && check.conclusion === 'success'))
-  return { outcome: failed.length ? 'failed' : 'succeeded', pull, detail: failed.join(', ') }
+  return { ...ci, pull }
 }
 
 async function promoteMaintenance(record) {

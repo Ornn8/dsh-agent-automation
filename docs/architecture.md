@@ -46,7 +46,7 @@ The review runner supervisor owns local slot recovery. Its lease binds the exact
 
 ### Infrastructure Recovery
 
-This Module owns `FaultRecord v1`, the Controller Maintenance Profile, deterministic recovery, finite maintenance Worker failover, circuit state, fault-bound release, runtime verification, and original WorkRequest resume. A root fault identity is derived from repository, component, operation, failure class, and normalized error code. Worker failures and verification failures append child attempts to that record and cannot create another root fault.
+This Module owns `FaultRecord v1`, the Controller Maintenance Profile, deterministic recovery, finite maintenance Worker failover, circuit state, fault-bound release, runtime verification, and original WorkRequest resume. A root fault identity is derived from repository, component, operation, failure class, and normalized error code. Worker failures and verification failures append child attempts to that record and cannot create another root fault. The one maintenance CI decision is functional evidence only and must be recomputed by trusted Controller code from the fixed Controller CI workflow path, exact pull-request pair, completed successful run, and run-bound CheckRun; a candidate change to that workflow is not auto-promotable.
 
 The Maintenance Profile is editable Controller data. The kernel still fixes exact Controller provenance, separate credentials, path postvalidation, independent hard-read-only review, one repair pull request, one release per epoch, three epochs per rolling day, and meaningful-state-only circuit reopening. GitHub Issues and comments are observable projections; a transition is trusted only after its exact Controller Maintenance workflow run completes successfully.
 
