@@ -4,7 +4,7 @@ import { projectWorkerCapacityIdentity } from './capacity-registry.mjs'
 import { capacityResumeRequestId, parseCapacityWaitProjection } from './capacity-wait-projection.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
 import { parseWorkerCapacityInspection } from './capacity-registry-store.mjs'
-import { parseAgentWorkRequest } from './work-request.mjs'
+import { parseAgentWorkRequest, repositoryDispatchBody } from './work-request.mjs'
 import { parseWorkerRouteDecision } from './worker-routing.mjs'
 import { parseWorkflowDefinition, workflowDefinitionHash } from './workflow-definition.mjs'
 import { resolveWorkflowStage } from './workflow-profile.mjs'
@@ -194,4 +194,17 @@ export function evaluateCapacityWaitResume({
     availableCandidates,
     snapshot.generationHash,
   )
+}
+
+/** Evaluate one rebuilt wait and dispatch only an eligible exact request. */
+/** @param {Record<string, any>} input @returns {Promise<Record<string, any>>} */
+export async function evaluateCapacityWaitResumeAndDispatch({ dispatch, evaluate = evaluateCapacityWaitResume, ...input } = {}) {
+  if (typeof dispatch !== 'function') throw new Error('Capacity resume dispatch is required')
+  const result = evaluate(input)
+  if (result.decision !== 'resume') return { decision: result, dispatched: false }
+  const payload = repositoryDispatchBody(input.workRequest)
+  const clientPayload = /** @type {Record<string, any>} */ (payload.client_payload)
+  clientPayload.route_decision = input.currentRouteDecision
+  await dispatch(payload)
+  return { decision: result, dispatched: true }
 }

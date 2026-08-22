@@ -29,6 +29,9 @@ import { capacityWaitStatusLine, createIssueCapacityWaitProjection } from './cap
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
+const routeDecision = process.env.ROUTE_DECISION_JSON?.trim()
+  ? parseJson(process.env.ROUTE_DECISION_JSON, 'WorkerRouteDecision')
+  : undefined
 const issueNumber = workRequest.subject.number
 const issueRequestId = workRequest.requestId
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
@@ -284,6 +287,7 @@ try {
       body: issue.body,
     },
     routingPolicy: config.operations.routing.change,
+    routeDecision,
   })
   const workerReceipt = await runRoleWorker({
     executionClaim,
