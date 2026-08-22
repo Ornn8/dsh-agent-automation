@@ -20,5 +20,8 @@
   "devDependencies": {
     "@types/node": "22.18.3",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "marked": "18.0.10"
   }
 }

@@ -2,6 +2,7 @@ name: Controller CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
   workflow_dispatch:
 
@@ -9,6 +10,9 @@ permissions:
   contents: read
 
 jobs:
+  # This candidate-owned pull_request workflow is functional/advisory evidence
+  # under the trusted-maintainer model, not independent merge authority against
+  # malicious same-repository workflow changes.
   pull-request-scope:
     name: pull request scope
     runs-on: ubuntu-latest
@@ -20,11 +24,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Use Node.js 22
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+      - name: Install pull request scope dependencies
+        if: github.event_name == 'pull_request'
+        run: npm ci --ignore-scripts
       - name: Enforce reviewable pull request size
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: node scripts/check-pr-size.mjs
       - name: Skip the pull request gate for non-pull-request events
         if: github.event_name != 'pull_request'
