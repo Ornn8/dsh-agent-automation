@@ -52,7 +52,7 @@ test('Agent review publication is job-scoped and landing is a separate workflow'
 test('controller CI rejects pull requests that exceed the repository review budget', async () => {
   const workflow = await readFile(new URL('controller-ci.yml', workflowDirectory), 'utf8')
   const gate = await readFile(new URL('../scripts/check-pr-size.mjs', import.meta.url), 'utf8')
-  assert.match(workflow, /pull_request:\n\s+types: \[opened, synchronize, reopened, edited\]/)
+  assert.match(workflow, /pull_request:\r?\n\s+types: \[opened, synchronize, reopened, edited\]/)
   assert.match(workflow, /name: pull request scope/)
   assert.match(workflow, /fetch-depth: 0/)
   assert.match(workflow, /actions\/setup-node@[0-9a-f]{40}/)
