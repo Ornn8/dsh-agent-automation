@@ -1,8 +1,9 @@
 // @ts-check
 
-import { capacityEligibility, parseCapacityRecord } from './capacity-registry.mjs'
+import { projectWorkerCapacityIdentity } from './capacity-registry.mjs'
 import { capacityResumeRequestId, parseCapacityWaitProjection } from './capacity-wait-projection.mjs'
 import { resolveWorkerCandidates } from './machine-config.mjs'
+import { parseWorkerCapacityInspection } from './capacity-registry-store.mjs'
 import { parseAgentWorkRequest } from './work-request.mjs'
 import { parseWorkerRouteDecision } from './worker-routing.mjs'
 import { parseWorkflowDefinition, workflowDefinitionHash } from './workflow-definition.mjs'
@@ -67,7 +68,7 @@ function validNow(value) {
 /**
  * Evaluate whether a persisted Issue capacity wait is still bound to current trusted state.
  * The evaluator is pure: callers provide the current WorkRequest, Profile, Issue state,
- * route decision, machine configuration, capacity records, and observation time.
+ * route decision, machine configuration, capacity inspection plans, and observation time.
  * @param {{projection?: unknown, workRequest?: unknown, profile?: unknown, currentSubject?: unknown, currentRouteDecision?: unknown, machineConfig?: unknown, capacitySnapshot?: unknown, now?: unknown}} input
  * @returns {AnyObject}
  */
@@ -143,10 +144,13 @@ export function evaluateCapacityWaitResume({
   }
   if (!validNow(now)) return stale('observation-time-invalid')
 
+  /** @type {AnyObject} */
+  let trustedConfig
   let currentCandidates
   try {
+    trustedConfig = /** @type {AnyObject} */ (structuredClone(machineConfig))
     currentCandidates = resolveWorkerCandidates({
-      config: /** @type {AnyObject} */ (structuredClone(machineConfig)),
+      config: trustedConfig,
       role: request.role,
       routeDecision,
     })
@@ -156,16 +160,29 @@ export function evaluateCapacityWaitResume({
   if (!currentCandidates.length) return stale('no-matching-candidates')
 
   const snapshot = objectOrNull(capacitySnapshot)
-  const records = objectOrNull(snapshot?.records)
-  if (!snapshot || !records || !SHA256.test(snapshot.generationHash || '')) {
+  if (!snapshot || Object.keys(snapshot).some(key => !['generationHash', 'plans'].includes(key))
+    || !SHA256.test(snapshot.generationHash || '') || !Array.isArray(snapshot.plans)
+    || snapshot.plans.length !== currentCandidates.length) {
     return stale('capacity-snapshot-invalid', currentCandidates)
   }
   const availableCandidates = []
   try {
+    const plans = new Map()
+    for (const value of snapshot.plans) {
+      const plan = parseWorkerCapacityInspection(value)
+      if (plans.has(plan.workerId)) return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
+      plans.set(plan.workerId, plan)
+    }
     for (const workerId of currentCandidates) {
-      const record = parseCapacityRecord(records[workerId])
-      if (record.sourceWorker !== workerId) return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
-      if (capacityEligibility(record, { now: /** @type {number} */ (now) }).eligible) availableCandidates.push(workerId)
+      const plan = plans.get(workerId)
+      const worker = objectOrNull(trustedConfig?.workers?.[workerId])
+      if (!plan || !worker || typeof worker.capacityGroup !== 'string') return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
+      const identity = projectWorkerCapacityIdentity(workerId, worker)
+      if (plan.capacityGroup !== worker.capacityGroup || canonicalJson(plan.identity) !== canonicalJson(identity)) {
+        return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
+      }
+      if (plan.eligible && plan.startState === 'available' && plan.probeScopes.length === 0
+        && plan.records.every(/** @param {AnyObject} entry */ entry => entry.record.state === 'available')) availableCandidates.push(workerId)
     }
   } catch {
     return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
