@@ -51,6 +51,16 @@ function uniqueIdentifiers(value, name) {
   return result.sort()
 }
 
+/** Parse one execution identity with the same bounds as a contract entrypoint. */
+export function parseVerificationExecutionIdentity(value, name = 'Verification execution identity') {
+  return identifier(value, name, IDENTITY, MAX_IDENTIFIER_LENGTH)
+}
+
+/** Parse one bounded, unique evidence identifier list for a verification receipt. */
+export function parseVerificationEvidenceIdentifiers(value, name = 'Verification receipt evidence') {
+  return uniqueIdentifiers(value, name)
+}
+
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
   for (const child of Object.values(value)) deepFreeze(child)

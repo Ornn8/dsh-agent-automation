@@ -1,3 +1,10 @@
+import {
+  parseVerificationContractIdentity,
+  parseVerificationEvidenceIdentifiers,
+  parseVerificationExecutionIdentity,
+  verificationContractIdentity,
+} from './verification-contract.mjs'
+
 export const AGENT_ISSUE_SKILL = 'github-issue-work'
 export const AGENT_REPAIR_SKILL = 'github-pr-repair'
 export const AGENT_REVIEW_SKILL = 'github-pr-review'
@@ -32,12 +39,46 @@ const AGENT_SKILLS = new Map([
   }],
 ])
 
-const AUTOMATION_RESULT_VERSION = 1
+const AUTOMATION_RESULT_V1 = 1
+const AUTOMATION_RESULT_V2 = 2
 const AUTOMATION_RESULT_OUTCOMES = new Set(['completed', 'blocked'])
 const AUTOMATION_RESULT_BLOCKED_REASONS = new Set(['cannot-complete', 'external', 'ci-baseline'])
 const AUTOMATION_RESULT_MARKER = '<!-- agent-automation-result\n'
 const AUTOMATION_RESULT_TRAILER = '\n-->'
 const MAX_AUTOMATION_RESULT_SUMMARY_LENGTH = 500
+const FULL_SHA = /^[0-9a-f]{40}$/
+
+function verificationReceipt(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Completed v2 Agent automation result verification must be an object')
+  }
+  if (!FULL_SHA.test(value.revision || '')) {
+    throw new Error('Completed v2 verification revision must be a full lowercase SHA')
+  }
+  const contract = parseVerificationContractIdentity(value.contract)
+  const hasProcedure = Object.hasOwn(value, 'procedure')
+  const hasEntrypoint = Object.hasOwn(value, 'entrypoint')
+  if (hasProcedure === hasEntrypoint) {
+    throw new Error('Completed v2 verification must declare exactly one of procedure or entrypoint')
+  }
+  const executionField = hasProcedure ? 'procedure' : 'entrypoint'
+  if (!exactlyKeys(value, ['revision', 'contract', executionField, 'result', 'evidence'])) {
+    throw new Error('Completed v2 Agent automation result verification has unexpected fields')
+  }
+  const execution = parseVerificationExecutionIdentity(
+    value[executionField],
+    `Completed v2 verification ${executionField}`,
+  )
+  if (value.result !== 'passed') throw new Error('Completed v2 verification result must be passed')
+  const evidence = parseVerificationEvidenceIdentifiers(value.evidence, 'Completed v2 verification evidence')
+  return {
+    revision: value.revision,
+    contract,
+    [executionField]: execution,
+    result: 'passed',
+    evidence,
+  }
+}
 
 /** Resolve one controller-owned Agent Skill independently of its runtime adapter. */
 export function agentSkillDefinition(skillName) {
@@ -102,16 +143,28 @@ export function parseAgentAutomationResult(finalMessage) {
     throw new Error(`Agent automation result is not valid JSON: ${error.message}`, { cause: error })
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || value.version !== AUTOMATION_RESULT_VERSION
+    || ![AUTOMATION_RESULT_V1, AUTOMATION_RESULT_V2].includes(value.version)
     || !AUTOMATION_RESULT_OUTCOMES.has(value.outcome)) {
     throw new Error('Agent automation result has an invalid version or outcome')
   }
   const summary = resultSummary(value.summary)
+  if (value.version === AUTOMATION_RESULT_V2) {
+    if (value.outcome !== 'completed') throw new Error('Agent automation result v2 only supports completed outcomes')
+    if (!exactlyKeys(value, ['version', 'outcome', 'summary', 'verification'])) {
+      throw new Error('Completed v2 Agent automation result has unexpected fields')
+    }
+    return {
+      version: AUTOMATION_RESULT_V2,
+      outcome: 'completed',
+      summary,
+      verification: verificationReceipt(value.verification),
+    }
+  }
   if (value.outcome === 'completed') {
     if (!exactlyKeys(value, ['version', 'outcome', 'summary'])) {
       throw new Error('Completed Agent automation result has unexpected fields')
     }
-    return { version: AUTOMATION_RESULT_VERSION, outcome: 'completed', summary }
+    return { version: AUTOMATION_RESULT_V1, outcome: 'completed', summary }
   }
   if (!AUTOMATION_RESULT_BLOCKED_REASONS.has(value.blockedReason)) {
     throw new Error('Blocked Agent automation result has an invalid blockedReason')
@@ -120,18 +173,61 @@ export function parseAgentAutomationResult(finalMessage) {
     if (!exactlyKeys(value, ['version', 'outcome', 'summary', 'blockedReason'])) {
       throw new Error('Non-CI blocked Agent automation result has unexpected fields')
     }
-    return { version: AUTOMATION_RESULT_VERSION, outcome: 'blocked', summary, blockedReason: value.blockedReason }
+    return { version: AUTOMATION_RESULT_V1, outcome: 'blocked', summary, blockedReason: value.blockedReason }
   }
   if (!exactlyKeys(value, ['version', 'outcome', 'summary', 'blockedReason', 'issue'])) {
     throw new Error('CI baseline Agent automation result has unexpected fields')
   }
   return {
-    version: AUTOMATION_RESULT_VERSION,
+    version: AUTOMATION_RESULT_V1,
     outcome: 'blocked',
     summary,
     blockedReason: 'ci-baseline',
     issue: baselineIssue(value.issue),
   }
+}
+
+/** Bind one parsed v2 completion to an exact revision and trusted Verification Contract. */
+export function bindAgentAutomationVerification(result, {
+  expectedRevision,
+  trustedVerificationContract,
+} = {}) {
+  if (!result || result.version !== AUTOMATION_RESULT_V2 || result.outcome !== 'completed') {
+    throw new Error('Agent automation verification binding requires a parsed v2 completed result')
+  }
+  if (!FULL_SHA.test(expectedRevision || '')) {
+    throw new Error('Agent automation verification binding requires a full lowercase revision SHA')
+  }
+  const expectedContract = verificationContractIdentity(trustedVerificationContract)
+  const receipt = verificationReceipt(result.verification)
+  if (receipt.revision !== expectedRevision) {
+    throw new Error('Agent automation verification receipt revision does not match the expected revision')
+  }
+  if (receipt.contract.contractId !== expectedContract.contractId || receipt.contract.hash !== expectedContract.hash) {
+    throw new Error('Agent automation verification receipt contract does not match the trusted Verification Contract')
+  }
+  const executionField = Object.hasOwn(trustedVerificationContract.contract, 'procedure')
+    ? 'procedure'
+    : 'entrypoint'
+  if (receipt[executionField] !== trustedVerificationContract.contract[executionField]) {
+    throw new Error(`Agent automation verification receipt ${executionField} does not match the trusted Verification Contract`)
+  }
+  const missingEvidence = trustedVerificationContract.contract.requiredEvidence
+    .filter(identifier => !receipt.evidence.includes(identifier))
+  if (missingEvidence.length) {
+    throw new Error(`Agent automation verification receipt is missing required evidence: ${missingEvidence.join(', ')}`)
+  }
+  const verification = Object.freeze({
+    ...receipt,
+    contract: expectedContract,
+    evidence: Object.freeze([...receipt.evidence]),
+  })
+  return Object.freeze({
+    version: AUTOMATION_RESULT_V2,
+    outcome: 'completed',
+    summary: result.summary,
+    verification,
+  })
 }
 
 /** Render one structured WorkRequest as a user-explicit Agent Skill invocation. */
