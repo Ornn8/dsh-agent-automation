@@ -915,7 +915,7 @@ export async function resolveProcessIdentity(pid, options = {}) {
     return `darwin:${new Date(parsed).toISOString()}`
   }
   if (platform === 'win32') {
-    const command = `$process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 3 }; $start = $process.StartTime; if ($null -eq $start) { exit 3 }; $start.ToUniversalTime().ToString('o')`
+    const command = `$process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 3 }; $process.StartTime.ToUniversalTime().ToString('o')`
     const executable = options.powershellPath ?? await defaultPowerShellPath()
     let result
     try {

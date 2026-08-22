@@ -498,6 +498,15 @@ test('process identity returns null only when Windows reports the target PID abs
   }), null)
 })
 
+test('process identity rejects successful Windows output with an empty StartTime', async () => {
+  const runCommand = async () => ({ stdout: '' })
+  await assert.rejects(resolveProcessIdentity(123, {
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    runCommand,
+  }), /Windows process identity output is empty/)
+})
+
 test('process identity requires an aborted child runner to acknowledge close', { timeout: 10_000 }, async () => {
   let child
   let closed = false
