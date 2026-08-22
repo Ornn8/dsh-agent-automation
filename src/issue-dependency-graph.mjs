@@ -6,10 +6,15 @@ function issueNumber(value) {
   return Number.isSafeInteger(value?.number) && value.number > 0 ? value.number : null
 }
 
+function parseIssueWork(issue) {
+  const number = issueNumber(issue)
+  return parseAgentWork(issue.body, number === null ? {} : { issueNumber: number })
+}
+
 function fingerprint(issue) {
   let declaration
   try {
-    declaration = parseAgentWork(issue.body)
+    declaration = parseIssueWork(issue)
   } catch {
     declaration = 'invalid'
   }
@@ -58,7 +63,7 @@ export function buildIssueDependencyGraph({ issues = [], pullRequests = [] } = {
     const issue = subjects.get(number).issue
     let work
     try {
-      work = parseAgentWork(issue.body)
+      work = parseIssueWork(issue)
     } catch {
       diagnostics.set(number, diagnostic(number, 'dependency-invalid-declaration'))
       continue

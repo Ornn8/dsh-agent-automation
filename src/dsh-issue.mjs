@@ -284,6 +284,7 @@ try {
     subjectStateVersion: governorStateVersion,
     trustedTaskSnapshot: {
       workflowStage: workRequest.stageId,
+      taskClass: agentWork.taskClass,
       labels: issue.labels,
       title: issue.title,
       body: issue.body,
