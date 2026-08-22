@@ -13,6 +13,7 @@ const SHA1 = /^[a-f0-9]{40}$/
 const DECISIONS = new Set(['stale', 'deferred', 'resume'])
 
 /** @typedef {Record<string, any>} AnyObject */
+/** @typedef {{version: number, workRequestId: string, repository: string, role: string, profileId: string, workflowId: string, stageId: string, definitionHash: string, revision: {base: string, head: string}, coordinationKey: string, subject: {type: string, number: number, stateVersion: string}, routeDecision: AnyObject, capacityGenerationHash: string, observationId: string}} Projection */
 
 /** @param {unknown} value @returns {string} */
 function canonicalJson(value) {
@@ -73,8 +74,9 @@ function validNow(value) {
 export function evaluateCapacityWaitResume({
   projection, workRequest, profile, currentSubject, currentRouteDecision, machineConfig, capacitySnapshot, now,
 } = {}) {
-  const parsedProjection = parseCapacityWaitProjection(projection)
+  const parsedProjection = /** @type {Projection} */ (parseCapacityWaitProjection(projection))
   const identity = capacityResumeRequestId(parsedProjection)
+  /** @type {(reason: string, candidates?: string[], available?: string[], hash?: string|null) => AnyObject} */
   const stale = (reason, candidates = [], available = [], hash = null) => decision(identity, reason, candidates, available, hash)
 
   let request
@@ -99,9 +101,10 @@ export function evaluateCapacityWaitResume({
 
   const subject = objectOrNull(currentSubject)
   if (!validSubject(subject)) return stale('subject-state-invalid')
-  if (subject.type !== parsedProjection.subject.type || subject.number !== parsedProjection.subject.number
-    || subject.stateVersion !== parsedProjection.subject.stateVersion
-    || canonicalJson(subject.revision) !== canonicalJson(parsedProjection.revision)) {
+  const current = /** @type {AnyObject} */ (subject)
+  if (current.type !== parsedProjection.subject.type || current.number !== parsedProjection.subject.number
+    || current.stateVersion !== parsedProjection.subject.stateVersion
+    || canonicalJson(current.revision) !== canonicalJson(parsedProjection.revision)) {
     return stale('subject-or-revision-stale')
   }
 
@@ -129,7 +132,7 @@ export function evaluateCapacityWaitResume({
   try {
     routeDecision = parseWorkerRouteDecision(currentRouteDecision, {
       workRequest: request,
-      stateVersion: subject.stateVersion,
+      stateVersion: current.stateVersion,
     })
   } catch {
     return stale('route-decision-invalid')
@@ -143,7 +146,7 @@ export function evaluateCapacityWaitResume({
   let currentCandidates
   try {
     currentCandidates = resolveWorkerCandidates({
-      config: structuredClone(machineConfig),
+      config: /** @type {AnyObject} */ (structuredClone(machineConfig)),
       role: request.role,
       routeDecision,
     })
@@ -162,7 +165,7 @@ export function evaluateCapacityWaitResume({
     for (const workerId of currentCandidates) {
       const record = parseCapacityRecord(records[workerId])
       if (record.sourceWorker !== workerId) return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
-      if (capacityEligibility(record, { now }).eligible) availableCandidates.push(workerId)
+      if (capacityEligibility(record, { now: /** @type {number} */ (now) }).eligible) availableCandidates.push(workerId)
     }
   } catch {
     return stale('capacity-snapshot-invalid', currentCandidates, [], snapshot.generationHash)
