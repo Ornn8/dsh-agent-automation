@@ -27,6 +27,15 @@ test('maintenance workflows route one exact replica without granting hosted muta
   assert.match(resume, /issues: write/)
 })
 
+test('maintenance recovery installs locked production dependencies with scripts disabled before entrypoint', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/controller-maintenance.yml', import.meta.url), 'utf8')
+  const install = workflow.indexOf('run: npm ci --omit=dev --ignore-scripts')
+  const entrypoint = workflow.indexOf('run: node controller/src/maintenance-recovery.mjs')
+  assert.notEqual(install, -1)
+  assert.ok(install < entrypoint)
+  assert.match(workflow.slice(workflow.lastIndexOf('      - name:', install - 1), entrypoint), /working-directory: controller/)
+})
+
 test('maintenance readiness reports the exact failing Worker stage', async () => {
   const source = await readFile(new URL('../src/maintenance-readiness.mjs', import.meta.url), 'utf8')
   assert.match(source, /let stage = 'CLI health'/)
