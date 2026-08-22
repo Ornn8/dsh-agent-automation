@@ -80,6 +80,11 @@ function verificationReceipt(value) {
   }
 }
 
+/** Parse one intrinsic v2 verification receipt from a persisted Worker observation. */
+export function parseAgentAutomationVerificationReceipt(value) {
+  return verificationReceipt(value)
+}
+
 /** Resolve one controller-owned Agent Skill independently of its runtime adapter. */
 export function agentSkillDefinition(skillName) {
   const skill = AGENT_SKILLS.get(skillName)

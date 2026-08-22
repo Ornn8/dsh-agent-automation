@@ -29,7 +29,7 @@ function matchingReviewMarker(body, head) {
 }
 
 /** Build bounded, non-authoritative review context from controller-verified GitHub metadata. */
-export function reviewObservations({ repository, head, checkRuns, comments }) {
+export function reviewObservations({ repository, head, checkRuns, comments, workerVerification }) {
   if (!Array.isArray(checkRuns?.check_runs)
     || !Number.isSafeInteger(checkRuns.total_count)
     || checkRuns.total_count > checkRuns.check_runs.length) {
@@ -75,7 +75,7 @@ export function reviewObservations({ repository, head, checkRuns, comments }) {
       }))
     : []
 
-  return {
+  const observations = {
     version: 1,
     exactHeadChecks: [...latestChecks.values()]
       .sort((left, right) => left.name.localeCompare(right.name))
@@ -88,4 +88,8 @@ export function reviewObservations({ repository, head, checkRuns, comments }) {
     priorReview,
     reviewResponses,
   }
+  if (workerVerification !== undefined && workerVerification !== null) {
+    observations.workerVerification = workerVerification
+  }
+  return observations
 }

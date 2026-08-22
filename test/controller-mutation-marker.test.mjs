@@ -5,7 +5,11 @@ import {
   parseControllerMutationMarker,
   trustedControllerMutation,
 } from '../src/controller-mutation-marker.mjs'
-import { trustedWorkerIdentity } from '../src/workflow-identity.mjs'
+import {
+  parseWorkerVerificationObservation,
+  renderWorkerVerificationObservation,
+  trustedWorkerIdentity,
+} from '../src/workflow-identity.mjs'
 
 const sha = 'a'.repeat(40)
 const record = {
@@ -127,4 +131,20 @@ test('Worker identity trusts the immutable configured controller author, not the
     { user: { login: 'unknown-login' }, body: body.replace('controller-login', 'unknown-login') },
     { type: 'issue', number: 7 }, 'change-worker', 'owner/target', async () => run, 'controller-login',
   ), null)
+})
+
+test('Worker verification observations are bounded, versioned, and fail closed when malformed', () => {
+  const receipt = {
+    revision: sha,
+    contract: { contractId: 'delivery-v1', hash: 'b'.repeat(64) },
+    procedure: 'verify/delivery',
+    result: 'passed',
+    evidence: ['test-report'],
+  }
+  const marker = renderWorkerVerificationObservation(receipt)
+  assert.deepEqual(parseWorkerVerificationObservation(`status\n${marker}\n${controllerMutationMarker(record)}`), receipt)
+  assert.equal(parseWorkerVerificationObservation(`${marker}${marker}`), null)
+  assert.equal(parseWorkerVerificationObservation(marker.replace('"revision"', '"revision":"bad","ignored"')), null)
+  assert.equal(parseWorkerVerificationObservation(`${marker.slice(0, -3)}x\n-->`), null)
+  assert.throws(() => renderWorkerVerificationObservation({ ...receipt, revision: 'BAD' }), /full lowercase SHA/)
 })
