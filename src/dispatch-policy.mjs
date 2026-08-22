@@ -128,7 +128,7 @@ export function independentIssueObservationNumber({ work, governorAction }) {
 }
 
 /** Select one exact, still-open capacity-waiting subject for a bounded resume. */
-export function selectCapacityWaitingWork({ pullRequests, issues, capacityWaits = [] } = {}) {
+export function selectCapacityWaitingWork({ pullRequests, issues, capacityWaits = [], rotation = 0 } = {}) {
   const pullRequestByNumber = new Map((pullRequests || []).map(value => [value.number, value]))
   const issueByNumber = new Map((issues || []).map(value => [value.number, value]))
   const candidates = capacityWaits
@@ -149,17 +149,23 @@ export function selectCapacityWaitingWork({ pullRequests, issues, capacityWaits 
           || labelNames(source).has('automation/repair-blocked')
           || labelNames(source).has('automation/ci-baseline')
           || labelNames(source).has('agent/dsh-failed')) return null
-        return { type: 'repair', number: source.number, head: source.head.sha, projection }
+        return { type: 'repair', number: source.number, head: source.head.sha, projection, request: wait.request }
       }
       if (labelNames(source).has('automation/paused')
         || labelNames(source).has('agent/dsh-failed')
         || labelNames(source).has('agent/dsh-blocked')
         || pullRequests.some(pullRequest => closesIssue(pullRequest, source.number))) return null
-      return { type: 'issue', number: source.number, projection }
+      return { type: 'issue', number: source.number, projection, request: wait.request }
     })
     .filter(Boolean)
-    .sort((left, right) => left.number - right.number)
-  return candidates[0] || null
+    .sort((left, right) => left.number - right.number
+      || left.projection.subject.type.localeCompare(right.projection.subject.type)
+      || left.projection.workRequestId.localeCompare(right.projection.workRequestId))
+  if (!candidates.length) return null
+  const offset = Number.isSafeInteger(rotation) && rotation > 0
+    ? (rotation - 1) % candidates.length
+    : 0
+  return candidates[offset]
 }
 
 /** Select one safe unit of backlog work, preferring blocked PR repairs. */

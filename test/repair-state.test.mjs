@@ -9,6 +9,7 @@ import {
   recoverableRepairIdentity,
   recordedRepairStatus,
   recordedRepairState,
+  trustedRepairSourceComment,
 } from '../src/repair-state.mjs'
 import { classifyAndCreateWorkerRouteDecision } from '../src/worker-routing.mjs'
 
@@ -52,6 +53,51 @@ test('repair status exposes controller provenance only as audit metadata', () =>
     ciWorkflow: null,
     originalRequestId: null,
   })
+})
+
+test('capacity resume restores repair routing only from a trusted source status', () => {
+  const sourceRun = '31775196648'
+  const head = 'c'.repeat(40)
+  const requestId = `review-repair-${head}-comment-7`
+  const source = (repairClass, extra = '') => [
+    `<!-- dsh-review-repair:${controllerSha}:${head}:${requestId} -->`,
+    '- Status: **capacity-waiting**',
+    `- Controller SHA: \`${controllerSha}\``,
+    `- Repair class: \`${repairClass}\``,
+    '- Stage: `repair`',
+    ...(repairClass === 'automatic-ci' ? ['- CI workflow: `CI`'] : []),
+    `- Reviewed head: \`${head}\``,
+    `- Run: https://github.com/Ornn8/deepseek-harness/actions/runs/${sourceRun}`,
+    extra,
+  ].filter(Boolean).join('\n')
+  for (const [repairClass, expected] of [
+    ['automatic-review', ['automatic-review', 'review-repair']],
+    ['automatic-merge', ['automatic-merge', 'merge-conflict']],
+    ['explicit-human', ['explicit-human', 'review-repair']],
+    ['automatic-ci', ['automatic-ci', 'CI']],
+  ]) {
+    const identity = trustedRepairSourceComment({
+      user: { login: 'controller' },
+      body: source(repairClass),
+    }, {
+      controllerSha,
+      expectedHead: head,
+      sourceRunId: sourceRun,
+      markerAuthor: 'controller',
+      repository: 'Ornn8/deepseek-harness',
+    })
+    assert.deepEqual([identity?.repairClass, identity?.repairCause], expected)
+  }
+  assert.equal(trustedRepairSourceComment({
+    user: { login: 'attacker' },
+    body: source('automatic-merge'),
+  }, {
+    controllerSha,
+    expectedHead: head,
+    sourceRunId: sourceRun,
+    markerAuthor: 'controller',
+    repository: 'Ornn8/deepseek-harness',
+  }), null)
 })
 
 test('recovery identity restores immutable repair routing evidence and rejects contradictory source lines', () => {

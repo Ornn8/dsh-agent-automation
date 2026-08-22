@@ -11,8 +11,9 @@ import {
   selectCapacityWaitingWork,
   trustedBlockedReviewProof,
 } from './dispatch-policy.mjs'
-import { parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
+import { capacityResumeRequestId, parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
 import { trustedControllerMutation } from './controller-mutation-marker.mjs'
+import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { reviewRunIdFromCheckRun } from './landing-policy.mjs'
 import {
   governorBudgetDecision,
@@ -27,9 +28,10 @@ import {
   pullRequestGovernorSubject,
   trustedGovernorRecords,
 } from './governor-state.mjs'
-import { agentWorkRequestId } from './agent-work.mjs'
-import { loadTrustedWorkflowProfile, resolveWorkflow } from './workflow-profile.mjs'
+import { agentWorkRequestId, resolveAgentWorkDispatch } from './agent-work.mjs'
+import { loadTrustedWorkflowProfile, resolveWorkflow, resolveWorkflowStage } from './workflow-profile.mjs'
 import { createIssueImplementationRequest, createStageWorkRequest, repositoryDispatchBody } from './work-request.mjs'
+import { parseWorkerRouteDecision } from './worker-routing.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
@@ -65,14 +67,15 @@ const capacityResumeOnly = (() => {
   if (value !== 'true' && value !== 'false') throw new Error('CAPACITY_RESUME_ONLY must be true or false')
   return value === 'true'
 })()
-const capacityRotatingPage = (() => {
+const capacityRunNumber = (() => {
   if (!capacityResumeOnly) return 1
   const value = process.env.GITHUB_RUN_NUMBER?.trim() || '1'
   if (!/^[1-9][0-9]*$/.test(value)) throw new Error('GITHUB_RUN_NUMBER must be a positive integer')
   const runNumber = Number.parseInt(value, 10)
   if (!Number.isSafeInteger(runNumber) || runNumber < 1) throw new Error('GITHUB_RUN_NUMBER must be a positive safe integer')
-  return ((runNumber - 1) % 16) + 1
+  return runNumber
 })()
+const capacityRotatingPage = capacityResumeOnly ? ((capacityRunNumber - 1) % 16) + 1 : 1
 const capacityPageSize = 100
 const trustedControllerLogin = requiredEnv('TRUSTED_CONTROLLER_LOGIN')
 if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(trustedControllerLogin)) {
@@ -250,6 +253,81 @@ async function capacitySnapshot() {
   return { waits, pullRequests, issues }
 }
 
+async function currentDefaultBranchCommit() {
+  const repositoryState = await ghJson(['api', `repos/${repository}`], 'repository state for capacity resume')
+  if (typeof repositoryState?.default_branch !== 'string' || !repositoryState.default_branch) {
+    throw new Error('Repository default branch is missing for capacity resume')
+  }
+  const commit = await ghJson([
+    'api', `repos/${repository}/commits/${encodeURIComponent(repositoryState.default_branch)}`,
+  ], `default branch ${repositoryState.default_branch} for capacity resume`)
+  if (!/^[0-9a-f]{40}$/.test(commit?.sha || '')) {
+    throw new Error('Default branch head is not a full SHA for capacity resume')
+  }
+  return { name: repositoryState.default_branch, sha: commit.sha }
+}
+
+async function currentCapacityWaits(capacity) {
+  const defaultBranch = await currentDefaultBranchCommit()
+  const profileCache = new Map()
+  const currentIssues = new Map(capacity.issues.map(issue => [issue.number, issue]))
+  const currentPullRequests = new Map(capacity.pullRequests.map(pullRequest => [pullRequest.number, pullRequest]))
+  const waits = []
+  for (const wait of capacity.waits) {
+    const projection = wait.projection
+    if (projection.revision.base !== defaultBranch.sha) continue
+    if (projection.subject.type === 'pull-request'
+      && currentPullRequests.get(projection.subject.number)?.base?.ref !== defaultBranch.name) continue
+    const cacheKey = `${projection.profileId}:${projection.revision.base}`
+    try {
+      let profile = profileCache.get(cacheKey)
+      if (!profile) {
+        profile = await targetProfile(projection.profileId, projection.revision.base)
+        profileCache.set(cacheKey, profile)
+      }
+      if (profile.definitionHash !== projection.definitionHash
+        || profile.definition.profileId !== projection.profileId) continue
+      const stage = resolveWorkflowStage(
+        profile.definition,
+        projection.workflowId,
+        projection.stageId,
+        'worker',
+      )
+      if (stage.role !== projection.role
+        || (projection.subject.type === 'pull-request' && stage.procedure !== 'github-pr-repair')) continue
+      const request = createStageWorkRequest({
+        ...profile,
+        workflowId: projection.workflowId,
+        stageId: projection.stageId,
+        repository,
+        subject: { type: projection.subject.type, number: projection.subject.number },
+        revision: projection.revision,
+        coordinationKey: `${repository}:${profile.definition.profileId}:${projection.workflowId}`,
+        requestId: projection.workRequestId,
+      })
+      if (projection.subject.type === 'issue') {
+        const issue = currentIssues.get(projection.subject.number)
+        const dispatch = resolveAgentWorkDispatch(
+          issue?.body || '',
+          projection.subject.number,
+          request.requestId,
+          profile.definitionHash,
+        )
+        if (!dispatch || dispatch.work.profile !== projection.profileId
+          || dispatch.work.workflow !== projection.workflowId) continue
+      }
+      parseWorkerRouteDecision(projection.routeDecision, {
+        workRequest: request,
+        stateVersion: wait.currentStateVersion,
+      })
+      waits.push({ ...wait, request })
+    } catch (error) {
+      // One stale subject, Profile, Stage, or route projection must not block another waiter.
+    }
+  }
+  return waits
+}
+
 async function writeGovernorRecord(number, record) {
   await run(githubExecutable, [
     'api', '--method', 'POST', `repos/${repository}/issues/${number}/comments`, '--input', '-',
@@ -345,6 +423,7 @@ async function recordApplied(work, admission) {
 }
 
 const capacity = capacityResumeOnly ? await capacitySnapshot() : null
+const capacityWaits = capacityResumeOnly ? await currentCapacityWaits(capacity) : null
 const pullRequests = capacityResumeOnly
   ? capacity.pullRequests
   : await ghPages(`repos/${repository}/pulls?state=open&per_page=${capacityPageSize}`, 'open pull requests')
@@ -356,7 +435,8 @@ const work = capacityResumeOnly
   ? selectCapacityWaitingWork({
     pullRequests,
     issues,
-    capacityWaits: capacity.waits,
+    capacityWaits,
+    rotation: capacityRunNumber,
   })
   : selectBacklogWork({
     repository,
@@ -373,50 +453,30 @@ if (!work) {
 }
 
 if (work.type === 'issue') {
-  const repositoryState = await ghJson(['api', `repos/${repository}`], 'repository state')
-  const defaultBranch = repositoryState.default_branch
-  if (typeof defaultBranch !== 'string' || !defaultBranch) throw new Error('Repository default branch is missing')
-  const baseCommit = await ghJson([
-    'api', `repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`,
-  ], `default branch ${defaultBranch}`)
-  if (!/^[0-9a-f]{40}$/.test(baseCommit?.sha || '')) throw new Error('Default branch head is not a full SHA')
-  if (capacityResumeOnly && work.projection.revision.base !== baseCommit.sha) {
-    throw new Error('Capacity wait Issue WorkRequest revision is stale')
-  }
-  const profile = await targetProfile(
-    capacityResumeOnly ? work.projection.profileId : work.work.profile,
-    capacityResumeOnly ? work.projection.revision.base : baseCommit.sha,
-  )
-  const workflowId = capacityResumeOnly ? work.projection.workflowId : work.work.workflow
-  const workflow = resolveWorkflow(profile.definition, workflowId)
-  const active = activeWorkflowIssueNumbers({
-    issues,
-    pullRequests,
-    profileId: profile.definition.profileId,
-    workflowId,
-    excludeIssueNumber: requestedIssueNumber === work.number ? work.number : null,
-  })
-  if (!capacityResumeOnly && active.size >= workflow.coordination.limit) {
-    process.stdout.write(`Workflow ${profile.definition.profileId}/${workflowId} is at its coordination limit ${workflow.coordination.limit}.\n`)
-    process.exit(0)
-  }
   if (capacityResumeOnly) {
-    if (profile.definitionHash !== work.projection.definitionHash) throw new Error('Capacity wait Profile is stale')
-    const stage = workflow.stages.find(candidate => candidate.id === work.projection.stageId)
-    if (!stage || stage.uses !== 'worker' || stage.role !== work.projection.role) {
-      throw new Error('Capacity wait Stage is no longer eligible')
-    }
-    work.request = createStageWorkRequest({
-      ...profile,
-      workflowId,
-      stageId: work.projection.stageId,
-      repository,
-      subject: { type: 'issue', number: work.number },
-      revision: work.projection.revision,
-      coordinationKey: `${repository}:${profile.definition.profileId}:${workflowId}`,
-      requestId: work.projection.workRequestId,
-    })
+    if (!work.request) throw new Error('Capacity wait Issue WorkRequest was not prepared')
   } else {
+    const repositoryState = await ghJson(['api', `repos/${repository}`], 'repository state')
+    const defaultBranch = repositoryState.default_branch
+    if (typeof defaultBranch !== 'string' || !defaultBranch) throw new Error('Repository default branch is missing')
+    const baseCommit = await ghJson([
+      'api', `repos/${repository}/commits/${encodeURIComponent(defaultBranch)}`,
+    ], `default branch ${defaultBranch}`)
+    if (!/^[0-9a-f]{40}$/.test(baseCommit?.sha || '')) throw new Error('Default branch head is not a full SHA')
+    const profile = await targetProfile(work.work.profile, baseCommit.sha)
+    const workflowId = work.work.workflow
+    const workflow = resolveWorkflow(profile.definition, workflowId)
+    const active = activeWorkflowIssueNumbers({
+      issues,
+      pullRequests,
+      profileId: profile.definition.profileId,
+      workflowId,
+      excludeIssueNumber: requestedIssueNumber === work.number ? work.number : null,
+    })
+    if (active.size >= workflow.coordination.limit) {
+      process.stdout.write(`Workflow ${profile.definition.profileId}/${workflowId} is at its coordination limit ${workflow.coordination.limit}.\n`)
+      process.exit(0)
+    }
     const requestId = agentWorkRequestId(work.work, profile.definitionHash)
     work.request = createIssueImplementationRequest({
       ...profile,
@@ -430,20 +490,34 @@ if (work.type === 'issue') {
 }
 
 if (capacityResumeOnly) {
-  await run(githubExecutable, [
-    'api', '--method', 'POST', `repos/${repository}/dispatches`, '--input', '-',
-  ], {
-    env: githubEnvironment,
-    input: work.type === 'repair'
-      ? JSON.stringify({
-          event_type: 'dsh-repair',
-          client_payload: {
-            pr_number: work.number,
-            head_sha: work.projection.subject.head,
-            request_id: work.projection.workRequestId,
-          },
-        })
-      : JSON.stringify(repositoryDispatchBody(work.request)),
+  if (!work.request) throw new Error('Capacity wait WorkRequest was not prepared')
+  const resumeRequestId = capacityResumeRequestId(work.projection)
+  const issuePayload = work.type === 'issue' ? repositoryDispatchBody(work.request) : null
+  const payload = work.type === 'repair'
+    ? {
+        event_type: 'dsh-repair',
+        client_payload: {
+          pr_number: work.number,
+          head_sha: work.projection.subject.head,
+          request_id: resumeRequestId,
+          capacity_resume_id: resumeRequestId,
+          work_request: work.request,
+        },
+    }
+    : {
+        ...issuePayload,
+        client_payload: {
+          ...issuePayload.client_payload,
+          capacity_resume_id: resumeRequestId,
+        },
+      }
+  await dispatchWithReceipt({
+    executable: githubExecutable,
+    environment: githubEnvironment,
+    repository,
+    workflowFile: work.type === 'repair' ? 'agent-pr-rework.yml' : 'agent-issues.yml',
+    payload,
+    requestId: resumeRequestId,
   })
   process.stdout.write(`Resumed capacity-waiting ${work.type === 'repair' ? 'pull request' : 'Issue'} #${work.number}.\n`)
   process.exit(0)

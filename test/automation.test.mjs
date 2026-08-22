@@ -1182,9 +1182,16 @@ test('capacity reconciliation uses one trusted bounded wake source', async () =>
     backlogSource.indexOf('async function writeGovernorRecord'),
   )
   const reviewSource = await readFile(new URL('../src/agent-review.mjs', import.meta.url), 'utf8')
+  const repairSource = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')
+  const issueSource = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
   const issueCaller = await readFile(new URL('../templates/target/.github/workflows/agent-issues.yml', import.meta.url), 'utf8')
   const landingCaller = await readFile(new URL('../templates/target/.github/workflows/agent-landing-reconcile.yml', import.meta.url), 'utf8')
   assert.match(backlogSource, /trustedControllerMutation/)
+  assert.match(backlogSource, /dispatchWithReceipt/)
+  assert.match(backlogSource, /capacityResumeRequestId/)
+  assert.match(backlogSource, /resolveAgentWorkDispatch/)
+  assert.match(backlogSource, /parseWorkerRouteDecision/)
+  assert.match(backlogSource, /currentPullRequests\.get\(projection\.subject\.number\)\?\.base\?\.ref !== defaultBranch\.name/)
   assert.match(backlogSource, /GITHUB_RUN_NUMBER/)
   assert.match(capacitySource, /const pages = \[1\]/)
   assert.match(capacitySource, /capacityRotatingPage > 1/)
@@ -1202,6 +1209,12 @@ test('capacity reconciliation uses one trusted bounded wake source', async () =>
   assert.doesNotMatch(issueCaller, /capacity_resume_only:/)
   assert.match(landingCaller, /schedule:/)
   assert.match(landingCaller, /capacity_resume_only:/)
+  assert.match(repairSource, /trustedRepairSourceComment/)
+  assert.match(repairSource, /capacitySource\.repairClass/)
+  assert.match(repairSource, /capacityResumeRequestId\(priorCapacityProjection\)/)
+  assert.match(repairSource, /transportedRequest\.coordinationKey/)
+  assert.match(issueSource, /capacityResumeId !== capacityResumeRequestId\(priorCapacityProjection\)/)
+  assert.match(issueSource, /priorCapacityProjection = null/)
 })
 
 test('privileged agent workflows pass only an immutable role, while hosted admission starts no worker', async () => {
@@ -1756,6 +1769,27 @@ test('capacity backlog resume selects one exact waiting subject and rejects stal
   })
   assert.equal(selected.type, 'repair')
   assert.equal(selected.number, 10)
+  assert.equal(selectCapacityWaitingWork({
+    pullRequests: [pullRequest, { ...pullRequest, number: 20 }], issues: [],
+    capacityWaits: [
+      { repository: 'Ornn8/deepseek-harness', projection, currentStateVersion: 'b'.repeat(64) },
+      { repository: 'Ornn8/deepseek-harness', projection: { ...projection, workRequestId: 'repair-request-20', subject: { ...projection.subject, number: 20 }, routeDecision: { ...projection.routeDecision, workRequestId: 'repair-request-20' } }, currentStateVersion: 'b'.repeat(64) },
+    ],
+    rotation: 2,
+  }).number, 20)
+  const secondProjection = {
+    ...projection,
+    workRequestId: 'repair-request-20',
+    subject: { ...projection.subject, number: 20 },
+    routeDecision: { ...projection.routeDecision, workRequestId: 'repair-request-20' },
+  }
+  assert.equal(selectCapacityWaitingWork({
+    pullRequests: [pullRequest, { ...pullRequest, number: 20 }], issues: [],
+    capacityWaits: [
+      { repository: 'Ornn8/deepseek-harness', projection, currentStateVersion: '0'.repeat(64) },
+      { repository: 'Ornn8/deepseek-harness', projection: secondProjection, currentStateVersion: 'b'.repeat(64) },
+    ],
+  }).number, 20)
   assert.equal(selectCapacityWaitingWork({
     pullRequests: [pullRequest], issues: [],
     capacityWaits: [{ repository: 'Ornn8/deepseek-harness', projection, currentStateVersion: '0'.repeat(64) }],

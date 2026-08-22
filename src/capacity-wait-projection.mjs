@@ -1,6 +1,7 @@
 // @ts-check
 
 import { parseWorkerRouteDecision } from './worker-routing.mjs'
+import { createHash } from 'node:crypto'
 
 const FULL_SHA256 = /^[0-9a-f]{64}$/
 const FULL_SHA1 = /^[0-9a-f]{40}$/
@@ -136,6 +137,40 @@ export function parseCapacityWaitProjection(value) {
 /** @param {AnyObject} value @returns {AnyObject} */
 export function createCapacityWaitProjection(value = {}) {
   return parseCapacityWaitProjection({ version: 1, ...value })
+}
+
+/**
+ * Return the durable receipt identity for one exact capacity resume.
+ * @param {AnyObject} value
+ * @returns {string}
+ */
+export function capacityResumeRequestId(value = {}) {
+  const projection = value.subject && typeof value.subject === 'object'
+    ? value
+    : {
+        workRequestId: value.workRequestId,
+        subjectStateVersion: value.subjectStateVersion,
+        capacityGenerationHash: value.capacityGenerationHash,
+      }
+  const subject = projection.subject && typeof projection.subject === 'object'
+    ? /** @type {AnyObject} */ (projection.subject)
+    : null
+  const workRequestId = identifier(projection.workRequestId, REQUEST_ID, 'resume workRequestId')
+  const subjectStateVersion = identifier(
+    projection.subjectStateVersion ?? subject?.stateVersion,
+    FULL_SHA256,
+    'resume subjectStateVersion',
+  )
+  const capacityGenerationHash = identifier(
+    projection.capacityGenerationHash,
+    FULL_SHA256,
+    'resume capacityGenerationHash',
+  )
+  return `capacity-resume-${createHash('sha256').update(canonicalJson([
+    workRequestId,
+    subjectStateVersion,
+    capacityGenerationHash,
+  ])).digest('hex')}`
 }
 
 /** Render a stable, sanitized status line containing one projection. */

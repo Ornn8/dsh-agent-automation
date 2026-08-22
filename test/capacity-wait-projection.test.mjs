@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   capacityWaitStatusLine,
+  capacityResumeRequestId,
   createCapacityWaitProjection,
   parseCapacityWaitProjection,
   parseCapacityWaitStatus,
@@ -44,4 +45,23 @@ test('CapacityWaitProjection rejects identity, subject, route, and secret-like f
   assert.throws(() => parseCapacityWaitProjection({ ...projection, subject: { ...projection.subject, number: 0 } }), /subject.number/)
   assert.throws(() => parseCapacityWaitProjection({ ...projection, secret: 'token' }), /unknown field/)
   assert.throws(() => parseCapacityWaitStatus(`${capacityWaitStatusLine(projection)}\n${capacityWaitStatusLine(projection)}`), /exactly one/)
+})
+
+test('capacity resume receipt identity binds the root request, subject state, and generation', () => {
+  const projection = createCapacityWaitProjection(projectionInput)
+  const requestId = capacityResumeRequestId(projection)
+  assert.match(requestId, /^capacity-resume-[0-9a-f]{64}$/)
+  assert.equal(requestId, capacityResumeRequestId({
+    workRequestId: projection.workRequestId,
+    subjectStateVersion: projection.subject.stateVersion,
+    capacityGenerationHash: projection.capacityGenerationHash,
+  }))
+  assert.notEqual(requestId, capacityResumeRequestId({
+    ...projection,
+    capacityGenerationHash: 'f'.repeat(64),
+  }))
+  assert.notEqual(requestId, capacityResumeRequestId({
+    ...projection,
+    subject: { ...projection.subject, stateVersion: 'f'.repeat(64) },
+  }))
 })

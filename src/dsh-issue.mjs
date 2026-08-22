@@ -25,12 +25,18 @@ import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-pro
 import { requireEligibleWorkflowStage } from './workflow-runtime.mjs'
 import { parseAgentWorkRequest } from './work-request.mjs'
 import { createWorkerExecutionClaim, runRoleWorker } from './role-worker.mjs'
-import { capacityWaitStatusLine, createCapacityWaitProjection, parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
+import {
+  capacityResumeRequestId,
+  capacityWaitStatusLine,
+  createCapacityWaitProjection,
+  parseCapacityWaitStatus,
+} from './capacity-wait-projection.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const workRequest = parseAgentWorkRequest(parseJson(requiredEnv('WORK_REQUEST_JSON'), 'WorkRequest'))
 const issueNumber = workRequest.subject.number
 const issueRequestId = workRequest.requestId
+const capacityResumeId = process.env.CAPACITY_RESUME_ID?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
 const config = await loadConfig()
 const cancellation = processCancellationSignal()
@@ -159,10 +165,15 @@ const admissionComments = (await ghJson([
 const governorSubject = issueGovernorSubject(issue)
 const governorStateVersion = subjectStateVersion(governorSubject)
 const statusComment = admissionComments.slice().reverse().find(comment => authenticatedMarker(comment, marker, markerAuthor))
-const priorCapacityProjection = statusComment?.body?.match(/^- Status: \*\*capacity-waiting\*\*$/m)
-  ? parseCapacityWaitStatus(statusComment.body)
-  : null
-if (priorCapacityProjection && (priorCapacityProjection.workRequestId !== issueRequestId
+let priorCapacityProjection = null
+if (statusComment?.body?.match(/^- Status: \*\*capacity-waiting\*\*$/m)) {
+  try {
+    priorCapacityProjection = parseCapacityWaitStatus(statusComment.body)
+  } catch (error) {
+    if (capacityResumeId) throw error
+  }
+}
+const projectionMatchesIssue = priorCapacityProjection && !(priorCapacityProjection.workRequestId !== issueRequestId
   || priorCapacityProjection.role !== workRequest.role
   || priorCapacityProjection.profileId !== workRequest.profileId
   || priorCapacityProjection.workflowId !== workRequest.workflowId
@@ -172,8 +183,13 @@ if (priorCapacityProjection && (priorCapacityProjection.workRequestId !== issueR
   || priorCapacityProjection.revision.head !== workRequest.revision.head
   || priorCapacityProjection.subject.type !== 'issue'
   || priorCapacityProjection.subject.number !== issueNumber
-  || priorCapacityProjection.subject.stateVersion !== governorStateVersion)) {
-  throw new Error('Capacity wait projection is stale for the current Issue WorkRequest')
+  || priorCapacityProjection.subject.stateVersion !== governorStateVersion)
+if (capacityResumeId) {
+  if (!projectionMatchesIssue || capacityResumeId !== capacityResumeRequestId(priorCapacityProjection)) {
+    throw new Error('Capacity resume identity does not match the trusted current Issue projection')
+  }
+} else if (!projectionMatchesIssue) {
+  priorCapacityProjection = null
 }
 const governorRecords = await trustedGovernorRecords({
   comments: admissionComments,

@@ -57,7 +57,12 @@ import {
 import { loadTrustedWorkflowProfile, resolveWorkflowStage } from './workflow-profile.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { githubPages } from './supervision-github.mjs'
-import { capacityWaitStatusLine, createCapacityWaitProjection, parseCapacityWaitStatus } from './capacity-wait-projection.mjs'
+import {
+  capacityResumeRequestId,
+  capacityWaitStatusLine,
+  createCapacityWaitProjection,
+  parseCapacityWaitStatus,
+} from './capacity-wait-projection.mjs'
 
 const REREVIEW_OBSERVATION_ATTEMPTS = 5
 const REREVIEW_OBSERVATION_DELAY_MS = 2_000
@@ -65,10 +70,12 @@ const REREVIEW_OBSERVATION_DELAY_MS = 2_000
 const repository = requiredEnv('TARGET_REPOSITORY')
 let pullRequestNumber = Number.parseInt(requiredEnv('PR_NUMBER'), 10)
 const expectedHead = requiredEnv('HEAD_SHA')
-const requestId = process.env.REPAIR_REQUEST_ID?.trim() || ''
 const transportedRequest = process.env.WORK_REQUEST_JSON?.trim()
   ? parseAgentWorkRequest(parseJson(process.env.WORK_REQUEST_JSON, 'WorkRequest'))
   : null
+const rawRequestId = process.env.REPAIR_REQUEST_ID?.trim() || ''
+const capacityResumeId = process.env.CAPACITY_RESUME_ID?.trim() || ''
+const requestId = capacityResumeId ? transportedRequest?.requestId || '' : rawRequestId
 const ciWorkflowName = process.env.CI_WORKFLOW_NAME?.trim() || ''
 const repairCause = process.env.REPAIR_CAUSE?.trim() || ''
 const runnerTemp = resolve(requiredEnv('RUNNER_TEMP'))
@@ -94,7 +101,14 @@ const governorWriterTrust = {
   controllerSha,
   workflowPath: '.github/workflows/dsh-repair.yml',
 }
-if (requestId && !/^[A-Za-z0-9._-]{1,100}$/.test(requestId)) throw new Error('Invalid REPAIR_REQUEST_ID')
+if (capacityResumeId && rawRequestId !== capacityResumeId) throw new Error('Capacity resume request id transport is inconsistent')
+if (capacityResumeId && (!transportedRequest || !/^capacity-resume-[0-9a-f]{64}$/.test(capacityResumeId))) {
+  throw new Error('Capacity resume requires a full WorkRequest and receipt identity')
+}
+if (requestId && !/^[A-Za-z0-9._-]{1,160}$/.test(requestId)) throw new Error('Invalid REPAIR_REQUEST_ID')
+if (capacityResumeId && (ciWorkflowName || repairCause)) {
+  throw new Error('Capacity resume cannot accept caller repair classification')
+}
 if (!/^[0-9a-f]{40}$/.test(controllerSha)) throw new Error('CONTROLLER_SHA must be a full lowercase commit SHA')
 const marker = requestId
   ? `<!-- dsh-review-repair:${controllerSha}:${expectedHead}:${requestId} -->`
@@ -361,6 +375,7 @@ if (pullRequest.state !== 'open') throw new Error(`Pull request #${pullRequestNu
 if (pullRequest.draft) throw new Error(`Pull request #${pullRequestNumber} is still a draft`)
 if (pullRequest.head.repo?.full_name !== repository) throw new Error('Fork pull requests cannot reach the DSH repair agent')
 if (pullRequest.head.sha !== expectedHead) {
+  if (capacityResumeId) throw new Error('Capacity resume pull request head changed before repair started')
   if (!await requestTransportedAdvancement(pullRequest)) throw new Error('The pull request head changed before DSH repair started')
   await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
   await upsertStatus('complete', branch, `The interrupted repair had already advanced the pull request to ${pullRequest.head.sha}; the trusted Profile workflow requested its exact-head review.`)
@@ -434,20 +449,62 @@ if (recoveryRequest) {
     ? executionRequestId.slice(`review-repair-${expectedHead}-`.length)
     : null
 }
-const capacityStatusComment = priorComments.slice().reverse().find(comment => {
-  if (comment?.user?.login !== markerAuthor || !/^- Status: \*\*capacity-waiting\*\*$/m.test(String(comment.body || ''))) return false
-  if (!recoveryRequest) return authenticatedMarker(comment, marker, markerAuthor)
-  return Boolean(trustedRepairSourceComment(comment, {
+let capacityStatusComment = null
+let capacitySource = null
+for (const comment of priorComments.slice().reverse()) {
+  if (comment?.user?.login !== markerAuthor || !/^- Status: \*\*capacity-waiting\*\*$/m.test(String(comment.body || ''))) continue
+  if (capacityResumeId) {
+    const status = recordedRepairStatus(comment.body)
+    const source = trustedRepairSourceComment(comment, {
+      controllerSha,
+      expectedHead,
+      sourceRunId: status.runId,
+      markerAuthor,
+      repository,
+    })
+    if (!source || source.requestId !== requestId) continue
+    capacitySource = source
+    capacityStatusComment = comment
+    break
+  }
+  if (!recoveryRequest && authenticatedMarker(comment, marker, markerAuthor)) {
+    capacityStatusComment = comment
+    break
+  }
+  if (recoveryRequest && trustedRepairSourceComment(comment, {
     controllerSha,
     expectedHead,
     sourceRunId: recoveryIdentity.sourceRunId,
     markerAuthor,
     repository,
-  })?.requestId === executionRequestId)
-})
+  })?.requestId === executionRequestId) {
+    capacityStatusComment = comment
+    break
+  }
+}
 const priorCapacityProjection = capacityStatusComment
   ? parseCapacityWaitStatus(capacityStatusComment.body)
   : null
+if (capacityResumeId && (!capacitySource || !priorCapacityProjection
+  || capacityResumeId !== capacityResumeRequestId(priorCapacityProjection)
+  || capacitySource.requestId !== priorCapacityProjection.workRequestId
+  || capacitySource.workflowStage !== priorCapacityProjection.stageId)) {
+  throw new Error('Capacity resume is not bound to the trusted repair status projection')
+}
+if (capacityResumeId && transportedRequest && priorCapacityProjection
+  && (transportedRequest.requestId !== priorCapacityProjection.workRequestId
+    || transportedRequest.role !== priorCapacityProjection.role
+    || transportedRequest.profileId !== priorCapacityProjection.profileId
+    || transportedRequest.workflowId !== priorCapacityProjection.workflowId
+    || transportedRequest.stageId !== priorCapacityProjection.stageId
+    || transportedRequest.definitionHash !== priorCapacityProjection.definitionHash
+    || transportedRequest.revision.base !== priorCapacityProjection.revision.base
+    || transportedRequest.revision.head !== priorCapacityProjection.revision.head
+    || transportedRequest.subject.type !== priorCapacityProjection.subject.type
+    || transportedRequest.subject.number !== priorCapacityProjection.subject.number
+    || transportedRequest.coordinationKey !== `${repository}:${priorCapacityProjection.profileId}:${priorCapacityProjection.workflowId}`)) {
+  throw new Error('Capacity resume WorkRequest does not match the trusted repair status projection')
+}
 if (priorCapacityProjection && (priorCapacityProjection.workRequestId !== executionRequestId
   || priorCapacityProjection.role !== repairRole
   || priorCapacityProjection.revision.base !== pullRequest.base.sha
@@ -459,6 +516,18 @@ if (priorCapacityProjection && (priorCapacityProjection.workRequestId !== execut
   throw new Error('Capacity wait projection is stale for the current pull-request repair')
 }
 if (priorCapacityProjection) effectiveWorkflowStage = priorCapacityProjection.stageId
+if (capacityResumeId) {
+  repairClass = capacitySource.repairClass
+  effectiveRepairCause = capacitySource.repairCause
+  effectiveRepairCode = capacitySource.repairCode
+  effectiveCiWorkflowName = capacitySource.ciWorkflow || ''
+  effectiveWorkflowStage = capacitySource.workflowStage || priorCapacityProjection.stageId
+  mergeRequest = repairClass === 'automatic-merge'
+  explicitRequest = repairClass === 'explicit-human'
+  reviewObservationId = isReviewRepairRequestId(requestId, expectedHead)
+    ? requestId.slice(`review-repair-${expectedHead}-`.length)
+    : null
+}
 const capacityProfileId = transportedRequest?.profileId || priorCapacityProjection?.profileId || 'github-pr-cycle'
 const capacityWorkflowId = transportedRequest?.workflowId || priorCapacityProjection?.workflowId || 'repair'
 const capacityStageId = transportedRequest?.stageId || priorCapacityProjection?.stageId || effectiveWorkflowStage
