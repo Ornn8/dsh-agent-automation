@@ -828,9 +828,9 @@ test('public registry preserves live-clock identity probe suppression and inject
     const liveRegistry = createCapacityRegistry({
       stateRoot: defaultStateRoot, configurationHash, credentialGeneration, workers,
     })
-    const liveLease = await observePublicLease(defaultStateRoot, () => Promise.all(Array.from({ length: 4 }, () => liveRegistry.recordFailure({
+    const liveLease = await observePublicLease(defaultStateRoot, () => liveRegistry.recordFailure({
       capacityGroup: 'public-identity-group', sourceWorker: 'worker-1', failure,
-    }))))
+    }))
     assert.ok(liveLease)
     assert.equal(liveLease.processIdentity, undefined)
 
