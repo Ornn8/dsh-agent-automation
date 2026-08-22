@@ -568,6 +568,21 @@ test('all unavailable candidates return capacity-deferred without invoking a Wor
   assert.equal(committed, 0)
   assert.equal(provider.claims.size, 3)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
+  assert.equal(result.routeDecision.workRequestId, 'request-deferred')
+  assert.equal(result.routeDecision.role, 'change')
+  assert.match(result.capacityGenerationHash, /^[a-f0-9]{64}$/)
+  assert.match(result.observationId, /^capacity-deferred-local-/)
+  assert.doesNotMatch(JSON.stringify(result), /provider|model|account|credential/i)
+
+  const laterGeneration = await runRoleWorker({
+    executionClaim: createWorkerExecutionClaim({
+      config: config(), role: 'change', workRequest: { requestId: 'request-deferred', role: 'change' },
+      subjectStateVersion: stateVersion, capacityProvider: attemptProvider({ available: false, generation: 4 }),
+    }),
+    invocation: invocation(),
+    adapters: { fake: async () => assert.fail('capacity-deferred must not start a Worker') },
+  })
+  assert.notEqual(laterGeneration.capacityGenerationHash, result.capacityGenerationHash)
 })
 
 test('recovery source identity reaches the original terminal journal and fills its missing commit once', async () => {
@@ -825,6 +840,9 @@ test('all previously capacity-deferred candidates replay as deferred without sta
   assert.equal(first.outcome, 'capacity-deferred')
   assert.equal(replay.outcome, 'capacity-deferred')
   assert.deepEqual(replay.unavailable, ['first', 'second', 'third'])
+  assert.equal(replay.capacityGenerationHash, first.capacityGenerationHash)
+  assert.equal(replay.observationId, first.observationId)
+  assert.deepEqual(replay.routeDecision, first.routeDecision)
   assert.equal(calls, 0)
   assert.equal(provider.records.filter(item => item.result.outcome === 'capacity-deferred').length, 3)
 })

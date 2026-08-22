@@ -1305,6 +1305,17 @@ test('change and repair production paths share role routing and capacity admissi
   }
 })
 
+test('Issue capacity deferral publishes one strict durable wait projection', async () => {
+  const source = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
+  assert.match(source, /createIssueCapacityWaitProjection/)
+  assert.match(source, /capacityWaitStatusLine/)
+  assert.match(source, /capacityGenerationHash/)
+  assert.match(source, /observationId/)
+  assert.match(source, /governorStateVersion/)
+  assert.match(source, /capacity-projection-invalid/)
+  assert.doesNotMatch(source, /All admitted change Workers are currently unavailable due to verified capacity state/)
+})
+
 test('Codex review waits for its App Server to release workspace handles', async () => {
   const child = new EventEmitter()
   child.exitCode = null

@@ -22,6 +22,21 @@ function stableDigest(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
+/** @param {{ generation: number, generationHash: string, state: string }[]} snapshots @returns {string} */
+function deferredCapacityGenerationHash(snapshots) {
+  return stableDigest([...snapshots].sort((left, right) => left.generationHash.localeCompare(right.generationHash)
+    || left.generation - right.generation || left.state.localeCompare(right.state)))
+}
+
+/** @param {{ generation: number, generationHash: string, state: string }[]} snapshots @param {AnyObject} capacity @returns {void} */
+function recordDeferredCapacitySnapshot(snapshots, capacity) {
+  snapshots.push({
+    generation: capacity.generation,
+    generationHash: capacity.generationHash,
+    state: capacity.state,
+  })
+}
+
 /** @param {unknown} value @param {string} fallback @returns {string} */
 function boundedId(value, fallback) {
   const text = typeof value === 'string' && value.trim() ? value.trim() : fallback
@@ -414,6 +429,8 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
   const state = EXECUTION_STATES.get(executionClaim)
   const attempted = new Set()
   const unavailable = []
+  /** @type {{ generation: number, generationHash: string, state: string }[]} */
+  const deferredCapacitySnapshots = []
 
   for (const workerId of state.candidates) {
     if (attempted.has(workerId)) continue
@@ -424,6 +441,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
       const priorOutcome = admission.attempt.result.outcome
       if (isCapacityOutcome(priorOutcome)) {
         unavailable.push(workerId)
+        recordDeferredCapacitySnapshot(deferredCapacitySnapshots, prepared.capacity)
         continue
       }
       if (priorOutcome !== 'claimed') await commitExecution(state, onExecutionCommitted)
@@ -449,6 +467,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
     try {
       if (!prepared.capacity.eligible) {
         unavailable.push(workerId)
+        recordDeferredCapacitySnapshot(deferredCapacitySnapshots, prepared.capacity)
         await finishAttempt(state, prepared.claim, {
           outcome: 'capacity-deferred', category: 'capacity', reason: 'provider-unavailable',
         })
@@ -459,6 +478,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
       if (probe) {
         if (!probe.eligible || !probe.probe) {
           unavailable.push(workerId)
+          recordDeferredCapacitySnapshot(deferredCapacitySnapshots, prepared.capacity)
           await finishAttempt(state, prepared.claim, {
             outcome: 'capacity-deferred', category: 'capacity', reason: 'provider-unavailable',
           })
@@ -529,6 +549,7 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
       } else {
         await recordAttemptFailure(state, prepared.claim, failure)
       }
+      recordDeferredCapacitySnapshot(deferredCapacitySnapshots, prepared.capacity)
       probeFinalized = true
       await finishAttempt(state, prepared.claim, {
         outcome: 'capacity-failure', category: failure.category, reason: failure.reason,
@@ -547,8 +568,11 @@ export async function runRoleWorker({ executionClaim, invocation, adapters, onEx
     role: state.role,
     taskClass: state.execution.routeDecision.taskClass,
     routingAttemptId: state.execution.routingAttemptId,
+    routeDecision: { ...state.execution.routeDecision },
     candidates: [...state.candidates],
     unavailable,
+    capacityGenerationHash: deferredCapacityGenerationHash(deferredCapacitySnapshots),
+    observationId: `capacity-deferred-${state.execution.routingAttemptId}`,
     detail: 'All routed Workers are currently unavailable due to capacity.',
   }
 }
