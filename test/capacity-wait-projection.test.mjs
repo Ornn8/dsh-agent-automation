@@ -1,0 +1,83 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  capacityResumeRequestId,
+  capacityWaitStatusLine,
+  createCapacityWaitProjection,
+  parseCapacityWaitProjection,
+  parseCapacityWaitStatus,
+} from '../src/capacity-wait-projection.mjs'
+const stateVersion = 'a'.repeat(64)
+const projectionInput = {
+  workRequestId: 'issue-request-17',
+  role: 'change',
+  repository: 'Ornn8/deepseek-harness',
+  profileId: 'github-pr-cycle',
+  workflowId: 'issue-work',
+  stageId: 'change',
+  definitionHash: 'b'.repeat(64),
+  revision: { base: 'f'.repeat(40), head: 'f'.repeat(40) },
+  coordinationKey: 'Ornn8/deepseek-harness:github-pr-cycle:issue-work',
+  subject: { type: 'issue', number: 17, stateVersion },
+  routeDecision: {
+    version: 1,
+    workRequestId: 'issue-request-17',
+    role: 'change',
+    stateVersion,
+    taskClass: 'frontend',
+    policyHash: 'c'.repeat(64),
+    evidenceHash: 'd'.repeat(64),
+  },
+  capacityGenerationHash: 'e'.repeat(64),
+  observationId: 'run-100:1',
+}
+test('CapacityWaitProjection v1 round-trips a sanitized exact request and route', () => {
+  const projection = createCapacityWaitProjection(projectionInput)
+  const parsed = parseCapacityWaitProjection(projection)
+  assert.deepEqual(parsed, { version: 1, ...projectionInput })
+  assert.deepEqual(parseCapacityWaitStatus(capacityWaitStatusLine(projection)), parsed)
+})
+test('CapacityWaitProjection rejects identity, subject, route, and secret-like fields', () => {
+  const projection = createCapacityWaitProjection(projectionInput)
+  assert.throws(
+    () => parseCapacityWaitProjection({ ...projection, routeDecision: { ...projection.routeDecision, stateVersion: 'f'.repeat(64) } }),
+    /routeDecision.*subject/,
+  )
+  assert.throws(
+    () => parseCapacityWaitProjection({ ...projection, subject: { ...projection.subject, number: 0 } }),
+    /subject.number/,
+  )
+  assert.throws(() => parseCapacityWaitProjection({ ...projection, secret: 'token' }), /unknown field/)
+  assert.throws(() => parseCapacityWaitProjection({ ...projection, repository: undefined }), /repository/)
+  assert.throws(() => parseCapacityWaitProjection({ ...projection, coordinationKey: '' }), /coordinationKey/)
+  assert.throws(
+    () => parseCapacityWaitStatus(`${capacityWaitStatusLine(projection)}\n${capacityWaitStatusLine(projection)}`),
+    /exactly one/,
+  )
+})
+test('capacity resume identity binds the complete projection and exact route identity', () => {
+  const projection = createCapacityWaitProjection(projectionInput)
+  const requestId = capacityResumeRequestId(projection)
+  assert.match(requestId, /^capacity-resume-[0-9a-f]{64}$/)
+  assert.notEqual(requestId, capacityResumeRequestId({
+    ...projection,
+    capacityGenerationHash: 'f'.repeat(64),
+  }))
+  assert.notEqual(requestId, capacityResumeRequestId({
+    ...projection,
+    subject: { ...projection.subject, stateVersion: 'f'.repeat(64) },
+    routeDecision: { ...projection.routeDecision, stateVersion: 'f'.repeat(64) },
+  }))
+  assert.notEqual(requestId, capacityResumeRequestId({
+    ...projection,
+    repository: 'Other/repository',
+  }))
+  assert.notEqual(requestId, capacityResumeRequestId({
+    ...projection,
+    coordinationKey: 'Other/repository:github-pr-cycle:issue-work',
+  }))
+  assert.notEqual(requestId, capacityResumeRequestId({
+    ...projection,
+    routeDecision: { ...projection.routeDecision, policyHash: 'f'.repeat(64) },
+  }))
+})

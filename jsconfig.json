@@ -11,6 +11,7 @@
   },
   "files": [
     "src/capacity-failure.mjs",
+    "src/capacity-wait-projection.mjs",
     "src/capacity-registry.mjs",
     "src/capacity-registry-store.mjs",
     "src/controller-mutation-marker.mjs",
