@@ -16,7 +16,7 @@ import {
 } from './common.mjs'
 import { createAgentAdapters } from './agent-adapters.mjs'
 import { controllerMutationMarker } from './controller-mutation-marker.mjs'
-import { agentWorkPrompt } from './agent-work-result.mjs'
+import { agentWorkPrompt, bindAgentAutomationVerification } from './agent-work-result.mjs'
 import { openAgentWorkDependencies, resolveAgentWorkDispatch } from './agent-work.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
 import { subjectStateVersion, workflowStageTransition } from './governor-policy.mjs'
@@ -353,7 +353,16 @@ try {
       throw new Error(`Pull request head ${pullRequest.headRefOid} does not match remote branch head ${remoteHead || '<missing>'}`)
     }
 
-    await upsertStatus(statusBody('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} produced a pull request for independent review: ${pullRequest.url}`))
+    const acceptedReceipt = profile.verificationContract
+      ? {
+          ...effectiveReceipt,
+          automationResult: bindAgentAutomationVerification(effectiveReceipt.automationResult, {
+            expectedRevision: pullRequest.headRefOid,
+            trustedVerificationContract: profile.verificationContract,
+          }),
+        }
+      : effectiveReceipt
+    await upsertStatus(statusBody('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} produced a pull request for independent review: ${pullRequest.url}`))
     process.stdout.write(`The change Worker produced ${pullRequest.url} at ${pullRequest.headRefOid}\n`)
   }
 } catch (error) {

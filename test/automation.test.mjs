@@ -738,6 +738,12 @@ test('pure v2 verification binding rejects stale, wrong-contract, and partial re
     ...parsed,
     verification: { ...parsed.verification, procedure: 'verify/other' },
   }, { expectedRevision: 'a'.repeat(40), trustedVerificationContract }), /does not match the trusted Verification Contract/)
+  assert.throws(() => bindAgentAutomationVerification(parseAgentWorkResult(dshFinalMessage()), {
+    expectedRevision: 'a'.repeat(40), trustedVerificationContract,
+  }), /requires a parsed v2 completed result/)
+  assert.throws(() => bindAgentAutomationVerification(undefined, {
+    expectedRevision: 'a'.repeat(40), trustedVerificationContract,
+  }), /requires a parsed v2 completed result/)
 })
 
 test('DSH Web refuses a receipt from an earlier turn', async () => {
@@ -1216,6 +1222,29 @@ test('issue and transported repair Worker payloads carry loaded verification con
   assert.match(repairSource, /verificationContract: transportedProfile\.verificationContract/)
   assert.match(issueSource, /profile\.verificationContract \?/)
   assert.match(repairSource, /transportedProfile\?\.verificationContract \?/)
+})
+
+test('contracted Issue and repair completions bind v2 receipts to accepted exact heads', async () => {
+  const issueSource = await readFile(new URL('../src/dsh-issue.mjs', import.meta.url), 'utf8')
+  const repairSource = await readFile(new URL('../src/dsh-repair.mjs', import.meta.url), 'utf8')
+  const issueSkill = await readFile(new URL('../dsh-plugin/skills/issue.md', import.meta.url), 'utf8')
+  const repairSkill = await readFile(new URL('../dsh-plugin/skills/repair.md', import.meta.url), 'utf8')
+  assert.match(issueSource, /bindAgentAutomationVerification/)
+  assert.match(issueSource, /expectedRevision: pullRequest\.headRefOid/)
+  assert.match(issueSource, /trustedVerificationContract: profile\.verificationContract/)
+  assert.match(repairSource, /bindAgentAutomationVerification/)
+  assert.match(repairSource, /bindConfiguredReceipt\(effectiveReceipt, current\.head\.sha\)/)
+  assert.match(repairSource, /expectedRevision,/)
+  assert.match(repairSource, /trustedVerificationContract: transportedProfile\.verificationContract/)
+  for (const skill of [issueSkill, repairSkill]) {
+    assert.match(skill, /verificationContract/)
+    assert.match(skill, /contract\.requiredEvidence/)
+    assert.match(skill, /"version":2/)
+    assert.match(skill, /If no `verificationContract` is present, preserve the existing v1 completed receipt/)
+    assert.match(skill, /completed run with `verificationContract` uses the v2 form/)
+    assert.match(skill, /completed run without `verificationContract` uses the v1 completed form/)
+    assert.doesNotMatch(skill, /Use exactly one of these forms/)
+  }
 })
 
 test('scheduled reconciliation recovers a custom repair workflow after a new head', async () => {

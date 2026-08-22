@@ -20,6 +20,8 @@ When a trusted target Profile has a loaded Verification Contract, the issue and 
 
 Durable completed Worker replays reparse a stored final output with the existing Agent automation-result parser before returning. Malformed stored output fails closed without starting another Worker, while older completed records without stored output retain their prior replay behavior.
 
+Configured Issue and transported repair Skills run the trusted named procedure or entrypoint, collect its required evidence, and return a v2 automation result. The Controller binds that result to the exact accepted revision and trusted Verification Contract before accepting the PR advancement. Unconfigured Profiles retain v1 behavior, and blocked or baseline outcomes do not enter this binding path.
+
 ### Agent Adapters
 
 Adapters translate the Worker Interface to one runtime:

@@ -38,7 +38,7 @@ import {
 } from './baseline-issue.mjs'
 import { RECOVERABLE_CONCLUSIONS } from './recovery-policy.mjs'
 import { isReviewRepairRequestId, mergeRepairTransition, parseAgentWorkRequest, reviewRepairTransition } from './work-request.mjs'
-import { AGENT_REPAIR_SKILL, agentWorkPrompt } from './agent-work-result.mjs'
+import { AGENT_REPAIR_SKILL, agentWorkPrompt, bindAgentAutomationVerification } from './agent-work-result.mjs'
 import { classifyAgentFailure } from './failure-classification.mjs'
 import { hasNewReviewCheck, trustedReviewCheckIds } from './review-check.mjs'
 import {
@@ -333,6 +333,17 @@ if (transportedRequest) {
   }
   if (stage.procedure !== 'github-pr-repair') throw new Error('Transported WorkRequest is not a pull-request repair Stage')
   repairProcedure = stage.procedure
+}
+
+function bindConfiguredReceipt(receipt, expectedRevision) {
+  if (!transportedProfile?.verificationContract) return receipt
+  return {
+    ...receipt,
+    automationResult: bindAgentAutomationVerification(receipt.automationResult, {
+      expectedRevision,
+      trustedVerificationContract: transportedProfile.verificationContract,
+    }),
+  }
 }
 
 async function requestTransportedAdvancement(current) {
@@ -730,9 +741,10 @@ try {
         ? await ghJson(['api', `repos/${repository}/actions/runs/${ciRequest.runId}`], 'CI workflow run after repair')
         : null
       if (current.head.sha !== expectedHead) {
+        const acceptedReceipt = bindConfiguredReceipt(effectiveReceipt, current.head.sha)
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
+        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} advanced the pull request to ${current.head.sha}; the trusted Profile workflow requested an exact-head review.`)
         process.stdout.write(`Pull request #${pullRequestNumber} advanced to ${current.head.sha}; the stale repair is complete.\n`)
       } else if (ciRequest && trustedCiRerunSuccess({
         priorRun: ciRun,
@@ -741,13 +753,15 @@ try {
         expectedHead,
         workflowName: effectiveCiWorkflowName,
       })) {
+        const acceptedReceipt = bindConfiguredReceipt(effectiveReceipt, current.head.sha)
         await setRepairLabels({ remove: ['automation/ci-failed', 'automation/ci-baseline', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
+        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} reran the same exact-head CI workflow successfully on attempt ${currentCiRun.run_attempt}.`)
         process.stdout.write(`The change Worker repaired CI for pull request #${pullRequestNumber} by a successful exact-head rerun.\n`)
       } else if (!ciRequest && !mergeRequest && await sameHeadRereviewRequested(current, priorReviewCheckIds)) {
+        const acceptedReceipt = bindConfiguredReceipt(effectiveReceipt, current.head.sha)
         await requestTransportedAdvancement(current)
         await setRepairLabels({ remove: ['automation/review-blocked', 'automation/repair-blocked', 'automation/repairing', 'agent/dsh-failed'] })
-        await upsertStatus('complete', branch, `Session ${effectiveReceipt.sessionId || 'the durable prior execution'} posted a technical rebuttal and requested one same-head review.`)
+        await upsertStatus('complete', branch, `Session ${acceptedReceipt.sessionId || 'the durable prior execution'} posted a technical rebuttal and requested one same-head review.`)
         process.stdout.write(`The change Worker requested a same-head rereview for pull request #${pullRequestNumber}.\n`)
       } else {
         throw new Error('DSH exited successfully without advancing the head or proving the documented same-head completion')
