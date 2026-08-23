@@ -42,6 +42,20 @@ Only the independently reviewable change.
 
 The declaration contains no Profile, Stage, Worker, Adapter, provider, model, account, credential, prompt, or command. Different repository/Issue subjects always receive different task identities. Dependencies are explicit Issue numbers and are the only V2 business-ordering primitive.
 
+## Task claim protocol
+
+A ready task may have one controller-authenticated `agent-task-claim:v1` projection. The projection binds the repository, Issue number, current task identity, claimant runtime identity, creation time, expiry time, and deterministic claim id.
+
+- Lease duration is supplied by bounded Coordinator configuration, never by Issue text or Agent output.
+- One unexpired claim makes the exact task busy.
+- Repeated observations of the same claim are idempotent.
+- Two different unexpired claims for the same task fail closed as a conflict.
+- An expired claim or a claim for an older task identity does not block replacement.
+- Unauthenticated comments are ignored; a malformed authenticated claim fails closed.
+- A claim controls task exclusivity only. It does not authorize code, review, merge, or any other Issue.
+
+The pure policy consumes normalized authenticated observations. Whether the GitHub gateway projects claims through a CheckRun or one controller-owned Issue comment is a later integration decision; no database or local lock is introduced.
+
 ## Pull-request policy
 
 The evaluator consumes only the current pull request, exact-head CI result, exact-base/head review result, and bounded repair state. It returns one closed action:
