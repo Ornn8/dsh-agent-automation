@@ -65,8 +65,11 @@ function githubFor(comments) {
   }
 }
 
-test('central activation allowlists the target before creating an App token', async () => {
+test('central activation allowlists a canonical target before creating an App token', async () => {
   const workflow = await readFile(new URL('../.github/workflows/coordinator-v2-claim.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /Lowercase target repository in owner\/name form/)
+  assert.match(workflow, /repository !== repository\.toLowerCase\(\)/)
+  assert.match(workflow, /Number\.isSafeInteger\(issueNumber\)/)
   assert.match(workflow, /COORDINATOR_V2_CLAIM_ALLOWED_REPOSITORIES_JSON/)
   assert.match(workflow, /Target repository is not allowlisted for Coordinator V2 Claim writes/)
   assert.match(workflow, /allowed\.length > 64/)
