@@ -54,7 +54,18 @@ A ready task may have one controller-authenticated `agent-task-claim:v1` project
 - Unauthenticated comments are ignored; a malformed authenticated claim fails closed.
 - A claim controls task exclusivity only. It does not authorize code, review, merge, or any other Issue.
 
-The pure policy consumes normalized authenticated observations. Whether the GitHub gateway projects claims through a CheckRun or one controller-owned Issue comment is a later integration decision; no database or local lock is introduced.
+The pure policy consumes normalized authenticated observations. No database or local lock is introduced.
+
+### Claim comment authority
+
+The durable GitHub projection is one controller-owned Issue comment whose body starts with `<!-- coordinator-v2-task-claim -->`. A comment becomes authoritative only when its canonical payload, expected Bot application identity, target repository and Issue, pinned Controller workflow and full revision, and positive source run id and attempt all agree with a live normalized Actions-run observation.
+
+- Human or Agent comments are unauthenticated noise even when they copy the marker.
+- A trusted-author comment with a malformed marker or payload fails closed.
+- Repeated observations of one comment id are idempotent; two distinct controller comments conflict.
+- The GitHub gateway bounds raw pagination before materializing comments and converts only literal boolean authentication results into policy observations.
+- GitHub timestamps, nullable Issue bodies, claimant casing, and open task pull requests are normalized at the gateway boundary.
+- Rendering and provenance verification are pure; comment creation, update, reread, and Issue-scoped concurrency are separate mutation work.
 
 ## Ready-set policy
 
