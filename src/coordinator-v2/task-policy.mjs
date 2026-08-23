@@ -130,7 +130,7 @@ export function decideTaskEligibility({
   const conflictingDependencies = new Set()
   for (const dependency of dependencies) {
     if (!Number.isSafeInteger(dependency?.number)) continue
-    const normalized = { number: dependency.number, state: dependency.state, type: dependency.type || 'issue' }
+    const normalized = { number: dependency.number, state: dependency.state, type: dependency.type }
     const previous = byNumber.get(normalized.number)
     if (!previous) byNumber.set(normalized.number, normalized)
     else if (previous.state !== normalized.state || previous.type !== normalized.type) {
