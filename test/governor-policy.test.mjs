@@ -126,6 +126,52 @@ test('new work requires an independent later observation before admission', () =
   assert.equal(admitted.execute, true)
 })
 
+test('an admitted effect retries on a later observation and closes after applied', () => {
+  const stateVersion = subjectStateVersion(issue)
+  const candidate = governorDecision({
+    transition: 'issue-dispatch', subject: issue, stateVersion,
+    observationId: 'run-200', records: [],
+  }).record
+  const admission = governorDecision({
+    transition: 'issue-dispatch', subject: issue, stateVersion,
+    observationId: 'run-201', records: [candidate],
+  })
+  assert.equal(admission.action, 'admit')
+
+  assert.deepEqual(governorDecision({
+    transition: 'issue-dispatch', subject: issue, stateVersion,
+    observationId: 'run-201', records: [candidate, admission.record],
+  }), {
+    action: 'wait',
+    execute: false,
+    reason: 'transition-already-admitted',
+  })
+  assert.deepEqual(governorDecision({
+    transition: 'issue-dispatch', subject: issue, stateVersion,
+    observationId: 'run-202', records: [candidate, admission.record],
+  }), {
+    action: 'retry',
+    execute: true,
+  })
+
+  const applied = {
+    version: 1,
+    status: 'applied',
+    transition: 'issue-dispatch',
+    subject: { type: issue.type, number: issue.number },
+    stateVersion,
+    observationId: 'run-202',
+  }
+  assert.deepEqual(governorDecision({
+    transition: 'issue-dispatch', subject: issue, stateVersion,
+    observationId: 'run-203', records: [candidate, admission.record, applied],
+  }), {
+    action: 'noop',
+    execute: false,
+    reason: 'transition-already-applied',
+  })
+})
+
 test('an applied transition removes its durable candidate from pending reconciliation', () => {
   const stateVersion = 'a'.repeat(64)
   const candidate = {

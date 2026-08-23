@@ -251,8 +251,12 @@ export function governorDecision({ transition, subject, stateVersion, observatio
   if (matching.some(record => ['applied', 'started'].includes(record.status))) {
     return { action: 'noop', execute: false, reason: 'transition-already-applied' }
   }
-  if (matching.some(record => record.status === 'admitted')) {
-    return { action: 'wait', execute: false, reason: 'transition-already-admitted' }
+  const admitted = matching.find(record => record.status === 'admitted')
+  if (admitted) {
+    if (admitted.observationId === observationId) {
+      return { action: 'wait', execute: false, reason: 'transition-already-admitted' }
+    }
+    return { action: 'retry', execute: true }
   }
   const candidate = matching.find(record => record.status === 'candidate')
   if (!candidate) {
