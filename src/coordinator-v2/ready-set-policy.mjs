@@ -80,9 +80,9 @@ function normalizePullRequest(value) {
 
 function normalizeClaimObservation(value) {
   exactObject(value, CLAIM_FIELDS, 'Claim observation')
-  if (typeof value.authenticated !== 'boolean') throw new Error('Claim authenticated must be boolean')
+  if (value.authenticated !== true) throw new Error('Claim observation must be authenticated')
   return {
-    authenticated: value.authenticated,
+    authenticated: true,
     issueNumber: positiveIssueNumber(value.issueNumber, 'Claim Issue number'),
     projection: value.projection,
   }
@@ -135,6 +135,11 @@ function selectAnyCurrentIssueClaim({ repository, issueNumber, observations, now
   return { status: 'conflict', reason: 'multiple-current-claims' }
 }
 
+function claimConsumesSlot(selection, observations) {
+  if (selection.status === 'claimed') return true
+  return selection.status !== 'claimable' && observations.length > 0
+}
+
 export function selectReadyTaskBatch({
   repository,
   issues = [],
@@ -159,12 +164,14 @@ export function selectReadyTaskBatch({
     if (!Array.isArray(pullRequests) || pullRequests.length > MAX_PULL_REQUESTS) {
       throw new Error('Pull request observations are not bounded')
     }
-    if (!Array.isArray(claimObservations) || claimObservations.length > MAX_CLAIM_OBSERVATIONS) {
-      throw new Error('Claim observations are not bounded')
+    if (!Array.isArray(claimObservations)) throw new Error('Claim observations must be an array')
+    const authenticatedClaimObservations = claimObservations.filter(observation => observation?.authenticated === true)
+    if (authenticatedClaimObservations.length > MAX_CLAIM_OBSERVATIONS) {
+      throw new Error('Authenticated claim observations are not bounded')
     }
     normalizedIssues = issues.map(normalizeIssue)
     normalizedPullRequests = pullRequests.map(normalizePullRequest)
-    normalizedClaims = claimObservations.map(normalizeClaimObservation)
+    normalizedClaims = authenticatedClaimObservations.map(normalizeClaimObservation)
     normalizedRequested = requestedIssueNumber === undefined || requestedIssueNumber === null
       ? null
       : positiveIssueNumber(requestedIssueNumber, 'Requested Issue number')
@@ -187,7 +194,7 @@ export function selectReadyTaskBatch({
     }
   }
   for (const claim of normalizedClaims) {
-    if (claim.authenticated && !issueGroups.has(claim.issueNumber)) {
+    if (!issueGroups.has(claim.issueNumber)) {
       return invalidResult('incomplete-issue-snapshot', `Authenticated claim has no Issue observation for #${claim.issueNumber}`)
     }
   }
@@ -218,7 +225,7 @@ export function selectReadyTaskBatch({
   const claimsByIssue = new Map()
   for (const claim of normalizedClaims) {
     const observations = claimsByIssue.get(claim.issueNumber) || []
-    observations.push({ authenticated: claim.authenticated, projection: claim.projection })
+    observations.push({ authenticated: true, projection: claim.projection })
     claimsByIssue.set(claim.issueNumber, observations)
   }
 
@@ -230,25 +237,9 @@ export function selectReadyTaskBatch({
   for (const issueNumber of issueNumbers) {
     const variants = [...issueGroups.get(issueNumber).values()]
     const openPullRequests = pullRequestsByIssue.get(issueNumber) || new Set()
-
-    if (variants.length !== 1) {
-      if (openPullRequests.size > 0) activeCount += 1
-      diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', 'issue-observation-conflict'))
-      continue
-    }
-    const issue = variants[0]
-    if (pullRequestConflictIssues.has(issueNumber) || openPullRequests.size > 1) {
-      if (openPullRequests.size > 0) activeCount += 1
-      diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', 'pull-request-conflict'))
-      continue
-    }
-    if (openPullRequests.size === 1) {
-      activeCount += 1
-      diagnostics.set(issueNumber, diagnostic(issueNumber, 'active', 'open-pull-request'))
-      continue
-    }
-
-    const eligibility = issue.type === 'issue'
+    const claimInputs = claimsByIssue.get(issueNumber) || []
+    const issue = variants.length === 1 ? variants[0] : null
+    const eligibility = issue?.type === 'issue'
       ? decideTaskEligibility({
         repository: normalizedRepository,
         issue,
@@ -256,9 +247,7 @@ export function selectReadyTaskBatch({
         dependencies: dependencyObservations,
         hasOpenPullRequest: false,
       })
-      : { status: 'ineligible', reason: 'not-issue' }
-
-    const claimInputs = claimsByIssue.get(issueNumber) || []
+      : { status: 'ineligible', reason: issue ? 'not-issue' : 'issue-observation-conflict' }
     const claimSelection = eligibility.taskId
       ? selectTaskClaim({
         repository: normalizedRepository,
@@ -273,18 +262,33 @@ export function selectReadyTaskBatch({
         observations: claimInputs,
         now: normalizedNow,
       })
+    const currentClaimConsumesSlot = claimConsumesSlot(claimSelection, claimInputs)
 
+    if (variants.length !== 1) {
+      if (openPullRequests.size > 0 || currentClaimConsumesSlot) activeCount += 1
+      diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', 'issue-observation-conflict'))
+      continue
+    }
+    if (pullRequestConflictIssues.has(issueNumber) || openPullRequests.size > 1) {
+      if (openPullRequests.size > 0 || currentClaimConsumesSlot) activeCount += 1
+      diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', 'pull-request-conflict'))
+      continue
+    }
+    if (openPullRequests.size === 1) {
+      activeCount += 1
+      diagnostics.set(issueNumber, diagnostic(issueNumber, 'active', 'open-pull-request'))
+      continue
+    }
     if (claimSelection.status === 'claimed') {
       activeCount += 1
       diagnostics.set(issueNumber, diagnostic(issueNumber, 'active', 'current-claim'))
       continue
     }
     if (claimSelection.status !== 'claimable') {
-      if (claimInputs.some(observation => observation.authenticated === true)) activeCount += 1
+      if (currentClaimConsumesSlot) activeCount += 1
       diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', claimSelection.reason))
       continue
     }
-
     if (eligibility.status !== 'ready') {
       diagnostics.set(issueNumber, diagnostic(issueNumber, eligibility.status, eligibility.reason))
       continue
