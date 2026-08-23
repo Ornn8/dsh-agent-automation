@@ -275,7 +275,13 @@ async function recordApplied(work, admission) {
 }
 
 async function dispatchIssueSelection(work, profile, baseCommit, pullRequests, issues) {
-  const requestId = agentWorkRequestId(work.work, profile.definitionHash, profile.verificationContract?.hash)
+  const requestId = agentWorkRequestId(
+    work.work,
+    profile.definitionHash,
+    profile.verificationContract?.hash,
+    repository,
+    work.number,
+  )
   work.request = createIssueImplementationRequest({
     ...profile,
     workflowId: work.work.workflow,

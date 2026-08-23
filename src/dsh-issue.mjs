@@ -199,6 +199,7 @@ const agentDispatch = resolveAgentWorkDispatch(
   issueRequestId,
   workRequest.definitionHash,
   profile.verificationContract?.hash,
+  repository,
 )
 const agentWork = agentDispatch?.work
 if (!agentDispatch || agentWork.profile !== workRequest.profileId || agentWork.workflow !== workRequest.workflowId) {

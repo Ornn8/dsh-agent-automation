@@ -14,6 +14,7 @@ const V3_PROSE_SECTIONS = ['Objective', 'Scope', 'Acceptance criteria']
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const DEFINITION_HASH = /^[0-9a-f]{64}$/
 const CONTRACT_HASH = /^[0-9a-f]{64}$/
+const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 
 function positiveIssueNumber(value, name) {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`agent-work:v3 ${name} must be a positive Issue number`)
@@ -114,19 +115,27 @@ export function parseAgentWork(body, options = {}) {
   }
 }
 
-/** Return the stable dispatch identity bound to the exact trusted Profile definition. */
-export function agentWorkRequestId(work, definitionHash, verificationContractHash) {
+/** Return the stable dispatch identity bound to the exact Profile and Issue subject. */
+export function agentWorkRequestId(work, definitionHash, verificationContractHash, repository, issueNumber) {
   if (!DEFINITION_HASH.test(definitionHash || '')) {
     throw new Error('agent-work request identity requires a Workflow Definition hash')
   }
   if (verificationContractHash !== undefined && !CONTRACT_HASH.test(verificationContractHash || '')) {
     throw new Error('agent-work request identity requires a Verification Contract hash')
   }
+  if (!REPOSITORY.test(repository || '')) {
+    throw new Error('agent-work request identity requires a repository')
+  }
+  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
+    throw new Error('agent-work request identity requires a positive Issue number')
+  }
   const digest = createHash('sha256')
     .update(JSON.stringify({
       work,
       definitionHash,
       ...(verificationContractHash === undefined ? {} : { verificationContractHash }),
+      repository,
+      issueNumber,
     }))
     .digest('hex')
     .slice(0, 32)
@@ -140,11 +149,11 @@ export function agentWorkBranch(work, issueNumber) {
   return work.branch || `agent/issue-${issueNumber}`
 }
 
-/** Bind a queued request id to the current live declaration and trusted Profile hash. */
-export function resolveAgentWorkDispatch(body, issueNumber, requestId, definitionHash, verificationContractHash) {
+/** Bind a queued request id to the current live declaration, Profile, and Issue subject. */
+export function resolveAgentWorkDispatch(body, issueNumber, requestId, definitionHash, verificationContractHash, repository) {
   const work = parseAgentWork(body, { issueNumber })
   if (String(requestId || '').startsWith('agent-work-')) {
-    if (!work || requestId !== agentWorkRequestId(work, definitionHash, verificationContractHash)) {
+    if (!work || requestId !== agentWorkRequestId(work, definitionHash, verificationContractHash, repository, issueNumber)) {
       throw new Error(`Issue #${issueNumber} agent-work declaration or its Profile changed after dispatch`)
     }
   }
