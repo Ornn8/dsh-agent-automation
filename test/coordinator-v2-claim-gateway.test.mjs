@@ -18,7 +18,7 @@ const source = { runId: 123, runAttempt: 2 }
 const run = {
   id: source.runId,
   runAttempt: source.runAttempt,
-  repository,
+  repository: controller.repository,
   controller,
 }
 
