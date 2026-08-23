@@ -22,7 +22,7 @@ test('task identity binds repository, Issue, and canonical declaration', () => {
   )
 })
 
-test('task declarations reject unknown fields, duplicates, and self-dependency', () => {
+test('task declarations reject unknown fields, duplicates, self-dependency, and mixed protocols', () => {
   assert.throws(() => parseTaskDeclaration(body([9]), { issueNumber: 9 }), /itself/)
   assert.throws(() => parseTaskDeclaration(body([3, 3]), { issueNumber: 9 }), /unique/)
   assert.throws(
@@ -30,6 +30,7 @@ test('task declarations reject unknown fields, duplicates, and self-dependency',
     /unknown fields/,
   )
   assert.throws(() => parseTaskDeclaration(`${body([])}\n<!-- agent-task:v1 -->`, { issueNumber: 9 }), /exactly one/)
+  assert.throws(() => parseTaskDeclaration(`${body([])}\n<!-- agent-work:v3 -->`, { issueNumber: 9 }), /mix legacy/)
 })
 
 test('eligibility waits only for explicit open dependencies', () => {
@@ -51,7 +52,7 @@ test('eligibility waits only for explicit open dependencies', () => {
   assert.equal(waiting.status, 'waiting')
 })
 
-test('eligibility fails closed for untrusted, missing, or already active work', () => {
+test('eligibility fails closed for untrusted, missing, conflicting, or already active work', () => {
   const issue = { number: 9, state: 'open', body: body([]) }
   assert.equal(decideTaskEligibility({ repository: 'Ornn8/example', issue }).reason, 'untrusted-author')
   assert.equal(
@@ -65,5 +66,14 @@ test('eligibility fails closed for untrusted, missing, or already active work', 
       trustedAuthor: true,
     }).reason,
     'dependency-missing',
+  )
+  assert.equal(
+    decideTaskEligibility({
+      repository: 'Ornn8/example',
+      issue: { ...issue, body: body([3]) },
+      trustedAuthor: true,
+      dependencies: [{ number: 3, state: 'open' }, { number: 3, state: 'closed' }],
+    }).reason,
+    'dependency-conflict',
   )
 })
