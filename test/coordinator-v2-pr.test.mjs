@@ -78,6 +78,31 @@ test('review blocks, CI failures, and conflicts use one bounded repair decision'
   )
 })
 
+test('malformed repair state and mergeability fail closed', () => {
+  for (const malformed of [
+    { active: false, attempts: '3', limit: 3 },
+    { active: false, attempts: 3.5, limit: 3 },
+    { active: false, attempts: null, limit: 3 },
+    { active: 'false', attempts: 0, limit: 3 },
+    { active: false, attempts: 0, limit: -1 },
+    { active: false, attempts: 0, limit: 3, extra: true },
+  ]) {
+    assert.equal(
+      decidePullRequestAction({ pullRequest, review: { baseSha, headSha, status: 'blocked' }, repair: malformed }).reason,
+      'invalid-repair-state',
+    )
+  }
+  assert.equal(
+    decidePullRequestAction({
+      pullRequest: { ...pullRequest, mergeable: 'UNKNOWN' },
+      ci: { headSha, status: 'passed' },
+      review: { baseSha, headSha, status: 'passed' },
+      repair,
+    }).reason,
+    'invalid-mergeability',
+  )
+})
+
 test('draft, closed, and active-repair subjects do not mutate', () => {
   assert.equal(decidePullRequestAction({ pullRequest: { ...pullRequest, draft: true } }).action, 'paused')
   assert.equal(decidePullRequestAction({ pullRequest: { ...pullRequest, state: 'closed' } }).action, 'terminal')

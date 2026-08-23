@@ -38,6 +38,26 @@ test('one authenticated current claim is idempotent', () => {
   assert.deepEqual(selected.claim, claim)
 })
 
+test('unauthenticated noise does not consume the authenticated observation bound', () => {
+  const noise = Array.from({ length: 129 }, (_, index) => ({ authenticated: false, body: `spam ${index}` }))
+  assert.deepEqual(
+    selectTaskClaim({ repository, issueNumber, taskId, now, observations: noise }),
+    { status: 'claimable', reason: 'no-current-claim' },
+  )
+
+  const claim = createTaskClaim({ repository, issueNumber, taskId, claimant: 'change/runtime-01', now, leaseMs })
+  assert.equal(
+    selectTaskClaim({
+      repository,
+      issueNumber,
+      taskId,
+      now,
+      observations: Array.from({ length: 129 }, () => observation(claim)),
+    }).reason,
+    'invalid-observations',
+  )
+})
+
 test('different current claims fail closed independent of input order', () => {
   const first = createTaskClaim({ repository, issueNumber, taskId, claimant: 'change/runtime-01', now, leaseMs })
   const second = createTaskClaim({ repository, issueNumber, taskId, claimant: 'change/runtime-02', now, leaseMs })

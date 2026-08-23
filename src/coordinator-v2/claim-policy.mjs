@@ -125,16 +125,16 @@ export function selectTaskClaim({ repository, issueNumber, taskId, observations 
   } catch (error) {
     return { status: 'invalid', reason: 'invalid-subject', detail: error.message }
   }
-  if (!Array.isArray(observations) || observations.length > MAX_OBSERVATIONS) {
+  if (!Array.isArray(observations)) {
+    return { status: 'invalid', reason: 'invalid-observations' }
+  }
+  const authenticatedObservations = observations.filter(observation => observation?.authenticated === true)
+  if (authenticatedObservations.length > MAX_OBSERVATIONS) {
     return { status: 'invalid', reason: 'invalid-observations' }
   }
 
   const current = new Map()
-  for (const observation of observations) {
-    if (observation?.authenticated !== true) continue
-    if (!observation || typeof observation !== 'object' || Array.isArray(observation)) {
-      return { status: 'invalid', reason: 'malformed-authenticated-claim' }
-    }
+  for (const observation of authenticatedObservations) {
     const fields = Object.keys(observation).sort()
     if (fields.length !== 2 || fields[0] !== 'authenticated' || fields[1] !== 'projection') {
       return { status: 'invalid', reason: 'malformed-authenticated-claim' }
