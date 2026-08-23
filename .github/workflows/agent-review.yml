@@ -84,6 +84,19 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: node controller/src/publish-work-request.mjs
 
+      - name: Wake exact-pair advancement after terminal review
+        if: steps.review.outcome == 'success' && (steps.review.outputs.verdict == 'pass' || steps.review.outputs.verdict == 'block')
+        env:
+          TARGET_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          WORKFLOW_ID: ${{ inputs.workflow_id }}
+          REVIEW_VERDICT: ${{ steps.review.outputs.verdict }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node controller/src/review-advancement.mjs
+
       - name: Fail the exact-head review CheckRun when automation fails
         if: steps.review.outcome == 'failure'
         env:

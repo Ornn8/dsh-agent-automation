@@ -23,8 +23,7 @@ jobs:
     if: >-
       github.event_name == 'repository_dispatch'
       || (github.event_name == 'workflow_run'
-        && (github.event.workflow_run.name == 'Agent PR Review'
-          || contains(fromJSON(vars.DSH_AUTOMATION_CI_WORKFLOWS), github.event.workflow_run.name)))
+        && contains(fromJSON(vars.DSH_AUTOMATION_CI_WORKFLOWS), github.event.workflow_run.name))
       || (github.event_name == 'pull_request_target'
         && github.event.pull_request.head.repo.full_name == github.repository
         && (github.event.action != 'labeled' || github.event.label.name == 'automation/review-ready'))
@@ -35,7 +34,7 @@ jobs:
       head_sha: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.head_sha || github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
       profile_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.profile_id || '' }}
       workflow_id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.workflow_id || '' }}
-      source_run_id: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Agent PR Review' && github.event.workflow_run.id || 0 }}
-      source_run_attempt: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Agent PR Review' && github.event.workflow_run.run_attempt || 0 }}
+      source_run_id: ${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.source_run_id || 0) || 0 }}
+      source_run_attempt: ${{ github.event_name == 'repository_dispatch' && (github.event.client_payload.source_run_attempt || 0) || 0 }}
       required_checks_json: ${{ vars.DSH_AUTOMATION_REQUIRED_CHECKS }}
       controller_login: ${{ vars.AGENT_AUTOMATION_CONTROLLER_LOGIN }}

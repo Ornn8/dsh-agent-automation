@@ -18,7 +18,7 @@ import {
 } from './governor-state.mjs'
 import { reviewFaultAttemptEndpoints, verifyReviewFaultAttempt } from './review-fault-audit.mjs'
 import { parseReviewCheckIdentity } from './review-check.mjs'
-import { terminalReviewSource, trustedReviewRunProfile } from './advancement-source.mjs'
+import { terminalReviewSourceAfterSettling, trustedReviewRunProfile } from './advancement-source.mjs'
 import { dispatchWithReceipt } from './dispatch-receipt.mjs'
 import { trustedWorkerIdentity } from './workflow-identity.mjs'
 import { assertVerificationContractChecks } from './verification-contract.mjs'
@@ -73,15 +73,17 @@ async function ghJson(args, description) {
 
 async function resolveTerminalReviewSource() {
   if (!sourceRunId) return null
-  const source = await ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'advancement source workflow run')
-  return terminalReviewSource(source, {
+  return terminalReviewSourceAfterSettling(
+    () => ghJson(['api', `repos/${repository}/actions/runs/${sourceRunId}`], 'advancement source workflow run'),
+    {
     runId: sourceRunId,
     runAttempt: sourceRunAttempt,
     repository,
     controllerRepository: trustedReview.controllerRepository,
     controllerSha: trustedReview.controllerSha,
     workflowPath: trustedReview.workflowPath,
-  })
+    },
+  )
 }
 
 const verifiedTerminalReviewSource = await resolveTerminalReviewSource()
