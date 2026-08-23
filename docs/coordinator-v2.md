@@ -56,6 +56,20 @@ A ready task may have one controller-authenticated `agent-task-claim:v1` project
 
 The pure policy consumes normalized authenticated observations. Whether the GitHub gateway projects claims through a CheckRun or one controller-owned Issue comment is a later integration decision; no database or local lock is introduced.
 
+## Ready-set policy
+
+One bounded repository snapshot is evaluated into a proposed batch of tasks that may attempt claim acquisition.
+
+- Open task pull requests and current claims consume repository slots.
+- Explicit open dependencies wait; closed dependencies satisfy their edge.
+- Invalid tasks and claim conflicts are excluded without suppressing unrelated valid work.
+- Repository active-task limits and per-run batch limits remain separate trusted settings.
+- An explicitly requested Issue is first only when it is otherwise eligible.
+- Ordinary ordering is ascending Issue number and does not depend on API response order.
+- Selection creates no authority: the serialized GitHub gateway rereads the exact task before creating a claim.
+
+The selector never infers product conflicts, chooses a Worker, or inspects provider capacity.
+
 ## Pull-request policy
 
 The evaluator consumes only the current pull request, exact-head CI result, exact-base/head review result, and bounded repair state. It returns one closed action:
