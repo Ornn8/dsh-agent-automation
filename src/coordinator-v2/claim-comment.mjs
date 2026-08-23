@@ -8,6 +8,8 @@ const FULL_SHA = /^[0-9a-f]{40}$/
 const WORKFLOW_PATH = /^\.github\/workflows\/[A-Za-z0-9_.-]+\.(?:yml|yaml)$/
 const LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?$/
 const APP_SLUG = /^[a-z0-9][a-z0-9-]{0,99}$/
+const GENERIC_ACTIONS_LOGIN = 'github-actions[bot]'
+const GENERIC_ACTIONS_APP = 'github-actions'
 const MAX_NUMBER = Number.MAX_SAFE_INTEGER
 
 function exactKeys(value, expected, name) {
@@ -86,10 +88,19 @@ function normalizeAuthor(value, name = 'Comment author') {
   return { login: value.login, type: 'Bot', appSlug: value.appSlug }
 }
 
+function requireDedicatedAuthor(author) {
+  if (!author.login.endsWith('[bot]')
+    || author.login.toLowerCase() === GENERIC_ACTIONS_LOGIN
+    || author.appSlug === GENERIC_ACTIONS_APP) {
+    throw new Error('Expected comment author must be a dedicated claim-writer GitHub App')
+  }
+  return author
+}
+
 function normalizeExpected(value) {
   exactKeys(value, ['author', 'controller', 'issueNumber', 'repository'], 'Claim comment expectation')
   return {
-    author: normalizeAuthor(value.author, 'Expected comment author'),
+    author: requireDedicatedAuthor(normalizeAuthor(value.author, 'Expected comment author')),
     repository: repositoryName(value.repository, 'Expected repository'),
     issueNumber: positiveInteger(value.issueNumber, 'Expected Issue number'),
     controller: normalizeController(value.controller),
@@ -139,6 +150,57 @@ function expectedAuthor(raw, expected) {
     && raw.appSlug === expected.appSlug
 }
 
+function fingerprintPart(value) {
+  if (value === undefined) return ['undefined']
+  if (value === null) return ['null']
+  const type = typeof value
+  if (type === 'string' || type === 'boolean') return [type, value]
+  if (type === 'number') return [type, Number.isNaN(value) ? 'NaN' : String(value)]
+  return [type, Object.prototype.toString.call(value)]
+}
+
+function rawCommentFingerprint(raw) {
+  const fields = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? Object.keys(raw).sort()
+    : []
+  return JSON.stringify([
+    fields,
+    fingerprintPart(raw?.id),
+    fingerprintPart(raw?.authorLogin),
+    fingerprintPart(raw?.authorType),
+    fingerprintPart(raw?.appSlug),
+    fingerprintPart(raw?.body),
+  ])
+}
+
+function deduplicateRawComments(comments) {
+  const keyed = new Map()
+  const unkeyed = []
+  for (const raw of comments) {
+    const id = raw && typeof raw === 'object' && !Array.isArray(raw)
+      && Number.isSafeInteger(raw.id) && raw.id > 0
+      ? raw.id
+      : null
+    const fingerprint = rawCommentFingerprint(raw)
+    if (id === null) {
+      unkeyed.push({ raw, fingerprint })
+      continue
+    }
+    const previous = keyed.get(id)
+    if (previous && previous.fingerprint !== fingerprint) {
+      return { conflict: id, comments: [] }
+    }
+    if (!previous) keyed.set(id, { raw, fingerprint })
+  }
+  const commentsById = [...keyed.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, entry]) => entry.raw)
+  const commentsWithoutId = unkeyed
+    .sort((left, right) => left.fingerprint.localeCompare(right.fingerprint))
+    .map(entry => entry.raw)
+  return { conflict: null, comments: [...commentsById, ...commentsWithoutId] }
+}
+
 function renderNormalized(record) {
   const subject = `${record.claim.repository}#${record.claim.issueNumber}`
   return [
@@ -157,7 +219,11 @@ function renderNormalized(record) {
 }
 
 export function renderClaimComment(value) {
-  return renderNormalized(normalizeRecord(value))
+  const body = renderNormalized(normalizeRecord(value))
+  if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+    throw new Error('Claim comment body is too large')
+  }
+  return body
 }
 
 export function parseClaimComment(body) {
@@ -208,7 +274,7 @@ export async function verifyClaimComment({ comment, expected, loadRun }) {
     || observedRun.runAttempt !== record.source.runAttempt
     || observedRun.repository !== normalizedExpected.repository
     || !sameController(observedRun.controller, normalizedExpected.controller)) {
-    throw new Error('Claim comment is not backed by its named Actions run')
+    throw new Error('Claim comment does not match its named Actions run provenance')
   }
   return record
 }
@@ -223,13 +289,18 @@ export async function selectClaimCommentObservation({ comments, expected, loadRu
     return { status: 'invalid', reason: 'invalid-input', detail: error.message }
   }
 
-  const candidates = new Map()
-  for (const raw of comments) {
-    if (!expectedAuthor(raw, normalizedExpected.author)
-      || typeof raw.body !== 'string'
-      || !raw.body.includes(SIGNATURE)) {
-      continue
+  const deduplicated = deduplicateRawComments(comments)
+  if (deduplicated.conflict !== null) {
+    return {
+      status: 'invalid',
+      reason: 'conflicting-comment-observation',
+      commentId: deduplicated.conflict,
     }
+  }
+
+  const candidates = new Map()
+  for (const raw of deduplicated.comments) {
+    if (!expectedAuthor(raw, normalizedExpected.author)) continue
 
     let comment
     try {
@@ -237,19 +308,14 @@ export async function selectClaimCommentObservation({ comments, expected, loadRu
     } catch (error) {
       return { status: 'invalid', reason: 'malformed-controller-comment', detail: error.message }
     }
-    const canonical = JSON.stringify(comment)
-    const previous = candidates.get(comment.id)
-    if (previous && previous !== canonical) {
-      return { status: 'invalid', reason: 'conflicting-comment-observation', commentId: comment.id }
-    }
-    candidates.set(comment.id, canonical)
+    candidates.set(comment.id, comment)
     if (candidates.size > 1) {
       return { status: 'invalid', reason: 'duplicate-controller-comments' }
     }
   }
 
   if (candidates.size === 0) return { status: 'none', reason: 'no-controller-comment' }
-  const comment = JSON.parse([...candidates.values()][0])
+  const comment = [...candidates.values()][0]
   try {
     const record = await verifyClaimComment({ comment, expected: normalizedExpected, loadRun })
     return {
