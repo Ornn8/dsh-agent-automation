@@ -128,19 +128,25 @@ test('agent-work:v2 rejects commands, Agent choices, and ambiguous declarations'
   assert.equal(parseAgentWork('<!-- agent-work:v1 -->\n```json\n{}\n```'), null)
 })
 
-test('request identity binds normalized work and exact Profile hash', () => {
+test('request identity binds normalized work, exact Profile, and Issue subject', () => {
   const fields = {
     version: 2, dispatch: 'ready', workflow: 'default', branch: 'agent/issue-40', dependsOn: [3],
   }
   const work = parseAgentWork(agentWork(fields))
-  assert.equal(agentWorkRequestId(work, profile.definitionHash), agentWorkRequestId({ ...work }, profile.definitionHash))
-  assert.match(agentWorkRequestId(work, profile.definitionHash), /^agent-work-[0-9a-f]{32}$/)
-  assert.notEqual(agentWorkRequestId(work, profile.definitionHash), agentWorkRequestId(work, '0'.repeat(64)))
+  const id = (value, repository = 'Ornn8/example', issueNumber = 40) =>
+    agentWorkRequestId(value, profile.definitionHash, undefined, repository, issueNumber)
+  assert.equal(id(work), id({ ...work }))
+  assert.match(id(work), /^agent-work-[0-9a-f]{32}$/)
+  assert.notEqual(id(work), agentWorkRequestId(work, '0'.repeat(64), undefined, 'Ornn8/example', 40))
   assert.notEqual(
-    agentWorkRequestId(work, profile.definitionHash),
-    agentWorkRequestId(work, profile.definitionHash, 'f'.repeat(64)),
+    id(work),
+    agentWorkRequestId(work, profile.definitionHash, 'f'.repeat(64), 'Ornn8/example', 40),
   )
-  assert.throws(() => agentWorkRequestId(work, profile.definitionHash, 'bad'), /Contract hash/)
+  assert.notEqual(id(work), id(work, 'Ornn8/example', 41))
+  assert.notEqual(id(work), id(work, 'Ornn8/other'))
+  assert.throws(() => agentWorkRequestId(work, profile.definitionHash, 'bad', 'Ornn8/example', 40), /Contract hash/)
+  assert.throws(() => agentWorkRequestId(work, profile.definitionHash, undefined, 'not-a-repository', 40), /repository/)
+  assert.throws(() => agentWorkRequestId(work, profile.definitionHash, undefined, 'Ornn8/example', 0), /Issue number/)
 })
 
 test('v3 identity changes when normalized planning fields change', () => {
@@ -148,7 +154,7 @@ test('v3 identity changes when normalized planning fields change', () => {
     version: 3, dispatch: 'ready', workflow: 'default', parent: 100, taskClass: 'frontend', dependsOn: [101],
   }
   const work = parseAgentWork(agentWorkV3(fields), { issueNumber: 102 })
-  const id = value => agentWorkRequestId(value, profile.definitionHash)
+  const id = value => agentWorkRequestId(value, profile.definitionHash, undefined, 'Ornn8/example', 102)
   assert.notEqual(id(work), id({ ...work, parent: 103 }))
   assert.notEqual(id(work), id({ ...work, taskClass: 'backend' }))
   assert.notEqual(id(work), id({ ...work, dependsOn: [104] }))
@@ -173,17 +179,19 @@ test('the Issue worker rejects stale declarations and Profile revisions before s
   const body = agentWork(fields)
   const parsed = parseAgentWork(body)
   const contractHash = 'f'.repeat(64)
-  const requestId = agentWorkRequestId(parsed, profile.definitionHash, contractHash)
-  assert.deepEqual(resolveAgentWorkDispatch(body, 40, requestId, profile.definitionHash, contractHash), {
+  const requestId = agentWorkRequestId(parsed, profile.definitionHash, contractHash, 'Ornn8/example', 40)
+  assert.deepEqual(resolveAgentWorkDispatch(body, 40, requestId, profile.definitionHash, contractHash, 'Ornn8/example'), {
     work: parsed,
     branch: 'agent/issue-40',
   })
   assert.throws(
-    () => resolveAgentWorkDispatch(agentWork({ ...fields, workflow: 'repair' }), 40, requestId, profile.definitionHash, contractHash),
+    () => resolveAgentWorkDispatch(agentWork({ ...fields, workflow: 'repair' }), 40, requestId, profile.definitionHash, contractHash, 'Ornn8/example'),
     /changed after dispatch/,
   )
-  assert.throws(() => resolveAgentWorkDispatch(body, 40, requestId, '0'.repeat(64), contractHash), /changed after dispatch/)
-  assert.throws(() => resolveAgentWorkDispatch(body, 40, requestId, profile.definitionHash), /changed after dispatch/)
+  assert.throws(() => resolveAgentWorkDispatch(body, 40, requestId, '0'.repeat(64), contractHash, 'Ornn8/example'), /changed after dispatch/)
+  assert.throws(() => resolveAgentWorkDispatch(body, 40, requestId, profile.definitionHash, contractHash, 'Ornn8/other'), /changed after dispatch/)
+  assert.throws(() => resolveAgentWorkDispatch(body, 41, requestId, profile.definitionHash, contractHash, 'Ornn8/example'), /changed after dispatch/)
+  assert.throws(() => resolveAgentWorkDispatch(body, 40, requestId, profile.definitionHash, contractHash), /repository/)
 })
 
 test('the Issue worker rechecks live dependencies before starting an Agent', async () => {
