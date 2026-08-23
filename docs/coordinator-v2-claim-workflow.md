@@ -32,6 +32,8 @@ coordinator-v2-claim:<target-repository>:<issue-number>
 
 with `cancel-in-progress: false`. GitHub Actions concurrency is repository-scoped, so every path that can use the dedicated App credential must remain in this Controller repository and use the same group. A workflow in another repository or a manual tool holding the same key would be an unsafe bypass.
 
+The workflow requires a lowercase repository input and a canonical positive Issue number before creating the App token. These values form the concurrency key, so alternate casing or leading-zero representations cannot create a second valid mutation lane.
+
 A replaced pending wake is acceptable because later reconciliation can submit the same current task again. The running mutation is never canceled.
 
 ## Permissions and credentials
@@ -43,6 +45,8 @@ The `coordinator-v2-claim` environment must define:
 - variable `COORDINATOR_V2_CLAIM_APP_CLIENT_ID`;
 - secret `COORDINATOR_V2_CLAIM_APP_PRIVATE_KEY`;
 - variable `COORDINATOR_V2_CLAIM_ALLOWED_REPOSITORIES_JSON`, a non-empty JSON array of at most 64 explicit `owner/name` targets.
+
+The environment deployment-branch rule must allow only the protected Controller `master` branch. A non-default branch must not be able to modify this workflow and then request the same App private key. This repository setting is part of the credential-isolation boundary and cannot be proven by the workflow file alone.
 
 The requested target must appear in the allowlist before an App token is created. During disposable-target acceptance the allowlist contains only that disposable repository; it must not contain `shanyin-tea-commerce`.
 
