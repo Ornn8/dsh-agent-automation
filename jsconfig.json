@@ -26,8 +26,6 @@
     "src/worker-routing.mjs",
     "src/review-authority.mjs",
     "src/review-workspace-policy.mjs",
-    "src/review-workspace.mjs",
-    "src/coordinator-v2/task-policy.mjs",
-    "src/coordinator-v2/pr-policy.mjs"
+    "src/review-workspace.mjs"
   ]
 }
