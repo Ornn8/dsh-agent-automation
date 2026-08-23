@@ -58,11 +58,16 @@ The pure policy consumes normalized authenticated observations. No database or l
 
 ### Claim comment authority
 
-The durable GitHub projection is one controller-owned Issue comment whose body starts with `<!-- coordinator-v2-task-claim -->`. A comment becomes authoritative only when its canonical payload, expected Bot application identity, target repository and Issue, pinned Controller workflow and full revision, and positive source run id and attempt all agree with a live normalized Actions-run observation.
+The durable GitHub projection is one Issue comment owned by a dedicated claim-writer GitHub App whose body starts with `<!-- coordinator-v2-task-claim -->`. The generic `github-actions[bot]` / `github-actions` identity is never accepted as claim authority because unrelated workflows share that application identity.
 
-- Human or Agent comments are unauthenticated noise even when they copy the marker.
-- A trusted-author comment with a malformed marker or payload fails closed.
-- Repeated observations of one comment id are idempotent; two distinct controller comments conflict.
+- The dedicated App credential is held only by the serialized claim mutation gateway and is not exposed to target workflows or Agent runtimes.
+- Every comment from that dedicated App on a task Issue is reserved for this protocol. A missing, misspelled, malformed, oversized, or non-canonical claim comment fails closed.
+- Human, Agent, generic GitHub Actions, and unrelated App comments are unauthenticated noise even when they copy the marker.
+- Raw observations are grouped by comment id before author or marker filtering. Only identical repetitions are idempotent; any body, author, App, or field-set disagreement fails closed.
+- Two distinct comments from the dedicated App conflict.
+- The canonical payload, target repository and Issue, pinned Controller workflow and full revision, positive source run id and attempt, and a live normalized run observation must all agree.
+- The source run check proves provenance consistency, not that GitHub comment metadata causally attributes the write to that exact run. If exact run-to-comment causality becomes required, the gateway must add an unforgeable receipt binding the canonical comment digest, subject, run id and attempt, and Controller provenance.
+- Renderer and parser enforce the same 16 KiB final-body bound.
 - The GitHub gateway bounds raw pagination before materializing comments and converts only literal boolean authentication results into policy observations.
 - GitHub timestamps, nullable Issue bodies, claimant casing, and open task pull requests are normalized at the gateway boundary.
 - Rendering and provenance verification are pure; comment creation, update, reread, and Issue-scoped concurrency are separate mutation work.
