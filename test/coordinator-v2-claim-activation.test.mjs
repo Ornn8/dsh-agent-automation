@@ -67,6 +67,8 @@ function githubFor(comments) {
 
 test('central activation allowlists a canonical target before creating an App token', async () => {
   const workflow = await readFile(new URL('../.github/workflows/coordinator-v2-claim.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /github\.ref_type == 'branch'/)
+  assert.match(workflow, /github\.ref_name == github\.event\.repository\.default_branch/)
   assert.match(workflow, /actions\/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38/)
   assert.match(workflow, /node-version: 22/)
   assert.match(workflow, /Lowercase target repository in owner\/name form/)
