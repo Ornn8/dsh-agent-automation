@@ -288,6 +288,10 @@ async function dispatchIssueSelection(work, profile, baseCommit, pullRequests, i
   if (!admission) return { status: 'observed' }
 
   await run(githubExecutable, [
+    'label', 'create', 'agent/dsh', '--repo', repository,
+    '--description', 'A ready Issue is queued for DSH execution', '--color', '1D76DB', '--force',
+  ], { env: githubEnvironment })
+  await run(githubExecutable, [
     'issue', 'edit', String(work.number), '--repo', repository, '--add-label', 'agent/dsh',
   ], { env: githubEnvironment })
   try {
