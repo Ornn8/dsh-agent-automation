@@ -43,6 +43,25 @@ test('dispatch backlog exposes the bounded reusable batch input', async () => {
   assert.match(workflow, /MAXIMUM_BATCH_SIZE: \$\{\{ inputs\.maximum_batch_size \}\}/)
 })
 
+test('dispatch backlog provisions its control label before editing or dispatching', async () => {
+  const source = await readFile(new URL('../src/dispatch-backlog.mjs', import.meta.url), 'utf8')
+  const create = source.indexOf("'label', 'create', 'agent/dsh'")
+  const add = source.indexOf("'issue', 'edit', String(work.number), '--repo', repository, '--add-label', 'agent/dsh'")
+  const dispatch = source.indexOf("'api', '--method', 'POST', `repos/${repository}/dispatches`", add)
+  const applied = source.indexOf('await recordApplied(work, admission)')
+
+  assert.notEqual(create, -1)
+  assert.notEqual(add, -1)
+  assert.notEqual(dispatch, -1)
+  assert.notEqual(applied, -1)
+  assert.ok(create < add)
+  assert.ok(add < dispatch)
+  assert.ok(dispatch < applied)
+  assert.match(source.slice(create, add), /'--description', 'A ready Issue is queued for DSH execution'/)
+  assert.match(source.slice(create, add), /'--color', '1D76DB', '--force'/)
+  assert.doesNotMatch(source.slice(create, add), /\.catch\(/)
+})
+
 test('batch runner attempts stable members independently and surfaces aggregate failure', async () => {
   const attempts = []
   const applied = []
