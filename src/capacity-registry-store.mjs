@@ -57,6 +57,7 @@ const READ_RETRIES = 8
 const STALE_LEASE_CLEANUP_LIMIT = 64
 const LOCK_RECLAIM_MARKER = 'registry.lock.reclaim'
 const LOCK_QUARANTINE = 'registry.lock.quarantine'
+const RECLAIM_STAGE_PREFIX = 'registry-reclaim-stage'
 const FENCE_HIGH_WATER = 'registry-fence.json'
 const GATE_OWNER_PREFIX = 'registry-owner'
 const RECLAIM_PENDING_PREFIX = 'registry-reclaim'
@@ -1215,16 +1216,22 @@ async function claimReclaimMarker(paths, clock, leaseMs, deadline, verifier, per
     const nowMs = clock()
     let lease = parseLease({ version: 1, ownerToken, fence, ...await localLeaseIdentity(persistProcessIdentity), acquiredAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + leaseMs).toISOString() })
     const pendingPath = join(paths.directory, `${RECLAIM_PENDING_PREFIX}.${ownerToken}.json`)
+    const stagePath = join(paths.directory, `${RECLAIM_STAGE_PREFIX}.${ownerToken}`)
     try {
       await publishPrivateLease(paths.directory, pendingPath, lease)
-      await mkdir(paths.reclaimPath)
+      // Publish the owner marker in a private directory before making the
+      // reclaim path visible. This prevents a contender from reclaiming an
+      // empty directory and later receiving a marker through a reused path.
+      await mkdir(stagePath)
       lease = await reserveLeaseFence(paths, lease)
-      await publishPrivateLease(paths.reclaimPath, gateOwnerPath(paths.reclaimPath, ownerToken), lease)
+      await publishPrivateLease(stagePath, gateOwnerPath(stagePath, ownerToken), lease)
+      await rename(stagePath, paths.reclaimPath)
       await bestEffortRemove(pendingPath)
       return lease
     } catch (error) {
       await bestEffortRemove(pendingPath)
-      if (!['EEXIST', 'ENOENT', 'EPERM', 'EBUSY'].includes(String(errorCode(error)))) throw error
+      await bestEffortRemoveTree(stagePath)
+      if (!['EEXIST', 'ENOENT', 'ENOTEMPTY', 'EPERM', 'EBUSY'].includes(String(errorCode(error)))) throw error
     }
   }
   return null
@@ -1240,60 +1247,41 @@ async function acquireCanonicalLease(paths, clock, leaseMs, deadline, verifier, 
       await waitForLock(10)
       continue
     }
-    const reclaim = observed.state === 'stale' ? await claimReclaimMarker(paths, clock, leaseMs, deadline, verifier, persistProcessIdentity) : null
-    if (observed.state === 'stale' && !reclaim) {
+    // Keep the reclaim marker until the canonical owner directory is ready.
+    // Its owner file is therefore published before lockPath becomes visible;
+    // an old acquirer cannot later write through a reused lockPath pathname.
+    const reclaim = await claimReclaimMarker(paths, clock, leaseMs, deadline, verifier, persistProcessIdentity)
+    if (!reclaim) {
       await waitForLock(10)
       continue
     }
-    if (reclaim) {
-      try {
-        await assertReclaimOwner(paths.reclaimPath, reclaim.ownerToken, reclaim.fence, clock, verifier)
-        await cleanupStaleLegacyLeases(paths, reclaim.ownerToken, reclaim.fence, clock(), verifier)
-        const current = await readGateState(paths, paths.lockPath, clock, verifier)
-        if (current.state === 'held') {
-          await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
-          await waitForLock(10)
-          continue
-        }
-        const quarantine = await readGateState(paths, paths.quarantinePath, clock, verifier)
-        if (quarantine.state === 'held') {
-          await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
-          await waitForLock(10)
-          continue
-        }
-        if (current.state !== 'absent') {
-          await bestEffortRemoveTree(paths.quarantinePath)
-          await rename(paths.lockPath, paths.quarantinePath)
-        }
-        await bestEffortRemoveTree(paths.quarantinePath)
-        await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
-        continue
-      } catch (error) {
-        await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
-        if (['EEXIST', 'ENOENT', 'EPERM', 'EBUSY'].includes(String(errorCode(error)))) continue
-        throw error
-      }
-    }
-    const ownerToken = randomUUID()
-    const fence = Math.max(
-      clock(),
-      await highestFence(paths.directory, paths.recordPrefix, paths),
-      await highestFence(paths.directory, paths.attemptsEventPrefix, paths),
-      await highestFence(paths.directory, paths.attemptsBasePrefix, paths),
-    ) + 1
-    const nowMs = clock()
-    let lease = parseLease({ version: 1, ownerToken, fence, ...await localLeaseIdentity(persistProcessIdentity), acquiredAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + leaseMs).toISOString() })
-    const candidatePath = join(paths.directory, `${paths.leasePrefix}.${ownerToken}.json`)
     try {
-      await publishPrivateLease(paths.directory, candidatePath, lease)
-      await mkdir(paths.lockPath)
-      lease = await reserveLeaseFence(paths, lease)
-      await publishPrivateLease(paths.lockPath, gateOwnerPath(paths.lockPath, ownerToken), lease)
-      await bestEffortRemove(candidatePath)
-      return lease
+      await assertReclaimOwner(paths.reclaimPath, reclaim.ownerToken, reclaim.fence, clock, verifier)
+      await cleanupStaleLegacyLeases(paths, reclaim.ownerToken, reclaim.fence, clock(), verifier)
+      const current = await readGateState(paths, paths.lockPath, clock, verifier)
+      if (current.state === 'held') {
+        await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
+        await waitForLock(10)
+        continue
+      }
+      const quarantine = await readGateState(paths, paths.quarantinePath, clock, verifier)
+      if (quarantine.state === 'held') {
+        await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
+        await waitForLock(10)
+        continue
+      }
+      if (current.state !== 'absent') {
+        await bestEffortRemoveTree(paths.quarantinePath)
+        await rename(paths.lockPath, paths.quarantinePath)
+      }
+      await bestEffortRemoveTree(paths.quarantinePath)
+      await assertReclaimOwner(paths.reclaimPath, reclaim.ownerToken, reclaim.fence, clock, verifier)
+      await rename(paths.reclaimPath, paths.lockPath)
+      return reclaim
     } catch (error) {
-      await bestEffortRemove(candidatePath)
-      if (!['EEXIST', 'EPERM', 'EBUSY'].includes(String(errorCode(error)))) throw error
+      await releaseReclaim(paths.reclaimPath, reclaim.ownerToken, reclaim.fence)
+      if (['EEXIST', 'ENOENT', 'ENOTEMPTY', 'EPERM', 'EBUSY'].includes(String(errorCode(error)))) continue
+      throw error
     }
   }
   return null

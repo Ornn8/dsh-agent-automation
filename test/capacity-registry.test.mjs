@@ -40,6 +40,7 @@ const rotatedConfigurationHash = 'b'.repeat(64)
 const credentialGeneration = 'credential-1'
 const now = Date.parse('2026-08-21T00:00:00.000Z')
 const storeFixture = fileURLToPath(new URL('./fixtures/capacity-store-process.mjs', import.meta.url))
+const acquireRaceFixture = fileURLToPath(new URL('./fixtures/capacity-acquire-pause-driver.mjs', import.meta.url))
 
 function capacityFailure(overrides = {}) {
   return {
@@ -397,6 +398,13 @@ test('24 real processes have one canonical owner and one callback each', { timeo
   } finally {
     await rm(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
+})
+
+test('a contender cannot publish through a reclaimed lock pathname', { timeout: 20_000 }, async () => {
+  const result = await waitStoreProcess(spawn(process.execPath, [acquireRaceFixture], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  }))
+  assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`)
 })
 
 test('a live callback remains exclusive after its lease duration', { timeout: 60_000 }, async () => {
