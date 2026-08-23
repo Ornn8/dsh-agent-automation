@@ -67,6 +67,8 @@ function githubFor(comments) {
 
 test('central activation allowlists a canonical target before creating an App token', async () => {
   const workflow = await readFile(new URL('../.github/workflows/coordinator-v2-claim.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /actions\/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38/)
+  assert.match(workflow, /node-version: 22/)
   assert.match(workflow, /Lowercase target repository in owner\/name form/)
   assert.match(workflow, /repository !== repository\.toLowerCase\(\)/)
   assert.match(workflow, /Number\.isSafeInteger\(issueNumber\)/)
@@ -74,6 +76,7 @@ test('central activation allowlists a canonical target before creating an App to
   assert.match(workflow, /Target repository is not allowlisted for Coordinator V2 Claim writes/)
   assert.match(workflow, /allowed\.length > 64/)
   assert.match(workflow, /new Set\(normalizedAllowed\)\.size !== normalizedAllowed\.length/)
+  assert.ok(workflow.indexOf('Use Node.js 22') < workflow.indexOf('Validate and split the allowlisted target'))
   assert.ok(
     workflow.indexOf('Target repository is not allowlisted')
       < workflow.indexOf('Create a target-scoped Claim App token'),
