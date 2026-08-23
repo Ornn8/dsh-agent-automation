@@ -1,10 +1,11 @@
 import { decideTaskEligibility } from './task-policy.mjs'
-import { selectTaskClaim } from './claim-policy.mjs'
+import { parseTaskClaimProjection, selectTaskClaim } from './claim-policy.mjs'
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const MAX_ISSUES = 512
 const MAX_PULL_REQUESTS = 512
 const MAX_CLAIM_OBSERVATIONS = 1_024
+const MAX_CURRENT_CLAIMS_PER_ISSUE = 128
 const MAX_LIMIT = 64
 const MAX_BODY_BYTES = 64 * 1_024
 const MAX_ISSUE_NUMBER = 2_147_483_647
@@ -101,6 +102,37 @@ function invalidResult(reason, detail) {
 
 function diagnostic(issueNumber, status, reason) {
   return { issueNumber, status, reason }
+}
+
+function selectAnyCurrentIssueClaim({ repository, issueNumber, observations, now }) {
+  const authenticated = observations.filter(observation => observation?.authenticated === true)
+  if (authenticated.length > MAX_CURRENT_CLAIMS_PER_ISSUE) {
+    return { status: 'invalid', reason: 'invalid-observations' }
+  }
+
+  const current = new Map()
+  const observedAt = Date.parse(now)
+  for (const observation of authenticated) {
+    let claim
+    try {
+      claim = parseTaskClaimProjection(observation.projection)
+    } catch (error) {
+      return { status: 'invalid', reason: 'malformed-authenticated-claim', detail: error.message }
+    }
+    if (claim.repository !== repository || claim.issueNumber !== issueNumber) {
+      return { status: 'invalid', reason: 'claim-subject-mismatch', claimId: claim.claimId }
+    }
+    if (Date.parse(claim.createdAt) > observedAt) {
+      return { status: 'invalid', reason: 'claim-created-in-future', claimId: claim.claimId }
+    }
+    if (Date.parse(claim.expiresAt) <= observedAt) continue
+    current.set(claim.claimId, claim)
+  }
+
+  const claims = [...current.values()].sort((left, right) => left.claimId.localeCompare(right.claimId))
+  if (claims.length === 0) return { status: 'claimable', reason: 'no-current-claim' }
+  if (claims.length === 1) return { status: 'claimed', reason: 'current-claim', claim: claims[0] }
+  return { status: 'conflict', reason: 'multiple-current-claims' }
 }
 
 export function selectReadyTaskBatch({
@@ -205,10 +237,6 @@ export function selectReadyTaskBatch({
       continue
     }
     const issue = variants[0]
-    if (issue.type !== 'issue') {
-      diagnostics.set(issueNumber, diagnostic(issueNumber, 'ineligible', 'not-issue'))
-      continue
-    }
     if (pullRequestConflictIssues.has(issueNumber) || openPullRequests.size > 1) {
       if (openPullRequests.size > 0) activeCount += 1
       diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', 'pull-request-conflict'))
@@ -220,31 +248,41 @@ export function selectReadyTaskBatch({
       continue
     }
 
-    const eligibility = decideTaskEligibility({
-      repository: normalizedRepository,
-      issue,
-      trustedAuthor: issue.trustedAuthor,
-      dependencies: dependencyObservations,
-      hasOpenPullRequest: false,
-    })
+    const eligibility = issue.type === 'issue'
+      ? decideTaskEligibility({
+        repository: normalizedRepository,
+        issue,
+        trustedAuthor: issue.trustedAuthor,
+        dependencies: dependencyObservations,
+        hasOpenPullRequest: false,
+      })
+      : { status: 'ineligible', reason: 'not-issue' }
 
-    if (eligibility.taskId) {
-      const claimSelection = selectTaskClaim({
+    const claimInputs = claimsByIssue.get(issueNumber) || []
+    const claimSelection = eligibility.taskId
+      ? selectTaskClaim({
         repository: normalizedRepository,
         issueNumber,
         taskId: eligibility.taskId,
-        observations: claimsByIssue.get(issueNumber) || [],
+        observations: claimInputs,
         now: normalizedNow,
       })
-      if (claimSelection.status === 'claimed') {
-        activeCount += 1
-        diagnostics.set(issueNumber, diagnostic(issueNumber, 'active', 'current-claim'))
-        continue
-      }
-      if (claimSelection.status !== 'claimable') {
-        diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', claimSelection.reason))
-        continue
-      }
+      : selectAnyCurrentIssueClaim({
+        repository: normalizedRepository,
+        issueNumber,
+        observations: claimInputs,
+        now: normalizedNow,
+      })
+
+    if (claimSelection.status === 'claimed') {
+      activeCount += 1
+      diagnostics.set(issueNumber, diagnostic(issueNumber, 'active', 'current-claim'))
+      continue
+    }
+    if (claimSelection.status !== 'claimable') {
+      if (claimInputs.some(observation => observation.authenticated === true)) activeCount += 1
+      diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', claimSelection.reason))
+      continue
     }
 
     if (eligibility.status !== 'ready') {
