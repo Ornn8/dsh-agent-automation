@@ -272,9 +272,9 @@ export async function verifyClaimComment({ comment, expected, loadRun }) {
   const observedRun = normalizeRun(await loadRun(record.source.runId))
   if (observedRun.id !== record.source.runId
     || observedRun.runAttempt !== record.source.runAttempt
-    || observedRun.repository !== normalizedExpected.repository
+    || observedRun.repository !== normalizedExpected.controller.repository
     || !sameController(observedRun.controller, normalizedExpected.controller)) {
-    throw new Error('Claim comment does not match its named Actions run provenance')
+    throw new Error('Claim comment does not match its named Controller run provenance')
   }
   return record
 }
