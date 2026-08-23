@@ -48,7 +48,7 @@ const record = {
 const run = {
   id: 123,
   runAttempt: 2,
-  repository: 'ornn8/example',
+  repository: 'ornn8/dsh-agent-automation',
   controller: {
     repository: 'ornn8/dsh-agent-automation',
     workflowPath: controller.workflowPath,
@@ -171,7 +171,7 @@ test('every comment from the dedicated authority is reserved and malformed conte
   }
 })
 
-test('wrong target and source-run provenance fail closed', async () => {
+test('wrong target and central source-run provenance fail closed', async () => {
   for (const changed of [
     { expected: { ...expected, issueNumber: 8 }, loadRun },
     { expected: { ...expected, controller: { ...controller, sha: 'c'.repeat(40) } }, loadRun },
