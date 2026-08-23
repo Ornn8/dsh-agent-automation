@@ -1,4 +1,5 @@
 import { actionsCredentialEnvironment, parseJson, requiredEnv, run } from './common.mjs'
+import { isMaintenanceRunFresh } from './runner-watchdog-policy.mjs'
 
 const repository = requiredEnv('TARGET_REPOSITORY')
 const controllerRepository = requiredEnv('CONTROLLER_REPOSITORY')
@@ -6,7 +7,6 @@ const githubExecutable = process.env.GH_EXECUTABLE?.trim() || 'gh'
 const environment = actionsCredentialEnvironment()
 const now = Date.now()
 const maximumQueueAgeMs = 20 * 60 * 1000
-const maximumMaintenanceAgeMs = 40 * 60 * 1000
 
 async function boundedPages(path, field, description) {
   const values = []
@@ -49,8 +49,8 @@ const latestSuccessfulMaintenance = maintenanceRuns
   .filter(workflowRun => workflowRun.conclusion === 'success')
   .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))[0]
 if (!latestSuccessfulMaintenance
-  || now - Date.parse(latestSuccessfulMaintenance.updated_at) > maximumMaintenanceAgeMs) {
-  throw new Error('Controller Maintenance has no successful run in the last 40 minutes')
+  || !isMaintenanceRunFresh(latestSuccessfulMaintenance.updated_at, now)) {
+  throw new Error('Controller Maintenance has no successful run in the last 60 minutes')
 }
 
 const readinessRuns = await boundedPages(
@@ -61,8 +61,8 @@ const readinessRuns = await boundedPages(
 const latestSuccessfulReadiness = readinessRuns
   .filter(workflowRun => workflowRun.conclusion === 'success')
   .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))[0]
-if (!latestSuccessfulReadiness || now - Date.parse(latestSuccessfulReadiness.updated_at) > maximumMaintenanceAgeMs) {
-  throw new Error('Controller Maintenance Readiness has no successful run in the last 40 minutes')
+if (!latestSuccessfulReadiness || !isMaintenanceRunFresh(latestSuccessfulReadiness.updated_at, now)) {
+  throw new Error('Controller Maintenance Readiness has no successful run in the last 60 minutes')
 }
 
 const openFaults = await boundedPages(
