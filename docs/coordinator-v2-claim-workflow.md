@@ -11,6 +11,7 @@ The Controller-repository workflow instead owns the only credential path:
 ```text
 manual disposable-target request
   -> Controller workflow_dispatch
+  -> explicit target allowlist
   -> Issue-scoped Controller concurrency group
   -> target-scoped App installation token
   -> complete target state read
@@ -37,7 +38,15 @@ A replaced pending wake is acceptable because later reconciliation can submit th
 
 The workflow's ordinary `GITHUB_TOKEN` has only `actions: read` and `contents: read`. It reads the central source run and checks out the exact workflow revision.
 
-The dedicated App token is created inside the `coordinator-v2-claim` environment and is scoped to the one named target repository with only:
+The `coordinator-v2-claim` environment must define:
+
+- variable `COORDINATOR_V2_CLAIM_APP_CLIENT_ID`;
+- secret `COORDINATOR_V2_CLAIM_APP_PRIVATE_KEY`;
+- variable `COORDINATOR_V2_CLAIM_ALLOWED_REPOSITORIES_JSON`, a non-empty JSON array of at most 64 explicit `owner/name` targets.
+
+The requested target must appear in the allowlist before an App token is created. During disposable-target acceptance the allowlist contains only that disposable repository; it must not contain `shanyin-tea-commerce`.
+
+The dedicated App token is scoped to the one named target repository with only:
 
 - Issues: write;
 - Pull requests: read;
