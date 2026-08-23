@@ -7,6 +7,7 @@ import {
 } from '../src/coordinator-v2/task-policy.mjs'
 
 const body = dependencies => `## Objective\n\nBuild one bounded change.\n\n## Scope\n\nOnly the requested behavior.\n\n## Acceptance criteria\n\n- The focused tests pass.\n\n<!-- agent-task:v1 -->\n\`\`\`json\n${JSON.stringify({ version: 1, dispatch: 'ready', dependsOn: dependencies })}\n\`\`\``
+const dependency = (number, state = 'closed', type = 'issue') => ({ number, state, type })
 
 test('task identity binds repository, Issue, and canonical declaration', () => {
   const first = parseTaskDeclaration(body([8, 3]), { issueNumber: 9 })
@@ -38,7 +39,7 @@ test('eligibility waits only for explicit open dependencies', () => {
     repository: 'Ornn8/example',
     issue: { number: 9, state: 'open', body: body([3, 8]) },
     trustedAuthor: true,
-    dependencies: [{ number: 3, state: 'closed' }, { number: 8, state: 'closed' }],
+    dependencies: [dependency(3), dependency(8)],
   })
   assert.equal(ready.status, 'ready')
 
@@ -46,13 +47,13 @@ test('eligibility waits only for explicit open dependencies', () => {
     repository: 'Ornn8/example',
     issue: { number: 9, state: 'open', body: body([3, 8]) },
     trustedAuthor: true,
-    dependencies: [{ number: 3, state: 'closed' }, { number: 8, state: 'open' }],
+    dependencies: [dependency(3), dependency(8, 'open')],
   })
   assert.deepEqual(waiting.dependencies, [8])
   assert.equal(waiting.status, 'waiting')
 })
 
-test('eligibility fails closed for untrusted, missing, conflicting, or already active work', () => {
+test('eligibility fails closed for untrusted, missing, conflicting, incomplete, or already active work', () => {
   const issue = { number: 9, state: 'open', body: body([]) }
   assert.equal(decideTaskEligibility({ repository: 'Ornn8/example', issue }).reason, 'untrusted-author')
   assert.equal(
@@ -72,8 +73,26 @@ test('eligibility fails closed for untrusted, missing, conflicting, or already a
       repository: 'Ornn8/example',
       issue: { ...issue, body: body([3]) },
       trustedAuthor: true,
-      dependencies: [{ number: 3, state: 'open' }, { number: 3, state: 'closed' }],
+      dependencies: [dependency(3, 'open'), dependency(3, 'closed')],
     }).reason,
     'dependency-conflict',
+  )
+  assert.equal(
+    decideTaskEligibility({
+      repository: 'Ornn8/example',
+      issue: { ...issue, body: body([3]) },
+      trustedAuthor: true,
+      dependencies: [{ number: 3, state: 'closed' }],
+    }).reason,
+    'dependency-not-issue',
+  )
+  assert.equal(
+    decideTaskEligibility({
+      repository: 'Ornn8/example',
+      issue: { ...issue, body: body([3]) },
+      trustedAuthor: true,
+      dependencies: [dependency(3, 'closed', 'pull-request')],
+    }).reason,
+    'dependency-not-issue',
   )
 })
