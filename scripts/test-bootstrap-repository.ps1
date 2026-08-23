@@ -42,6 +42,8 @@ $names = @(
   'agent-recovery.yml'
 )
 $temp = Join-Path ([IO.Path]::GetTempPath()) "dsh-bootstrap-$([Guid]::NewGuid().ToString('N'))"
+$noUpstreamTemp = Join-Path ([IO.Path]::GetTempPath()) "dsh-bootstrap-no-upstream-$([Guid]::NewGuid().ToString('N'))"
+$transitionTemp = Join-Path ([IO.Path]::GetTempPath()) "dsh-bootstrap-transition-$([Guid]::NewGuid().ToString('N'))"
 $promotionRecord = Join-Path ([IO.Path]::GetTempPath()) "dsh-controller-release-$([Guid]::NewGuid().ToString('N')).json"
 $faultRecord = Join-Path ([IO.Path]::GetTempPath()) "dsh-controller-fault-$([Guid]::NewGuid().ToString('N')).json"
 
@@ -91,6 +93,66 @@ try {
   $renderedProfile = Get-Content -LiteralPath (Join-Path $temp '.github\agent-automation\profiles\github-pr-cycle.json') -Raw
   $expectedProfile = Get-Content -LiteralPath $ProfileTemplate -Raw
   Assert-True ($renderedProfile -ceq $expectedProfile) 'Rendered target Profile did not exactly match the bundled default Profile.'
+
+  [IO.Directory]::CreateDirectory($noUpstreamTemp) | Out-Null
+  & git -C $noUpstreamTemp init -q
+  if ($LASTEXITCODE -ne 0) { throw 'git init failed for the no-upstream fixture.' }
+  $noUpstreamArguments = @(
+    '-TargetCheckout', $noUpstreamTemp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', $sha,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
+    '-PromotionRecordPath', $promotionRecord
+  )
+  $noUpstreamDryRunOutput = @(Invoke-Bootstrap -Arguments ($noUpstreamArguments + '-DryRun'))
+  $noUpstreamPlanLine = @($noUpstreamDryRunOutput | Where-Object { $_ -is [string] -and $_.StartsWith('AUTOMATION_BOOTSTRAP_PLAN_JSON=') })
+  Assert-True ($noUpstreamPlanLine.Count -eq 1) 'No-upstream dry run did not emit exactly one versioned bootstrap plan.'
+  $noUpstreamPlan = $noUpstreamPlanLine[0].Substring('AUTOMATION_BOOTSTRAP_PLAN_JSON='.Length) | ConvertFrom-Json -Depth 16
+  $noUpstreamNames = @($names | Where-Object { $_ -ne 'agent-repository-supervision.yml' })
+  Assert-True ([string]::IsNullOrWhiteSpace([string]$noUpstreamPlan.upstreamRepository)) 'No-upstream bootstrap plan advertised a repository supervision upstream.'
+  Assert-True (@($noUpstreamPlan.workflows).Count -eq $noUpstreamNames.Count) 'No-upstream bootstrap plan retained repository supervision.'
+  Assert-True (@($noUpstreamPlan.workflows | Where-Object path -eq '.github/workflows/agent-repository-supervision.yml').Count -eq 0) 'No-upstream plan included repository supervision.'
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $noUpstreamTemp '.github\workflows\agent-repository-supervision.yml'))) 'No-upstream dry run wrote repository supervision.'
+  Invoke-Bootstrap -Arguments $noUpstreamArguments
+  foreach ($name in $noUpstreamNames) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $noUpstreamTemp ".github\workflows\$name")) "No-upstream bootstrap omitted $name."
+  }
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $noUpstreamTemp '.github\workflows\agent-repository-supervision.yml'))) 'No-upstream bootstrap installed repository supervision.'
+
+  [IO.Directory]::CreateDirectory($transitionTemp) | Out-Null
+  & git -C $transitionTemp init -q
+  if ($LASTEXITCODE -ne 0) { throw 'git init failed for the transition fixture.' }
+  $transitionArguments = @(
+    '-TargetCheckout', $transitionTemp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', $sha,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
+    '-UpstreamRepository', $upstreamRepository,
+    '-PromotionRecordPath', $promotionRecord
+  )
+  Invoke-Bootstrap -Arguments $transitionArguments
+  $transitionNoUpstreamArguments = @(
+    '-TargetCheckout', $transitionTemp,
+    '-ControllerRepository', $repository,
+    '-ControllerSha', $sha,
+    '-CiWorkflowNamesJson', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress),
+    '-PromotionRecordPath', $promotionRecord
+  )
+  Invoke-Bootstrap -Arguments $transitionNoUpstreamArguments -ExpectedExitCode 1
+  Assert-True (Test-Path -LiteralPath (Join-Path $transitionTemp '.github\workflows\agent-repository-supervision.yml')) 'Installed supervision workflow was removed without -Update.'
+  $transitionDryRunOutput = @(Invoke-Bootstrap -Arguments ($transitionNoUpstreamArguments + @('-Update', '-DryRun')))
+  $transitionPlanLine = @($transitionDryRunOutput | Where-Object { $_ -is [string] -and $_.StartsWith('AUTOMATION_BOOTSTRAP_PLAN_JSON=') })
+  Assert-True ($transitionPlanLine.Count -eq 1) 'Transition dry run did not emit exactly one versioned bootstrap plan.'
+  $transitionPlan = $transitionPlanLine[0].Substring('AUTOMATION_BOOTSTRAP_PLAN_JSON='.Length) | ConvertFrom-Json -Depth 16
+  $deletionPlan = @($transitionPlan.workflows | Where-Object path -eq '.github/workflows/agent-repository-supervision.yml')
+  Assert-True ($deletionPlan.Count -eq 1 -and $deletionPlan[0].action -ceq 'would-delete') 'Transition dry run did not plan a bounded supervision deletion.'
+  Assert-True (@($transitionDryRunOutput | Where-Object { $_ -ceq 'would delete .github/workflows/agent-repository-supervision.yml' }).Count -eq 1) 'Transition dry run did not report the supervision deletion.'
+  Invoke-Bootstrap -Arguments ($transitionNoUpstreamArguments + '-Update')
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $transitionTemp '.github\workflows\agent-repository-supervision.yml'))) 'Upstream omission did not remove the installed supervision workflow.'
+  Invoke-Bootstrap -Arguments ($transitionArguments + '-Update')
+  Add-Content -LiteralPath (Join-Path $transitionTemp '.github\workflows\agent-repository-supervision.yml') -Value '# local edit'
+  Invoke-Bootstrap -Arguments $transitionNoUpstreamArguments -ExpectedExitCode 1
+  Assert-True (Test-Path -LiteralPath (Join-Path $transitionTemp '.github\workflows\agent-repository-supervision.yml')) 'Dirty supervision workflow was removed without -Update.'
 
   $rendered = ($names | ForEach-Object {
     Get-Content -LiteralPath (Join-Path $temp ".github\workflows\$_") -Raw
@@ -300,6 +362,12 @@ try {
 } finally {
   if (Test-Path -LiteralPath $temp) {
     Remove-Item -LiteralPath $temp -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $noUpstreamTemp) {
+    Remove-Item -LiteralPath $noUpstreamTemp -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $transitionTemp) {
+    Remove-Item -LiteralPath $transitionTemp -Recurse -Force
   }
   if (Test-Path -LiteralPath $promotionRecord) {
     Remove-Item -LiteralPath $promotionRecord -Force

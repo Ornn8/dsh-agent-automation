@@ -12,7 +12,6 @@ param(
   [Parameter(Mandatory)]
   [string]$CiWorkflowNamesJson,
 
-  [Parameter(Mandatory)]
   [string]$UpstreamRepository,
 
   [string]$PromotionRecordPath = (Join-Path $PSScriptRoot '..\controller-release.json'),
@@ -26,6 +25,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$hasUpstreamRepository = -not [string]::IsNullOrWhiteSpace($UpstreamRepository)
 $workflowNames = @(
   'agent-health.yml',
   'agent-issues.yml',
@@ -37,6 +37,10 @@ $workflowNames = @(
   'agent-repository-supervision.yml',
   'agent-recovery.yml'
 )
+if (-not $hasUpstreamRepository) {
+  $workflowNames = @($workflowNames | Where-Object { $_ -ne 'agent-repository-supervision.yml' })
+}
+$supervisionWorkflowRelativePath = '.github/workflows/agent-repository-supervision.yml'
 
 function Require-Value {
   param([string]$Name, [string]$Value)
@@ -65,11 +69,10 @@ foreach ($name in $CiWorkflowNames) {
   if ($name -isnot [string]) { throw 'CiWorkflowNamesJson must contain only strings.' }
   Require-Value -Name 'CiWorkflowNamesJson' -Value $name
 }
-Require-Value -Name 'UpstreamRepository' -Value $UpstreamRepository
 if ($ControllerRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'ControllerRepository must be an owner/repository name.'
 }
-if ($UpstreamRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+if ($hasUpstreamRepository -and $UpstreamRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw 'UpstreamRepository must be an owner/repository name.'
 }
 if ($ControllerSha -notmatch '^[0-9a-f]{40}$') {
@@ -141,7 +144,9 @@ $replacements = @{
   '{{CONTROLLER_SHA}}' = $ControllerSha
   '{{CI_WORKFLOW_NAMES_JSON}}' = (ConvertTo-Json -InputObject @($CiWorkflowNames) -Compress)
   '{{ADVANCEMENT_WORKFLOW_NAMES_JSON}}' = (ConvertTo-Json -InputObject @($CiWorkflowNames) -Compress)
-  '{{UPSTREAM_REPOSITORY}}' = $UpstreamRepository
+}
+if ($hasUpstreamRepository) {
+  $replacements['{{UPSTREAM_REPOSITORY}}'] = $UpstreamRepository
 }
 $utf8 = [Text.UTF8Encoding]::new($false)
 $plan = @()
@@ -187,6 +192,26 @@ foreach ($name in $workflowNames) {
   }
 }
 
+if (-not $hasUpstreamRepository) {
+  $supervisionWorkflowDestination = Join-Path $outputRoot 'agent-repository-supervision.yml'
+  if (Test-Path -LiteralPath $supervisionWorkflowDestination -PathType Leaf) {
+    $supervisionWorkflowDirty = & $git.Source -C $resolvedRoot status --porcelain -- $supervisionWorkflowRelativePath
+    if ($LASTEXITCODE -ne 0) { throw "Could not inspect $supervisionWorkflowRelativePath in the target checkout." }
+    if ($supervisionWorkflowDirty -and -not $Update) {
+      throw "$supervisionWorkflowRelativePath has local changes. Re-run with -Update to remove this exact generated workflow."
+    }
+    if (-not $Update) {
+      throw "$supervisionWorkflowRelativePath is installed but no upstream is configured. Re-run with -Update to remove this exact generated workflow."
+    }
+    $plan += [pscustomobject]@{
+      RelativePath = $supervisionWorkflowRelativePath
+      Destination = $supervisionWorkflowDestination
+      Content = $null
+      Action = if ($DryRun) { 'would delete' } else { 'delete' }
+    }
+  }
+}
+
 $profileRelativePath = '.github/agent-automation/profiles/github-pr-cycle.json'
 $profileTemplatePath = Join-Path $PSScriptRoot '..\profiles\github-pr-cycle\profile.json'
 if (-not (Test-Path -LiteralPath $profileTemplatePath -PathType Leaf)) {
@@ -226,12 +251,16 @@ if ($DryRun) {
   }
   $hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
   $workflowPlan = @($plan | Where-Object { $_.RelativePath -like '.github/workflows/*' } | ForEach-Object {
-    $hashBytes = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($_.Content))
+    $hashBytes = if ($_.Action -in @('delete', 'would delete')) {
+      $null
+    } else {
+      [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($_.Content))
+    }
     [pscustomobject][ordered]@{
       path = $_.RelativePath
       destination = $_.Destination
       action = ([string]$_.Action).Replace(' ', '-').ToLowerInvariant()
-      sha256 = [Convert]::ToHexString($hashBytes).ToLowerInvariant()
+      sha256 = if ($null -eq $hashBytes) { $null } else { [Convert]::ToHexString($hashBytes).ToLowerInvariant() }
     }
   })
   $document = [pscustomobject][ordered]@{
@@ -254,6 +283,11 @@ foreach ($item in $plan) {
     Write-Output "unchanged $($item.RelativePath)"
   } elseif ($item.Action -eq 'would write') {
     Write-Output "would write $($item.RelativePath)"
+  } elseif ($item.Action -eq 'would delete') {
+    Write-Output "would delete $($item.RelativePath)"
+  } elseif ($item.Action -eq 'delete') {
+    Remove-Item -LiteralPath $item.Destination -Force
+    Write-Output "deleted $($item.RelativePath)"
   } else {
     [IO.Directory]::CreateDirectory((Split-Path -Parent $item.Destination)) | Out-Null
     [IO.File]::WriteAllText($item.Destination, $item.Content, $utf8)
