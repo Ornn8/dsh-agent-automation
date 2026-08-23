@@ -97,6 +97,39 @@ test('counts current claims and one open task pull request as active', () => {
   assert.deepEqual(result.selected.map(task => task.issueNumber), [3])
 })
 
+test('a live claim keeps its slot after the Issue becomes invalid, closed, or untrusted', () => {
+  const original = issue(5)
+  const claim = createTaskClaim({
+    repository,
+    issueNumber: 5,
+    taskId: taskIdFor(original),
+    claimant: 'change/runtime-01',
+    now,
+    leaseMs: 5 * 60 * 1_000,
+  })
+  const variants = [
+    { ...original, body: original.body.replace('"dispatch":"ready",', '') },
+    { ...original, state: 'closed' },
+    { ...original, trustedAuthor: false },
+  ]
+
+  for (const changed of variants) {
+    const result = select({
+      issues: [changed, issue(6)],
+      claimObservations: [claimObservation(5, claim)],
+      activeLimit: 1,
+      batchLimit: 5,
+    })
+    assert.equal(result.activeCount, 1)
+    assert.deepEqual(result.selected, [])
+    assert.deepEqual(
+      result.diagnostics.find(item => item.issueNumber === 5),
+      { issueNumber: 5, status: 'active', reason: 'current-claim' },
+    )
+    assert.equal(result.diagnostics.find(item => item.issueNumber === 6).reason, 'repository-limit')
+  }
+})
+
 test('expired and older-task claims do not consume slots', () => {
   const first = issue(1)
   const second = issue(2)
