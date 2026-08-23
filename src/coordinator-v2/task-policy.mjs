@@ -70,6 +70,9 @@ export function parseTaskDeclaration(body, { issueNumber } = {}) {
   const markers = body.match(/<!--\s*agent-task:v1\s*-->/g) || []
   if (markers.length === 0) return null
   if (markers.length !== 1) throw new Error('Issue must contain exactly one task declaration')
+  if (/<!--\s*agent-work:v[0-9]+\s*-->/.test(body)) {
+    throw new Error('Issue cannot mix legacy and V2 task declarations')
+  }
 
   const match = body.match(/<!--\s*agent-task:v1\s*-->\s*```json\s*([\s\S]*?)\s*```/)
   if (!match) throw new Error('Task declaration must be followed by one JSON code block')
@@ -124,16 +127,25 @@ export function decideTaskEligibility({
   if (activeTaskIds.includes(taskId)) return { status: 'active', reason: 'claimed', taskId, task }
 
   const byNumber = new Map()
+  const conflictingDependencies = new Set()
   for (const dependency of dependencies) {
-    if (!Number.isSafeInteger(dependency?.number) || byNumber.has(dependency.number)) continue
-    byNumber.set(dependency.number, dependency)
+    if (!Number.isSafeInteger(dependency?.number)) continue
+    const normalized = { number: dependency.number, state: dependency.state, type: dependency.type || 'issue' }
+    const previous = byNumber.get(normalized.number)
+    if (!previous) byNumber.set(normalized.number, normalized)
+    else if (previous.state !== normalized.state || previous.type !== normalized.type) {
+      conflictingDependencies.add(normalized.number)
+    }
   }
 
   const waiting = []
   for (const number of task.dependsOn) {
+    if (conflictingDependencies.has(number)) {
+      return { status: 'invalid', reason: 'dependency-conflict', dependency: number, taskId, task }
+    }
     const dependency = byNumber.get(number)
     if (!dependency) return { status: 'invalid', reason: 'dependency-missing', dependency: number, taskId, task }
-    if (dependency.type && dependency.type !== 'issue') {
+    if (dependency.type !== 'issue') {
       return { status: 'invalid', reason: 'dependency-not-issue', dependency: number, taskId, task }
     }
     if (dependency.state === 'open') waiting.push(number)
