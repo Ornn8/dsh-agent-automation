@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       repository:
-        description: Target repository in owner/name form
+        description: Lowercase target repository in owner/name form
         required: true
         type: string
       issue_number:
@@ -58,11 +58,14 @@ jobs:
 
           const repository = process.env.TARGET_REPOSITORY || ''
           const issue = process.env.ISSUE_NUMBER || ''
+          const issueNumber = Number(issue)
           const taskId = process.env.EXPECTED_TASK_ID || ''
           const claimant = process.env.CLAIMANT || ''
           const lease = Number(process.env.CLAIM_LEASE_SECONDS)
-          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)
+          if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository)
+            || repository !== repository.toLowerCase()
             || !/^[1-9][0-9]*$/.test(issue)
+            || !Number.isSafeInteger(issueNumber) || issueNumber < 1
             || !/^task-[0-9a-f]{64}$/.test(taskId)
             || !/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/.test(claimant)
             || !Number.isSafeInteger(lease) || lease < 60 || lease > 21600) {
@@ -80,7 +83,7 @@ jobs:
           }
           const normalizedAllowed = allowed.map(value => value.toLowerCase())
           if (new Set(normalizedAllowed).size !== normalizedAllowed.length
-            || !normalizedAllowed.includes(repository.toLowerCase())) {
+            || !normalizedAllowed.includes(repository)) {
             throw new Error('Target repository is not allowlisted for Coordinator V2 Claim writes')
           }
 
