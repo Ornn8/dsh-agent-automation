@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Validate and split the target
+      - name: Validate and split the allowlisted target
         id: target
         shell: bash
         env:
@@ -51,6 +51,7 @@ jobs:
           EXPECTED_TASK_ID: ${{ inputs.expected_task_id }}
           CLAIMANT: ${{ inputs.claimant }}
           CLAIM_LEASE_SECONDS: ${{ inputs.lease_seconds }}
+          ALLOWED_REPOSITORIES_JSON: ${{ vars.COORDINATOR_V2_CLAIM_ALLOWED_REPOSITORIES_JSON }}
         run: |
           node --input-type=module <<'NODE'
           import { appendFileSync } from 'node:fs'
@@ -67,6 +68,22 @@ jobs:
             || !Number.isSafeInteger(lease) || lease < 60 || lease > 21600) {
             throw new Error('Coordinator V2 Claim dispatch inputs are invalid')
           }
+
+          let allowed
+          try { allowed = JSON.parse(process.env.ALLOWED_REPOSITORIES_JSON || '') } catch {
+            throw new Error('Coordinator V2 Claim target allowlist is not valid JSON')
+          }
+          if (!Array.isArray(allowed) || allowed.length < 1 || allowed.length > 64
+            || allowed.some(value => typeof value !== 'string'
+              || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value))) {
+            throw new Error('Coordinator V2 Claim target allowlist is invalid')
+          }
+          const normalizedAllowed = allowed.map(value => value.toLowerCase())
+          if (new Set(normalizedAllowed).size !== normalizedAllowed.length
+            || !normalizedAllowed.includes(repository.toLowerCase())) {
+            throw new Error('Target repository is not allowlisted for Coordinator V2 Claim writes')
+          }
+
           const [owner, name] = repository.split('/')
           appendFileSync(process.env.GITHUB_OUTPUT, `owner=${owner}\nrepository_name=${name}\n`)
           NODE
