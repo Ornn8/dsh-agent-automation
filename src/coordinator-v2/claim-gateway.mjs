@@ -185,6 +185,9 @@ export async function acquireTaskClaimThroughGateway({ request, config, github }
   if (commentSelection.status === 'invalid') {
     return blocked(commentSelection.reason, commentSelection.detail)
   }
+  if (commentSelection.status === 'none' && snapshot.comments.length >= MAX_RAW_COMMENTS) {
+    return blocked('claim-comment-capacity', 'Claim comment snapshot has no room for a new Claim comment')
+  }
 
   const claimSelection = selectTaskClaim({
     repository: request.repository,
