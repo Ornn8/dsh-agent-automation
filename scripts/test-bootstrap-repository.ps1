@@ -84,7 +84,7 @@ try {
     $expected = $expected.Replace('{{CONTROLLER_REPOSITORY}}', $repository)
     $expected = $expected.Replace('{{CONTROLLER_SHA}}', $sha)
     $expected = $expected.Replace('{{CI_WORKFLOW_NAMES_JSON}}', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress))
-    $expected = $expected.Replace('{{ADVANCEMENT_WORKFLOW_NAMES_JSON}}', (ConvertTo-Json -InputObject @($ciWorkflows + @('Agent PR Review') | Select-Object -Unique) -Compress))
+    $expected = $expected.Replace('{{ADVANCEMENT_WORKFLOW_NAMES_JSON}}', (ConvertTo-Json -InputObject @($ciWorkflows) -Compress))
     $expected = $expected.Replace('{{UPSTREAM_REPOSITORY}}', $upstreamRepository)
     Assert-True ($actual -ceq $expected) "First render of $name did not exactly match its template."
   }
@@ -109,7 +109,7 @@ try {
   foreach ($name in @('agent-pr-ci-repair.yml', 'agent-pr-land.yml')) {
     $workflow = Get-Content -LiteralPath (Join-Path $temp ".github\workflows\$name") -Raw
     $subscribedWorkflows = if ($name -eq 'agent-pr-land.yml') {
-      @($ciWorkflows + @('Agent PR Review') | Select-Object -Unique)
+      @($ciWorkflows)
     } else {
       @($ciWorkflows)
     }
