@@ -61,6 +61,7 @@ const FENCE_HIGH_WATER = 'registry-fence.json'
 const GATE_OWNER_PREFIX = 'registry-owner'
 const RECLAIM_PENDING_PREFIX = 'registry-reclaim'
 const GATE_OWNER_FILE_PATTERN = /^registry-owner\.[A-Za-z0-9._:-]{1,128}\.json$/
+const ATTEMPT_LOCK_QUEUES = new Map()
 
 /** @typedef {{provider?: string|null, model?: string|null, worker?: string|null}} CapacityIdentity */
 /** @typedef {{stateRoot: string, configurationHash: string, credentialGeneration: string, workers?: Record<string, any>, now?: number|(() => number)}} RegistryOptions */
@@ -605,14 +606,32 @@ async function claimAttemptUnlocked(stateRoot, attempt, options = {}) {
 /** @param {string} stateRoot @param {Record<string, any>} attempt @param {{waitMs?: number, leaseMs?: number}} [options] */
 export async function appendCapacityAttempt(stateRoot, attempt, options = {}) {
   const normalized = parseCapacityAttempt(attempt)
-  return withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, normalized, lease), options)
+  return withAttemptProcessLock(stateRoot, () => withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, normalized, lease), options))
 }
 
 /** Atomically claim one durable attempt identity. */
 /** @param {string} stateRoot @param {Record<string, any>} attempt @param {{waitMs?: number, leaseMs?: number}} [options] @returns {Promise<{claimed: boolean, replayed?: boolean, attempt: Record<string, any>}>} */
 export async function claimCapacityAttempt(stateRoot, attempt, options = {}) {
   const normalized = parseCapacityAttempt(attempt)
-  return withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, normalized, lease), options)
+  return withAttemptProcessLock(stateRoot, () => withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, normalized, lease), options))
+}
+
+/** Serialize same-process journal mutations before they contend on the durable lease. */
+/** @param {string} stateRoot @param {() => Promise<any>} operation @returns {Promise<any>} */
+async function withAttemptProcessLock(stateRoot, operation) {
+  const previous = ATTEMPT_LOCK_QUEUES.get(stateRoot) ?? Promise.resolve()
+  /** @type {(value: void | PromiseLike<void>) => void} */
+  let release = () => {}
+  const current = new Promise(resolvePromise => { release = resolvePromise })
+  const queued = previous.then(() => current)
+  ATTEMPT_LOCK_QUEUES.set(stateRoot, queued)
+  await previous
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (ATTEMPT_LOCK_QUEUES.get(stateRoot) === queued) ATTEMPT_LOCK_QUEUES.delete(stateRoot)
+  }
 }
 
 /** @param {unknown} value @returns {{version: 1, ownerToken: string, fence: number, acquiredAt: string, expiresAt: string, pid?: number, processIdentity?: string}} */
@@ -1593,11 +1612,11 @@ export function createCapacityRegistry({ stateRoot, configurationHash, credentia
     },
     /** @param {Record<string, any>} attempt */
     async appendAttempt(attempt) {
-      return withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, attempt, lease), lockOptions)
+      return withAttemptProcessLock(stateRoot, () => withCapacityRegistryLock(stateRoot, (_paths, lease) => appendAttemptUnlocked(stateRoot, attempt, lease), lockOptions))
     },
     /** @param {Record<string, any>} attempt */
     async claimAttempt(attempt) {
-      return withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, attempt, lease), lockOptions)
+      return withAttemptProcessLock(stateRoot, () => withCapacityRegistryLock(stateRoot, (_paths, lease) => claimAttemptUnlocked(stateRoot, attempt, lease), lockOptions))
     },
     async attempts() {
       return readCapacityAttempts(stateRoot)
