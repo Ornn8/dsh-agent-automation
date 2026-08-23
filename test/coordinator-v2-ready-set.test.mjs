@@ -130,6 +130,86 @@ test('a live claim keeps its slot after the Issue becomes invalid, closed, or un
   }
 })
 
+test('ignores unauthenticated repository noise before applying the authenticated bound', () => {
+  const noise = Array.from({ length: 1_025 }, (_, index) => ({
+    authenticated: false,
+    issueNumber: 1,
+    projection: { noise: index },
+  }))
+  const result = select({
+    issues: [issue(1), issue(2), issue(3)],
+    claimObservations: noise,
+    activeLimit: 3,
+    batchLimit: 3,
+  })
+  assert.equal(result.status, 'ok')
+  assert.deepEqual(result.selected.map(task => task.issueNumber), [1, 2, 3])
+
+  const first = issue(1)
+  const claim = createTaskClaim({
+    repository,
+    issueNumber: 1,
+    taskId: taskIdFor(first),
+    claimant: 'change/runtime-01',
+    now,
+    leaseMs: 5 * 60 * 1_000,
+  })
+  const authenticatedOverflow = Array.from({ length: 1_025 }, () => claimObservation(1, claim))
+  const blocked = select({ issues: [first], claimObservations: authenticatedOverflow })
+  assert.equal(blocked.status, 'invalid')
+  assert.equal(blocked.reason, 'invalid-input')
+  assert.equal(blocked.detail, 'Authenticated claim observations are not bounded')
+})
+
+test('live claims retain slots before Issue and pull-request conflict diagnostics', () => {
+  const original = issue(5)
+  const claim = createTaskClaim({
+    repository,
+    issueNumber: 5,
+    taskId: taskIdFor(original),
+    claimant: 'change/runtime-01',
+    now,
+    leaseMs: 5 * 60 * 1_000,
+  })
+  const issueConflict = select({
+    issues: [original, { ...original, body: body([], 'hold') }, issue(6)],
+    claimObservations: [claimObservation(5, claim)],
+    activeLimit: 1,
+    batchLimit: 5,
+  })
+  assert.equal(issueConflict.activeCount, 1)
+  assert.deepEqual(issueConflict.selected, [])
+  assert.deepEqual(
+    issueConflict.diagnostics.find(item => item.issueNumber === 5),
+    { issueNumber: 5, status: 'invalid', reason: 'issue-observation-conflict' },
+  )
+  assert.equal(issueConflict.diagnostics.find(item => item.issueNumber === 6).reason, 'repository-limit')
+
+  const claimedConflict = issue(7)
+  const conflictingClaim = createTaskClaim({
+    repository,
+    issueNumber: 7,
+    taskId: taskIdFor(claimedConflict),
+    claimant: 'change/runtime-02',
+    now,
+    leaseMs: 5 * 60 * 1_000,
+  })
+  const pullRequestConflict = select({
+    issues: [issue(5), claimedConflict, issue(8)],
+    pullRequests: [{ issueNumber: 5, number: 99 }, { issueNumber: 7, number: 99 }],
+    claimObservations: [claimObservation(7, conflictingClaim)],
+    activeLimit: 2,
+    batchLimit: 5,
+  })
+  assert.equal(pullRequestConflict.activeCount, 2)
+  assert.deepEqual(pullRequestConflict.selected, [])
+  assert.deepEqual(
+    pullRequestConflict.diagnostics.find(item => item.issueNumber === 7),
+    { issueNumber: 7, status: 'invalid', reason: 'pull-request-conflict' },
+  )
+  assert.equal(pullRequestConflict.diagnostics.find(item => item.issueNumber === 8).reason, 'repository-limit')
+})
+
 test('expired and older-task claims do not consume slots', () => {
   const first = issue(1)
   const second = issue(2)
