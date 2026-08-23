@@ -92,6 +92,8 @@ pwsh -NoProfile -File "$controller\scripts\doctor.ps1" -Configuration $config -E
 pwsh -NoProfile -File "$controller\scripts\install.ps1" -Configuration $config -DryRun
 ```
 
+`-UpstreamRepository` is optional. Omit it when the target has no real upstream; bootstrap then skips repository supervision on a fresh target. If the managed supervision workflow is already installed, rerun without the upstream and with `-Update` to remove it.
+
 Inspect both dry runs, then repeat without `-DryRun`.
 
 Every dry run also emits one compact, versioned JSON line. Installation and doctor use the `AUTOMATION_INSTALLATION_PLAN_JSON=` prefix; target bootstrap uses `AUTOMATION_BOOTSTRAP_PLAN_JSON=`.
