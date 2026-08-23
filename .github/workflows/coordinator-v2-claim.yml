@@ -1,0 +1,109 @@
+name: Coordinator V2 Claim
+run-name: Claim ${{ inputs.repository }}#${{ inputs.issue_number }} for ${{ inputs.claimant }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Target repository in owner/name form
+        required: true
+        type: string
+      issue_number:
+        description: Current task Issue number
+        required: true
+        type: string
+      expected_task_id:
+        description: Exact current Coordinator V2 task identity
+        required: true
+        type: string
+      claimant:
+        description: Stable case-sensitive Agent runtime identity
+        required: true
+        type: string
+      lease_seconds:
+        description: Claim lease from 60 through 21600 seconds
+        required: true
+        default: 900
+        type: number
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: coordinator-v2-claim:${{ inputs.repository }}:${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    name: coordinator-v2/claim
+    if: github.ref_name == github.event.repository.default_branch
+    environment: coordinator-v2-claim
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate and split the target
+        id: target
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          EXPECTED_TASK_ID: ${{ inputs.expected_task_id }}
+          CLAIMANT: ${{ inputs.claimant }}
+          CLAIM_LEASE_SECONDS: ${{ inputs.lease_seconds }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs'
+
+          const repository = process.env.TARGET_REPOSITORY || ''
+          const issue = process.env.ISSUE_NUMBER || ''
+          const taskId = process.env.EXPECTED_TASK_ID || ''
+          const claimant = process.env.CLAIMANT || ''
+          const lease = Number(process.env.CLAIM_LEASE_SECONDS)
+          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)
+            || !/^[1-9][0-9]*$/.test(issue)
+            || !/^task-[0-9a-f]{64}$/.test(taskId)
+            || !/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/.test(claimant)
+            || !Number.isSafeInteger(lease) || lease < 60 || lease > 21600) {
+            throw new Error('Coordinator V2 Claim dispatch inputs are invalid')
+          }
+          const [owner, name] = repository.split('/')
+          appendFileSync(process.env.GITHUB_OUTPUT, `owner=${owner}\nrepository_name=${name}\n`)
+          NODE
+
+      - name: Create a target-scoped Claim App token
+        id: claim-app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.COORDINATOR_V2_CLAIM_APP_CLIENT_ID }}
+          private-key: ${{ secrets.COORDINATOR_V2_CLAIM_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.repository_name }}
+          permission-issues: write
+          permission-pull-requests: read
+
+      - name: Check out the exact Controller workflow revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Acquire or observe the exact task Claim
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.claim-app.outputs.token }}
+          CONTROLLER_GITHUB_TOKEN: ${{ github.token }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          EXPECTED_TASK_ID: ${{ inputs.expected_task_id }}
+          CLAIMANT: ${{ inputs.claimant }}
+          CLAIM_LEASE_SECONDS: ${{ inputs.lease_seconds }}
+          CLAIM_APP_SLUG: ${{ steps.claim-app.outputs.app-slug }}
+          CLAIM_APP_LOGIN: ${{ format('{0}[bot]', steps.claim-app.outputs.app-slug) }}
+          CONTROLLER_REPOSITORY: ${{ github.repository }}
+          CONTROLLER_WORKFLOW_PATH: .github/workflows/coordinator-v2-claim.yml
+          CONTROLLER_SHA: ${{ github.sha }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: node controller/src/coordinator-v2/claim-workflow.mjs
