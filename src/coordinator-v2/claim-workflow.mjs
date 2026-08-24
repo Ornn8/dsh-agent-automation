@@ -10,6 +10,8 @@ const MAX_CLOSING_PULL_REQUESTS = 1_000
 const MAX_CLOSING_PULL_REQUEST_PAGES = 11
 const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const CANONICAL_REPOSITORY = /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/
+const CANONICAL_POSITIVE_INTEGER = /^[1-9][0-9]*$/
 const TASK_ID = /^task-[0-9a-f]{64}$/
 const CLAIMANT = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/
 const FULL_SHA = /^[0-9a-f]{40}$/
@@ -22,15 +24,37 @@ function requiredEnvironment(env, name) {
   return value.trim()
 }
 
+function exactEnvironment(env, name) {
+  const value = env?.[name]
+  if (typeof value !== 'string' || !value || value !== value.trim()) {
+    throw new Error(`${name} must be a canonical non-empty value`)
+  }
+  return value
+}
+
 function positiveInteger(value, name) {
   const number = typeof value === 'number' ? value : Number(value)
   if (!Number.isSafeInteger(number) || number < 1) throw new Error(`${name} must be a positive safe integer`)
   return number
 }
 
+function canonicalPositiveInteger(value, name) {
+  if (typeof value !== 'string' || !CANONICAL_POSITIVE_INTEGER.test(value)) {
+    throw new Error(`${name} must be a canonical positive integer`)
+  }
+  return positiveInteger(value, name)
+}
+
 function normalizeRepository(value, name = 'Repository') {
   if (typeof value !== 'string' || !REPOSITORY.test(value)) throw new Error(`${name} must use owner/name form`)
   return value.toLowerCase()
+}
+
+function canonicalRepository(value, name = 'Repository') {
+  if (typeof value !== 'string' || !CANONICAL_REPOSITORY.test(value)) {
+    throw new Error(`${name} must use canonical lowercase owner/name form`)
+  }
+  return value
 }
 
 function splitRepository(repository) {
@@ -47,30 +71,36 @@ function normalizeApiUrl(value) {
 }
 
 export function parseClaimWorkflowEnvironment(env = process.env, now = new Date()) {
-  const repository = normalizeRepository(requiredEnvironment(env, 'TARGET_REPOSITORY'), 'Target repository')
-  const issueNumber = positiveInteger(requiredEnvironment(env, 'ISSUE_NUMBER'), 'Issue number')
-  const expectedTaskId = requiredEnvironment(env, 'EXPECTED_TASK_ID')
+  const repository = canonicalRepository(exactEnvironment(env, 'TARGET_REPOSITORY'), 'Target repository')
+  const issueNumber = canonicalPositiveInteger(exactEnvironment(env, 'ISSUE_NUMBER'), 'Issue number')
+  const expectedTaskId = exactEnvironment(env, 'EXPECTED_TASK_ID')
   if (!TASK_ID.test(expectedTaskId)) throw new Error('Expected task id is invalid')
-  const claimant = requiredEnvironment(env, 'CLAIMANT')
+  const claimant = exactEnvironment(env, 'CLAIMANT')
   if (!CLAIMANT.test(claimant)) throw new Error('Claimant identity is invalid')
-  const leaseSeconds = positiveInteger(requiredEnvironment(env, 'CLAIM_LEASE_SECONDS'), 'Claim lease seconds')
+  const leaseSeconds = canonicalPositiveInteger(
+    exactEnvironment(env, 'CLAIM_LEASE_SECONDS'),
+    'Claim lease seconds',
+  )
   if (leaseSeconds < 60 || leaseSeconds > 21_600) throw new Error('Claim lease seconds must be from 60 through 21600')
 
-  const appSlug = requiredEnvironment(env, 'CLAIM_APP_SLUG')
+  const appSlug = exactEnvironment(env, 'CLAIM_APP_SLUG')
   if (!APP_SLUG.test(appSlug) || appSlug === 'github-actions') throw new Error('Dedicated Claim App slug is invalid')
-  const appLogin = requiredEnvironment(env, 'CLAIM_APP_LOGIN')
+  const appLogin = exactEnvironment(env, 'CLAIM_APP_LOGIN')
   if (appLogin !== `${appSlug}[bot]`) throw new Error('Dedicated Claim App login does not match its slug')
 
   const controllerRepository = normalizeRepository(
-    requiredEnvironment(env, 'CONTROLLER_REPOSITORY'),
+    exactEnvironment(env, 'CONTROLLER_REPOSITORY'),
     'Controller repository',
   )
-  const controllerWorkflowPath = requiredEnvironment(env, 'CONTROLLER_WORKFLOW_PATH')
+  const controllerWorkflowPath = exactEnvironment(env, 'CONTROLLER_WORKFLOW_PATH')
   if (!WORKFLOW_PATH.test(controllerWorkflowPath)) throw new Error('Controller workflow path is invalid')
-  const controllerSha = requiredEnvironment(env, 'CONTROLLER_SHA')
+  const controllerSha = exactEnvironment(env, 'CONTROLLER_SHA')
   if (!FULL_SHA.test(controllerSha)) throw new Error('Controller SHA must be a full lowercase revision')
-  const sourceRunId = positiveInteger(requiredEnvironment(env, 'SOURCE_RUN_ID'), 'Source run id')
-  const sourceRunAttempt = positiveInteger(requiredEnvironment(env, 'SOURCE_RUN_ATTEMPT'), 'Source run attempt')
+  const sourceRunId = canonicalPositiveInteger(exactEnvironment(env, 'SOURCE_RUN_ID'), 'Source run id')
+  const sourceRunAttempt = canonicalPositiveInteger(
+    exactEnvironment(env, 'SOURCE_RUN_ATTEMPT'),
+    'Source run attempt',
+  )
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error('Observation time is invalid')
 
   return {
@@ -236,9 +266,11 @@ export function createClaimWorkflowGitHubAdapter({ targetClient, controllerClien
   const normalizedControllerRepository = normalizeRepository(controllerRepository, 'Controller repository')
 
   return {
-    async loadRun(runId) {
+    async loadRun(runId, runAttempt) {
+      const id = positiveInteger(runId, 'Run id')
+      const attempt = positiveInteger(runAttempt, 'Run attempt')
       const run = await controllerClient.request(
-        `/repos/${encodedRepository(normalizedControllerRepository)}/actions/runs/${positiveInteger(runId, 'Run id')}`,
+        `/repos/${encodedRepository(normalizedControllerRepository)}/actions/runs/${id}/attempts/${attempt}`,
       )
       return {
         id: run?.id,
