@@ -161,6 +161,28 @@ test('ignores unauthenticated repository noise before applying the authenticated
   assert.equal(blocked.detail, 'Authenticated claim observations are not bounded')
 })
 
+test('an authenticated function observation invalidates the repository snapshot', () => {
+  const first = issue(1)
+  const claim = createTaskClaim({
+    repository,
+    issueNumber: first.number,
+    taskId: taskIdFor(first),
+    claimant: 'change/runtime-01',
+    now,
+    leaseMs: 5 * 60 * 1_000,
+  })
+  const malformed = function authenticatedClaim() {}
+  malformed.authenticated = true
+  malformed.issueNumber = first.number
+  malformed.projection = claim
+
+  const result = select({ issues: [first], claimObservations: [malformed], activeLimit: 1, batchLimit: 1 })
+  assert.equal(result.status, 'invalid')
+  assert.equal(result.reason, 'invalid-input')
+  assert.equal(result.detail, 'Claim observation must be an object')
+  assert.deepEqual(result.selected, [])
+})
+
 test('live claims retain slots before Issue and pull-request conflict diagnostics', () => {
   const original = issue(5)
   const claim = createTaskClaim({
