@@ -102,6 +102,9 @@ test('fails closed on incomplete, mismatched, unbounded, and malformed snapshots
   const unrelatedNoise = select(Array.from({ length: 5_000 }, (_, id) => run(id + 1, 'noise', 99)))
   assert.equal(unrelatedNoise.status, 'ok')
   assert.equal(unrelatedNoise.ci.status, 'pending')
+  const duplicateNoise = select(Array.from({ length: 5_000 }, () => run(1, 'build', 10)))
+  assert.equal(duplicateNoise.status, 'ok')
+  assert.equal(duplicateNoise.ci.status, 'pending')
 })
 
 test('is deterministic under CheckRun input permutations', () => {
