@@ -32,7 +32,7 @@ coordinator-v2-claim:<target-repository>:<issue-number>
 
 with `cancel-in-progress: false`. GitHub Actions concurrency is repository-scoped, so every path that can use the dedicated App credential must remain in this Controller repository and use the same group. A workflow in another repository or a manual tool holding the same key would be an unsafe bypass.
 
-The workflow requires a lowercase repository input and a canonical positive Issue number before creating the App token. These values form the concurrency key, so alternate casing or leading-zero representations cannot create a second valid mutation lane.
+The workflow requires a lowercase repository input and a canonical positive Issue number before creating the App token. These values form the concurrency key, so alternate casing or leading-zero representations cannot create a second valid mutation lane. The executable environment parser enforces the same canonical forms; the guarantee is not confined to the workflow's inline validation step.
 
 A replaced pending wake is acceptable because later reconciliation can submit the same current task again. The running mutation is never canceled.
 
@@ -60,7 +60,16 @@ The App key must not be copied to a target repository, an Agent runtime, another
 
 ## Source-run meaning
 
-The Claim comment references the central Controller workflow run. The verifier requires the run id, attempt, Controller repository, workflow path, and full head SHA to agree.
+A Claim comment records the Controller repository, workflow path, full head SHA, run id, and run attempt that existed when that comment was written.
+
+Verification separates two questions:
+
+1. **Current authority:** the recorded Controller repository and workflow path must still be the configured Claim-writer authority.
+2. **Historical self-consistency:** the recorded full SHA must match the named workflow run, and the recorded attempt must exist for that run.
+
+The adapter requests the exact recorded workflow attempt. The verifier also tolerates an observation of a later attempt for the same run only when the repository, workflow path, and recorded full SHA remain identical. Advancing Controller `master` or rerunning the named workflow therefore does not invalidate an otherwise authentic existing Claim comment.
+
+The current Controller SHA is used when rendering and preflighting a new or replacement Claim. It is not used to rewrite the historical meaning of an existing comment. A future policy that restricts accepted historical revisions must use an explicit bounded revision policy rather than implicit equality with the current run.
 
 This is provenance consistency, not proof that GitHub attached the run identity to the IssueComment creation event. Application-level authority comes from the dedicated App identity and credential isolation.
 
@@ -72,7 +81,7 @@ The adapter reads:
 - every explicit dependency in the current declaration;
 - same-repository open pull requests that GitHub reports as closing the Issue;
 - the complete Issue comment collection within bounded item and byte limits;
-- the central workflow run through the Controller `GITHUB_TOKEN`.
+- the exact recorded central workflow attempt through the Controller `GITHUB_TOKEN`.
 
 GitHub `body: null` becomes an empty string. Cross-repository and closed pull requests are excluded. Partial comment materialization fails closed.
 
