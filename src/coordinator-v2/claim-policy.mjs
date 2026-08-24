@@ -70,6 +70,19 @@ function objectRecord(value) {
 }
 
 /**
+ * Detect the authentication assertion before validating the ordinary-record shape.
+ * Functions can carry properties in-process, so an authenticated function is malformed
+ * authority rather than unauthenticated noise.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function declaresAuthentication(value) {
+  if ((typeof value !== 'object' || value === null) && typeof value !== 'function') return false
+  return /** @type {{ authenticated?: unknown }} */ (value).authenticated === true
+}
+
+/**
  * @param {unknown} error
  * @returns {string}
  */
@@ -234,7 +247,7 @@ export function selectTaskClaim({ repository, issueNumber, taskId, observations 
   if (!Array.isArray(observations)) {
     return { status: 'invalid', reason: 'invalid-observations' }
   }
-  const authenticatedObservations = observations.filter(observation => objectRecord(observation)?.authenticated === true)
+  const authenticatedObservations = observations.filter(declaresAuthentication)
   if (authenticatedObservations.length > MAX_OBSERVATIONS) {
     return { status: 'invalid', reason: 'invalid-observations' }
   }
@@ -242,7 +255,9 @@ export function selectTaskClaim({ repository, issueNumber, taskId, observations 
   /** @type {Map<string, ClaimProjection>} */
   const current = new Map()
   for (const observation of authenticatedObservations) {
-    const record = /** @type {Record<string, unknown>} */ (observation)
+    const record = objectRecord(observation)
+    if (!record) return { status: 'invalid', reason: 'malformed-authenticated-claim' }
+
     const fields = Object.keys(record).sort()
     if (fields.length !== 2 || fields[0] !== 'authenticated' || fields[1] !== 'projection') {
       return { status: 'invalid', reason: 'malformed-authenticated-claim' }
