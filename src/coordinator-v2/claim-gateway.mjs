@@ -227,7 +227,8 @@ export async function acquireTaskClaimThroughGateway({ request, config, github }
       loadRun: /** @type {SourceRunLoader} */ (githubRecord.loadRun),
     })
     if (sourceCheck.status !== 'authenticated') {
-      throw new Error(sourceCheck.detail || sourceCheck.reason)
+      const detail = 'detail' in sourceCheck ? sourceCheck.detail : undefined
+      throw new Error(detail || sourceCheck.reason)
     }
 
     normalizedRequest = /** @type {ClaimRequest} */ (requestRecord)
