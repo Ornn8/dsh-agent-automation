@@ -1,3 +1,5 @@
+// @ts-check
+
 import { createHash } from 'node:crypto'
 
 const MARKER = 'agent-task:v1'
@@ -6,13 +8,49 @@ const MAX_DEPENDENCIES = 32
 const MAX_ISSUE_NUMBER = 2_147_483_647
 const REQUIRED_SECTIONS = ['Objective', 'Scope', 'Acceptance criteria']
 
+/**
+ * @typedef {{
+ *   version: 1,
+ *   dispatch: 'ready' | 'hold',
+ *   dependsOn: number[],
+ * }} TaskDeclaration
+ */
+
+/**
+ * @typedef {{
+ *   number: number,
+ *   state: unknown,
+ *   type: unknown,
+ * }} NormalizedDependencyObservation
+ */
+
+/**
+ * @typedef {{
+ *   repository?: unknown,
+ *   issue?: unknown,
+ *   trustedAuthor?: boolean,
+ *   dependencies?: unknown[],
+ *   activeTaskIds?: unknown[],
+ *   hasOpenPullRequest?: boolean,
+ * }} TaskEligibilityInput
+ */
+
+/**
+ * @param {unknown} value
+ * @param {string} [name]
+ * @returns {number}
+ */
 function positiveIssueNumber(value, name = 'Issue number') {
-  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_ISSUE_NUMBER) {
+  if (!Number.isSafeInteger(value) || /** @type {number} */ (value) < 1 || /** @type {number} */ (value) > MAX_ISSUE_NUMBER) {
     throw new Error(`${name} must be a positive bounded integer`)
   }
-  return value
+  return /** @type {number} */ (value)
 }
 
+/**
+ * @param {string} body
+ * @returns {void}
+ */
 function requireTaskSections(body) {
   const lines = body.split(/\r?\n/)
   for (const title of REQUIRED_SECTIONS) {
@@ -30,38 +68,50 @@ function requireTaskSections(body) {
   }
 }
 
+/**
+ * @param {unknown} value
+ * @param {unknown} [issueNumber]
+ * @returns {TaskDeclaration}
+ */
 function normalizeTask(value, issueNumber) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Task declaration must be a JSON object')
   }
-  const fields = Object.keys(value).sort()
+  const task = /** @type {Record<string, unknown>} */ (value)
+  const fields = Object.keys(task).sort()
   const expected = ['dependsOn', 'dispatch', 'version']
   if (fields.length !== expected.length || fields.some((field, index) => field !== expected[index])) {
     throw new Error('Task declaration has missing or unknown fields')
   }
-  if (value.version !== 1) throw new Error('Task declaration version must be 1')
-  if (!['ready', 'hold'].includes(value.dispatch)) {
+  if (task.version !== 1) throw new Error('Task declaration version must be 1')
+  if (task.dispatch !== 'ready' && task.dispatch !== 'hold') {
     throw new Error('Task dispatch must be ready or hold')
   }
-  if (!Array.isArray(value.dependsOn) || value.dependsOn.length > MAX_DEPENDENCIES) {
+  if (!Array.isArray(task.dependsOn) || task.dependsOn.length > MAX_DEPENDENCIES) {
     throw new Error('Task dependencies must be a bounded array')
   }
 
-  const dependencies = value.dependsOn.map(number => positiveIssueNumber(number, 'Dependency'))
+  const dependencies = task.dependsOn.map(number => positiveIssueNumber(number, 'Dependency'))
   if (new Set(dependencies).size !== dependencies.length) {
     throw new Error('Task dependencies must be unique')
   }
-  if (issueNumber !== undefined && dependencies.includes(issueNumber)) {
+  const normalizedIssueNumber = issueNumber === undefined ? undefined : positiveIssueNumber(issueNumber)
+  if (normalizedIssueNumber !== undefined && dependencies.includes(normalizedIssueNumber)) {
     throw new Error('Task cannot depend on itself')
   }
 
   return {
     version: 1,
-    dispatch: value.dispatch,
+    dispatch: task.dispatch,
     dependsOn: dependencies.sort((left, right) => left - right),
   }
 }
 
+/**
+ * @param {unknown} body
+ * @param {{ issueNumber?: unknown }} [options]
+ * @returns {TaskDeclaration | null}
+ */
 export function parseTaskDeclaration(body, { issueNumber } = {}) {
   if (typeof body !== 'string') throw new Error('Issue body must be a string')
   if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) throw new Error('Issue body is too large')
@@ -87,21 +137,28 @@ export function parseTaskDeclaration(body, { issueNumber } = {}) {
   return normalizeTask(value, issueNumber)
 }
 
+/**
+ * @param {{ repository?: unknown, issueNumber?: unknown, task?: unknown }} input
+ * @returns {string}
+ */
 export function taskIdentity({ repository, issueNumber, task }) {
   if (typeof repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
     throw new Error('Repository must use owner/name form')
   }
-  positiveIssueNumber(issueNumber)
-  const normalizedTask = normalizeTask(task, issueNumber)
+  const normalizedIssueNumber = positiveIssueNumber(issueNumber)
+  const normalizedTask = normalizeTask(task, normalizedIssueNumber)
   const canonical = JSON.stringify({
     protocol: MARKER,
     repository: repository.toLowerCase(),
-    issueNumber,
+    issueNumber: normalizedIssueNumber,
     task: normalizedTask,
   })
   return `task-${createHash('sha256').update(canonical).digest('hex')}`
 }
 
+/**
+ * @param {TaskEligibilityInput} [input]
+ */
 export function decideTaskEligibility({
   repository,
   issue,
@@ -110,34 +167,48 @@ export function decideTaskEligibility({
   activeTaskIds = [],
   hasOpenPullRequest = false,
 } = {}) {
-  if (!issue || issue.state !== 'open') return { status: 'terminal', reason: 'issue-not-open' }
+  const issueRecord = issue && typeof issue === 'object' && !Array.isArray(issue)
+    ? /** @type {Record<string, unknown>} */ (issue)
+    : null
+  if (!issueRecord || issueRecord.state !== 'open') return { status: 'terminal', reason: 'issue-not-open' }
   if (!trustedAuthor) return { status: 'invalid', reason: 'untrusted-author' }
 
+  /** @type {TaskDeclaration | null} */
   let task
   try {
-    task = parseTaskDeclaration(issue.body, { issueNumber: issue.number })
+    task = parseTaskDeclaration(issueRecord.body, { issueNumber: issueRecord.number })
   } catch (error) {
-    return { status: 'invalid', reason: 'invalid-declaration', detail: error.message }
+    return {
+      status: 'invalid',
+      reason: 'invalid-declaration',
+      detail: error instanceof Error ? error.message : String(error),
+    }
   }
   if (!task) return { status: 'ineligible', reason: 'missing-declaration' }
 
-  const taskId = taskIdentity({ repository, issueNumber: issue.number, task })
+  const taskId = taskIdentity({ repository, issueNumber: issueRecord.number, task })
   if (task.dispatch === 'hold') return { status: 'hold', reason: 'dispatch-hold', taskId, task }
   if (hasOpenPullRequest) return { status: 'active', reason: 'open-pull-request', taskId, task }
   if (activeTaskIds.includes(taskId)) return { status: 'active', reason: 'claimed', taskId, task }
 
+  /** @type {Map<number, NormalizedDependencyObservation>} */
   const byNumber = new Map()
+  /** @type {Set<number>} */
   const conflictingDependencies = new Set()
   for (const dependency of dependencies) {
-    if (!Number.isSafeInteger(dependency?.number)) continue
-    const normalized = { number: dependency.number, state: dependency.state, type: dependency.type }
-    const previous = byNumber.get(normalized.number)
-    if (!previous) byNumber.set(normalized.number, normalized)
+    if (!dependency || typeof dependency !== 'object' || Array.isArray(dependency)) continue
+    const record = /** @type {Record<string, unknown>} */ (dependency)
+    if (!Number.isSafeInteger(record.number)) continue
+    const number = /** @type {number} */ (record.number)
+    const normalized = { number, state: record.state, type: record.type }
+    const previous = byNumber.get(number)
+    if (!previous) byNumber.set(number, normalized)
     else if (previous.state !== normalized.state || previous.type !== normalized.type) {
-      conflictingDependencies.add(normalized.number)
+      conflictingDependencies.add(number)
     }
   }
 
+  /** @type {number[]} */
   const waiting = []
   for (const number of task.dependsOn) {
     if (conflictingDependencies.has(number)) {
