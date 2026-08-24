@@ -102,6 +102,24 @@ test('one exact dedicated-App comment becomes one authenticated claim observatio
   assert.deepEqual(await verifyClaimComment({ comment: comment(11), expected, loadRun }), selected.record)
 })
 
+test('historical Claim provenance survives Controller advancement and a later run attempt', async () => {
+  const calls = []
+  const advancedExpected = {
+    ...expected,
+    controller: { ...controller, sha: 'c'.repeat(40) },
+  }
+  const selected = await selectClaimCommentObservation({
+    comments: [comment(11)],
+    expected: advancedExpected,
+    loadRun: async (runId, runAttempt) => {
+      calls.push([runId, runAttempt])
+      return { ...run, runAttempt: 3 }
+    },
+  })
+  assert.equal(selected.status, 'authenticated')
+  assert.deepEqual(calls, [[record.source.runId, record.source.runAttempt]])
+})
+
 test('the generic GitHub Actions App cannot be configured as claim authority', async () => {
   const genericExpected = { ...expected, author: genericActionsAuthor }
   const genericComment = comment(11, renderClaimComment(record), {
@@ -171,13 +189,33 @@ test('every comment from the dedicated authority is reserved and malformed conte
   }
 })
 
-test('wrong target and central source-run provenance fail closed', async () => {
+test('wrong target, authority, or recorded source-run provenance fails closed', async () => {
   for (const changed of [
     { expected: { ...expected, issueNumber: 8 }, loadRun },
-    { expected: { ...expected, controller: { ...controller, sha: 'c'.repeat(40) } }, loadRun },
-    { expected, loadRun: async () => ({ ...run, runAttempt: 3 }) },
+    {
+      expected: {
+        ...expected,
+        controller: { ...controller, workflowPath: '.github/workflows/other.yml' },
+      },
+      loadRun,
+    },
+    { expected, loadRun: async () => ({ ...run, id: 124 }) },
+    { expected, loadRun: async () => ({ ...run, runAttempt: 1 }) },
     { expected, loadRun: async () => ({ ...run, repository: 'ornn8/other' }) },
-    { expected, loadRun: async () => ({ ...run, controller: { ...run.controller, workflowPath: '.github/workflows/other.yml' } }) },
+    {
+      expected,
+      loadRun: async () => ({
+        ...run,
+        controller: { ...run.controller, workflowPath: '.github/workflows/other.yml' },
+      }),
+    },
+    {
+      expected,
+      loadRun: async () => ({
+        ...run,
+        controller: { ...run.controller, sha: 'c'.repeat(40) },
+      }),
+    },
   ]) {
     const result = await selectClaimCommentObservation({
       comments: [comment(11)],
