@@ -288,9 +288,16 @@ async function loadOpenPullRequests(client, repository, issueNumber) {
     }
     for (const pullRequest of nodes) {
       const record = objectRecord(pullRequest)
-      const pullRequestRepository = objectRecord(record?.repository)
-      if (record?.state !== 'OPEN'
-        || typeof pullRequestRepository?.nameWithOwner !== 'string'
+      if (!record) continue
+      const pullRequestRepository = objectRecord(record.repository)
+      if (typeof record.state !== 'string'
+        || !Number.isSafeInteger(record.number)
+        || /** @type {number} */ (record.number) < 1
+        || !pullRequestRepository
+        || typeof pullRequestRepository.nameWithOwner !== 'string') {
+        throw new Error('GitHub closing pull request response is incomplete')
+      }
+      if (record.state !== 'OPEN'
         || pullRequestRepository.nameWithOwner.toLowerCase() !== repository) continue
       const number = positiveInteger(record.number, 'Pull request number')
       seen.set(number, { repository, issueNumber, number, state: 'open' })
