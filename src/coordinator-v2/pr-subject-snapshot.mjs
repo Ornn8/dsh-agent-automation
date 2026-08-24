@@ -24,12 +24,13 @@ const IDENTITY_FIELDS = [
 ]
 
 /** @typedef {'open' | 'closed'} SubjectState */
+/** @typedef {'pull-request-not-open' | 'draft' | 'wrong-target-branch' | 'fork-head' | 'missing-linked-issue' | 'linked-issue-outside-repository' | 'linked-subject-not-issue' | 'linked-issue-not-open'} IneligibleReason */
 /** @typedef {{ repository: string, defaultBranch: string }} RepositoryObservation */
 /** @typedef {{ repository: string, number: number, state: SubjectState, draft: boolean, baseBranch: string, baseSha: string, headRepository: string, headSha: string, mergeable: boolean | null }} PullRequestObservation */
 /** @typedef {{ repository: string, number: number, state: SubjectState, type: 'issue' | 'pull-request' }} LinkedIssueObservation */
 /** @typedef {{ active: boolean, attempts: number, limit: number }} RepairObservation */
 /** @typedef {{ repository: string, pullRequestNumber: number, defaultBranch: string, pullRequest: PullRequestObservation, ci: import('./pr-ci-snapshot.mjs').CiObservation, repair: RepairObservation, linkedIssue: LinkedIssueObservation }} PullRequestSubjectSnapshot */
-/** @typedef {{ status: 'ok', snapshot: PullRequestSubjectSnapshot } | { status: 'ineligible', reason: 'pull-request-not-open' | 'draft' | 'wrong-target-branch' | 'fork-head' | 'missing-linked-issue' | 'linked-issue-outside-repository' | 'linked-subject-not-issue' | 'linked-issue-not-open', repository: string, pullRequestNumber: number } | { status: 'drifted', reason: 'pull-request-changed', changedFields: string[] } | { status: 'invalid', reason: 'invalid-input', detail: string }} PullRequestSubjectResult */
+/** @typedef {{ status: 'ok', snapshot: PullRequestSubjectSnapshot } | { status: 'ineligible', reason: IneligibleReason, repository: string, pullRequestNumber: number } | { status: 'drifted', reason: 'pull-request-changed', changedFields: string[] } | { status: 'invalid', reason: 'invalid-input', detail: string }} PullRequestSubjectResult */
 
 /** @param {unknown} value @returns {Record<string, unknown> | null} */
 function objectRecord(value) {
@@ -140,13 +141,16 @@ function normalizeLinkedIssues(value) {
   const byNumber = new Map()
   for (const candidate of snapshot.issues) {
     const record = exactObject(candidate, LINKED_ISSUE_FIELDS, 'Linked-Issue observation')
+    const type = record.type
+    if (type !== 'issue' && type !== 'pull-request') {
+      throw new Error('Linked-Issue type must be issue or pull-request')
+    }
+    /** @type {LinkedIssueObservation} */
     const normalized = {
       repository: repositoryName(record.repository, 'Linked-Issue repository'),
       number: positiveInteger(record.number, 'Linked-Issue number'),
       state: subjectState(record.state, 'Linked-Issue state'),
-      type: record.type === 'issue' || record.type === 'pull-request'
-        ? record.type
-        : (() => { throw new Error('Linked-Issue type must be issue or pull-request') })(),
+      type,
     }
     const previous = byNumber.get(normalized.number)
     if (previous && JSON.stringify(previous) !== JSON.stringify(normalized)) {
@@ -174,6 +178,11 @@ function normalizeRepair(value) {
 function changedIdentityFields(before, after) {
   return IDENTITY_FIELDS.filter(field => before[/** @type {keyof PullRequestObservation} */ (field)]
     !== after[/** @type {keyof PullRequestObservation} */ (field)])
+}
+
+/** @param {IneligibleReason} reason @param {string} repository @param {number} pullRequestNumber @returns {PullRequestSubjectResult} */
+function ineligible(reason, repository, pullRequestNumber) {
+  return { status: 'ineligible', reason, repository, pullRequestNumber }
 }
 
 /**
@@ -205,30 +214,18 @@ export function normalizePullRequestSubjectSnapshot(input) {
 
     const linkedIssues = normalizeLinkedIssues(root.linkedIssueSnapshot)
     const repair = normalizeRepair(root.repairSnapshot)
-    const ineligible = (/** @type {PullRequestSubjectResult & {status:'ineligible'}} */ result) => result
 
-    if (after.state !== 'open') return ineligible({ status: 'ineligible', reason: 'pull-request-not-open', repository, pullRequestNumber })
-    if (after.draft) return ineligible({ status: 'ineligible', reason: 'draft', repository, pullRequestNumber })
-    if (after.baseBranch !== repositorySnapshot.defaultBranch) {
-      return ineligible({ status: 'ineligible', reason: 'wrong-target-branch', repository, pullRequestNumber })
-    }
-    if (after.headRepository !== repository) {
-      return ineligible({ status: 'ineligible', reason: 'fork-head', repository, pullRequestNumber })
-    }
-    if (linkedIssues.length === 0) {
-      return ineligible({ status: 'ineligible', reason: 'missing-linked-issue', repository, pullRequestNumber })
-    }
+    if (after.state !== 'open') return ineligible('pull-request-not-open', repository, pullRequestNumber)
+    if (after.draft) return ineligible('draft', repository, pullRequestNumber)
+    if (after.baseBranch !== repositorySnapshot.defaultBranch) return ineligible('wrong-target-branch', repository, pullRequestNumber)
+    if (after.headRepository !== repository) return ineligible('fork-head', repository, pullRequestNumber)
+    if (linkedIssues.length === 0) return ineligible('missing-linked-issue', repository, pullRequestNumber)
     if (linkedIssues.length !== 1) throw new Error('Pull request must link exactly one task Issue')
     const linkedIssue = linkedIssues[0]
-    if (linkedIssue.repository !== repository) {
-      return ineligible({ status: 'ineligible', reason: 'linked-issue-outside-repository', repository, pullRequestNumber })
-    }
-    if (linkedIssue.type !== 'issue') {
-      return ineligible({ status: 'ineligible', reason: 'linked-subject-not-issue', repository, pullRequestNumber })
-    }
-    if (linkedIssue.state !== 'open') {
-      return ineligible({ status: 'ineligible', reason: 'linked-issue-not-open', repository, pullRequestNumber })
-    }
+    if (!linkedIssue) throw new Error('Pull request task Issue is missing')
+    if (linkedIssue.repository !== repository) return ineligible('linked-issue-outside-repository', repository, pullRequestNumber)
+    if (linkedIssue.type !== 'issue') return ineligible('linked-subject-not-issue', repository, pullRequestNumber)
+    if (linkedIssue.state !== 'open') return ineligible('linked-issue-not-open', repository, pullRequestNumber)
 
     return {
       status: 'ok',
