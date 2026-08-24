@@ -92,6 +92,7 @@ test('fails closed on incomplete, mismatched, unbounded, and malformed snapshots
     { headSha, requiredChecks, checkSnapshot: { complete: true, headSha, checkRuns: [run(1, 'build', 10, { status: 'completed', conclusion: null })] } },
     { headSha, requiredChecks, checkSnapshot: { complete: true, headSha, checkRuns: [run(1, 'build', 10, { status: 'in_progress', conclusion: 'success' })] } },
     { headSha, requiredChecks, checkSnapshot: { complete: true, headSha, checkRuns: [{ headSha, name: 'build', appId: 10 }] } },
+    { headSha, requiredChecks, checkSnapshot: { complete: true, headSha, checkRuns: [run(1, 'build', 10, { headSha: 5 })] } },
     { headSha, requiredChecks, checkSnapshot: { complete: true, headSha, checkRuns: Array.from({ length: 2_049 }, (_, id) => run(id + 1, 'build', 10)) } },
   ]
   for (const input of cases) {
