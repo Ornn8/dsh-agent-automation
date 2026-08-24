@@ -6,6 +6,7 @@ const repository = 'ornn8/example'
 const pullRequestNumber = 7
 const baseSha = '1'.repeat(40)
 const headSha = '2'.repeat(40)
+const updatedAt = '2026-08-24T12:00:00.000Z'
 
 const pullRequest = overrides => ({
   repository,
@@ -17,6 +18,7 @@ const pullRequest = overrides => ({
   headRepository: repository,
   headSha,
   mergeable: true,
+  updatedAt,
   ...overrides,
 })
 
@@ -46,6 +48,26 @@ const linkedIssue = overrides => ({
   ...overrides,
 })
 
+const linkedSnapshot = (issues = [linkedIssue()], overrides = {}) => ({
+  complete: true,
+  repository,
+  pullRequestNumber,
+  headSha,
+  issues,
+  ...overrides,
+})
+
+const repairSnapshot = (overrides = {}) => ({
+  complete: true,
+  repository,
+  pullRequestNumber,
+  headSha,
+  active: false,
+  attempts: 1,
+  limit: 3,
+  ...overrides,
+})
+
 const input = overrides => ({
   repository,
   pullRequestNumber,
@@ -53,7 +75,7 @@ const input = overrides => ({
   pullRequestBefore: pullRequest(),
   pullRequestAfter: pullRequest(),
   ciInput: ciInput(),
-  linkedIssueSnapshot: { complete: true, issues: [linkedIssue()] },
+  linkedIssueSnapshot: linkedSnapshot(),
   repairSnapshot: null,
   ...overrides,
 })
@@ -61,7 +83,7 @@ const input = overrides => ({
 test('normalizes one coherent current task pull request snapshot', () => {
   const result = normalizePullRequestSubjectSnapshot(input({
     pullRequestBefore: pullRequest({ mergeable: null }),
-    repairSnapshot: { complete: true, active: false, attempts: 1, limit: 3 },
+    repairSnapshot: repairSnapshot(),
   }))
   assert.equal(result.status, 'ok')
   assert.deepEqual(result.snapshot, {
@@ -79,7 +101,7 @@ test('normalizes one coherent current task pull request snapshot', () => {
   })
 })
 
-test('detects lifecycle and exact-pair drift while allowing mergeability convergence', () => {
+test('detects lifecycle, metadata, and exact-pair drift while allowing mergeability convergence', () => {
   const drifts = [
     ['state', 'closed'],
     ['draft', true],
@@ -87,11 +109,10 @@ test('detects lifecycle and exact-pair drift while allowing mergeability converg
     ['baseSha', '3'.repeat(40)],
     ['headRepository', 'ornn8/other'],
     ['headSha', '4'.repeat(40)],
+    ['updatedAt', '2026-08-24T12:01:00.000Z'],
   ]
   for (const [field, value] of drifts) {
-    const result = normalizePullRequestSubjectSnapshot(input({
-      pullRequestAfter: pullRequest({ [field]: value }),
-    }))
+    const result = normalizePullRequestSubjectSnapshot(input({ pullRequestAfter: pullRequest({ [field]: value }) }))
     assert.equal(result.status, 'drifted', field)
     assert.deepEqual(result.changedFields, [field], field)
   }
@@ -110,10 +131,10 @@ test('classifies ordinary non-automated pull request subjects as ineligible', ()
     [input({ pullRequestBefore: pullRequest({ draft: true }), pullRequestAfter: pullRequest({ draft: true }) }), 'draft'],
     [input({ repositorySnapshot: { repository, defaultBranch: 'main' } }), 'wrong-target-branch'],
     [input({ pullRequestBefore: pullRequest({ headRepository: 'ornn8/fork' }), pullRequestAfter: pullRequest({ headRepository: 'ornn8/fork' }) }), 'fork-head'],
-    [input({ linkedIssueSnapshot: { complete: true, issues: [] } }), 'missing-linked-issue'],
-    [input({ linkedIssueSnapshot: { complete: true, issues: [linkedIssue({ repository: 'ornn8/other' })] } }), 'linked-issue-outside-repository'],
-    [input({ linkedIssueSnapshot: { complete: true, issues: [linkedIssue({ type: 'pull-request' })] } }), 'linked-subject-not-issue'],
-    [input({ linkedIssueSnapshot: { complete: true, issues: [linkedIssue({ state: 'closed' })] } }), 'linked-issue-not-open'],
+    [input({ linkedIssueSnapshot: linkedSnapshot([]) }), 'missing-linked-issue'],
+    [input({ linkedIssueSnapshot: linkedSnapshot([linkedIssue({ repository: 'ornn8/other' })]) }), 'linked-issue-outside-repository'],
+    [input({ linkedIssueSnapshot: linkedSnapshot([linkedIssue({ type: 'pull-request' })]) }), 'linked-subject-not-issue'],
+    [input({ linkedIssueSnapshot: linkedSnapshot([linkedIssue({ state: 'closed' })]) }), 'linked-issue-not-open'],
   ]
   for (const [candidate, reason] of cases) {
     const result = normalizePullRequestSubjectSnapshot(candidate)
@@ -140,38 +161,39 @@ test('fails closed on stale or malformed exact-head CI evidence', () => {
   assert.match(invalid.detail, /CI evidence is invalid/i)
 })
 
-test('requires one complete internally consistent linked task Issue snapshot', () => {
+test('requires one complete subject-bound linked task Issue snapshot', () => {
   const duplicate = linkedIssue()
-  const idempotent = normalizePullRequestSubjectSnapshot(input({
-    linkedIssueSnapshot: { complete: true, issues: [duplicate, { ...duplicate }] },
-  }))
-  assert.equal(idempotent.status, 'ok')
+  assert.equal(normalizePullRequestSubjectSnapshot(input({
+    linkedIssueSnapshot: linkedSnapshot([duplicate, { ...duplicate }]),
+  })).status, 'ok')
 
   const cases = [
-    { complete: false, issues: [linkedIssue()] },
-    { complete: true, issues: [linkedIssue(), linkedIssue({ number: 6 })] },
-    { complete: true, issues: [linkedIssue(), linkedIssue({ state: 'closed' })] },
-    { complete: true, issues: [{ ...linkedIssue(), extra: true }] },
+    linkedSnapshot(undefined, { complete: false }),
+    linkedSnapshot([linkedIssue(), linkedIssue({ number: 6 })]),
+    linkedSnapshot([linkedIssue(), linkedIssue({ state: 'closed' })]),
+    linkedSnapshot([{ ...linkedIssue(), extra: true }]),
+    linkedSnapshot(undefined, { pullRequestNumber: 8 }),
+    linkedSnapshot(undefined, { headSha: '8'.repeat(40) }),
   ]
   for (const linkedIssueSnapshot of cases) {
-    const result = normalizePullRequestSubjectSnapshot(input({ linkedIssueSnapshot }))
-    assert.equal(result.status, 'invalid')
+    assert.equal(normalizePullRequestSubjectSnapshot(input({ linkedIssueSnapshot })).status, 'invalid')
   }
 })
 
-test('distinguishes disabled repair from malformed or incomplete repair evidence', () => {
+test('distinguishes disabled repair from malformed, incomplete, or stale repair evidence', () => {
   const disabled = normalizePullRequestSubjectSnapshot(input())
   assert.equal(disabled.status, 'ok')
   assert.deepEqual(disabled.snapshot.repair, { active: false, attempts: 0, limit: 0 })
 
-  for (const repairSnapshot of [
-    { complete: false, active: false, attempts: 0, limit: 3 },
-    { complete: true, active: 'false', attempts: 0, limit: 3 },
-    { complete: true, active: false, attempts: -1, limit: 3 },
-    { complete: true, active: false, attempts: 0, limit: 3, extra: true },
+  for (const candidate of [
+    repairSnapshot({ complete: false }),
+    repairSnapshot({ active: 'false' }),
+    repairSnapshot({ attempts: -1 }),
+    { ...repairSnapshot(), extra: true },
+    repairSnapshot({ pullRequestNumber: 8 }),
+    repairSnapshot({ headSha: '8'.repeat(40) }),
   ]) {
-    const result = normalizePullRequestSubjectSnapshot(input({ repairSnapshot }))
-    assert.equal(result.status, 'invalid')
+    assert.equal(normalizePullRequestSubjectSnapshot(input({ repairSnapshot: candidate })).status, 'invalid')
   }
 })
 
@@ -186,9 +208,7 @@ test('rejects wrong subjects, unknown fields, and non-object inputs', () => {
     input({ repository: 'Ornn8/example' }),
     input({ pullRequestBefore: pullRequest({ number: 8 }), pullRequestAfter: pullRequest({ number: 8 }) }),
     input({ pullRequestBefore: pullRequest({ baseSha: headSha }), pullRequestAfter: pullRequest({ baseSha: headSha }) }),
+    input({ pullRequestBefore: pullRequest({ updatedAt: 'not-a-time' }), pullRequestAfter: pullRequest({ updatedAt: 'not-a-time' }) }),
   ]
-  for (const candidate of cases) {
-    const result = normalizePullRequestSubjectSnapshot(candidate)
-    assert.equal(result.status, 'invalid')
-  }
+  for (const candidate of cases) assert.equal(normalizePullRequestSubjectSnapshot(candidate).status, 'invalid')
 })
