@@ -128,6 +128,7 @@ export function parseTaskDeclaration(body, { issueNumber } = {}) {
   if (!match) throw new Error('Task declaration must be followed by one JSON code block')
   requireTaskSections(body)
 
+  /** @type {unknown} */
   let value
   try {
     value = JSON.parse(match[1])
