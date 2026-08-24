@@ -66,6 +66,19 @@ function objectRecord(value) {
 }
 
 /**
+ * Detect the authentication assertion before validating the ordinary-record shape.
+ * Functions can carry properties in-process, so an authenticated function is malformed
+ * authority rather than unauthenticated noise.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function declaresAuthentication(value) {
+  if ((typeof value !== 'object' || value === null) && typeof value !== 'function') return false
+  return /** @type {{ authenticated?: unknown }} */ (value).authenticated === true
+}
+
+/**
  * @param {unknown} error
  * @returns {string}
  */
@@ -216,7 +229,7 @@ function diagnostic(issueNumber, status, reason) {
  * @returns {import('./claim-policy.mjs').TaskClaimSelection}
  */
 function selectAnyCurrentIssueClaim({ repository, issueNumber, observations, now }) {
-  const authenticated = observations.filter(observation => objectRecord(observation)?.authenticated === true)
+  const authenticated = observations.filter(declaresAuthentication)
   if (authenticated.length > MAX_CURRENT_CLAIMS_PER_ISSUE) {
     return { status: 'invalid', reason: 'invalid-observations' }
   }
@@ -225,7 +238,9 @@ function selectAnyCurrentIssueClaim({ repository, issueNumber, observations, now
   const current = new Map()
   const observedAt = Date.parse(now)
   for (const observation of authenticated) {
-    const record = /** @type {Record<string, unknown>} */ (observation)
+    const record = objectRecord(observation)
+    if (!record) return { status: 'invalid', reason: 'malformed-authenticated-claim' }
+
     /** @type {import('./claim-policy.mjs').ClaimProjection} */
     let claim
     try {
@@ -296,7 +311,7 @@ export function selectReadyTaskBatch({
       throw new Error('Pull request observations are not bounded')
     }
     if (!Array.isArray(claimObservations)) throw new Error('Claim observations must be an array')
-    const authenticatedClaimObservations = claimObservations.filter(observation => objectRecord(observation)?.authenticated === true)
+    const authenticatedClaimObservations = claimObservations.filter(declaresAuthentication)
     if (authenticatedClaimObservations.length > MAX_CLAIM_OBSERVATIONS) {
       throw new Error('Authenticated claim observations are not bounded')
     }
