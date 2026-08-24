@@ -58,6 +58,29 @@ test('unauthenticated noise does not consume the authenticated observation bound
   )
 })
 
+test('an authenticated function observation fails closed instead of becoming noise', () => {
+  const claim = createTaskClaim({ repository, issueNumber, taskId, claimant: 'change/runtime-01', now, leaseMs })
+  const malformed = function authenticatedClaim() {}
+  malformed.authenticated = true
+  malformed.projection = claim
+
+  const selection = selectTaskClaim({ repository, issueNumber, taskId, now, observations: [malformed] })
+  assert.deepEqual(selection, { status: 'invalid', reason: 'malformed-authenticated-claim' })
+
+  const decision = decideClaimAcquisition({
+    eligibility: { status: 'ready', taskId },
+    selection,
+    repository,
+    issueNumber,
+    taskId,
+    claimant: 'change/runtime-02',
+    now,
+    leaseMs,
+  })
+  assert.equal(decision.action, 'blocked')
+  assert.equal(decision.reason, 'malformed-authenticated-claim')
+})
+
 test('different current claims fail closed independent of input order', () => {
   const first = createTaskClaim({ repository, issueNumber, taskId, claimant: 'change/runtime-01', now, leaseMs })
   const second = createTaskClaim({ repository, issueNumber, taskId, claimant: 'change/runtime-02', now, leaseMs })
