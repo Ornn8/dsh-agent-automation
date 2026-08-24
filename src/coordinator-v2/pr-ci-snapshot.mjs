@@ -79,7 +79,7 @@ function normalizeRequiredChecks(value) {
     identities.add(identity)
     return { name, appId }
   })
-  return normalized.sort((left, right) => left.name.localeCompare(right.name) || left.appId - right.appId)
+  return normalized.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : left.appId - right.appId)
 }
 
 /** @param {unknown} value @returns {NormalizedCheckRun} */
@@ -133,14 +133,16 @@ function normalizeSnapshot(value, headSha, required) {
       throw new Error('Potential required CheckRun app id is invalid')
     }
     if (!requiredApps.has(/** @type {number} */ (raw.appId))) continue
-    relevantCount += 1
-    if (relevantCount > MAX_RELEVANT_CHECK_RUNS) throw new Error('Relevant CheckRun snapshot is not bounded')
     const check = normalizeCheckRun(candidate)
     const previous = byId.get(check.id)
     if (previous && JSON.stringify(previous) !== JSON.stringify(check)) {
       throw new Error(`CheckRun id ${check.id} has conflicting observations`)
     }
-    byId.set(check.id, check)
+    if (!previous) {
+      relevantCount += 1
+      if (relevantCount > MAX_RELEVANT_CHECK_RUNS) throw new Error('Relevant CheckRun snapshot is not bounded')
+      byId.set(check.id, check)
+    }
   }
   return [...byId.values()]
 }
