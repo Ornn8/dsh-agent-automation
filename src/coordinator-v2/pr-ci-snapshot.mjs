@@ -126,9 +126,11 @@ function normalizeSnapshot(value, headSha, required) {
   let relevantCount = 0
   for (const candidate of record.checkRuns) {
     const raw = objectRecord(candidate)
-    if (!raw || raw.headSha !== headSha || typeof raw.name !== 'string') continue
+    if (!raw || typeof raw.name !== 'string') continue
     const requiredApps = requiredByName.get(raw.name)
     if (!requiredApps) continue
+    const candidateHead = fullSha(raw.headSha, 'Potential required CheckRun head SHA')
+    if (candidateHead !== headSha) continue
     if (!Number.isSafeInteger(raw.appId) || /** @type {number} */ (raw.appId) < 1) {
       throw new Error('Potential required CheckRun app id is invalid')
     }
