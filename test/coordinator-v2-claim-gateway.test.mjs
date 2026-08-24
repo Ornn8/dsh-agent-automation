@@ -73,10 +73,10 @@ function harness(overrides = {}) {
   const calls = { snapshot: 0, create: 0, update: 0, loadRun: 0 }
   let nextId = Math.max(10, ...state.comments.map(comment => Number.isSafeInteger(comment?.id) ? comment.id : 0)) + 1
   const github = {
-    loadRun: async id => {
+    loadRun: async (id, attempt) => {
       calls.loadRun += 1
       if (overrides.loadRunError) throw new Error('run unavailable')
-      return typeof overrides.run === 'function' ? overrides.run(id) : (overrides.run || run)
+      return typeof overrides.run === 'function' ? overrides.run(id, attempt) : (overrides.run || run)
     },
     readTaskSnapshot: async () => {
       calls.snapshot += 1
@@ -162,6 +162,71 @@ test('a current other claimant is busy while expired or stale claims are replace
   assert.equal((await acquire(replaceStale)).reason, 'claim-replaced')
 })
 
+test('historical Claims remain observable and replaceable after Controller advancement and rerun', async () => {
+  const historicalController = { ...controller, sha: '9'.repeat(40) }
+  const historicalSource = { runId: 111, runAttempt: 1 }
+  const advancedController = { ...controller, sha: 'b'.repeat(40) }
+  const advancedSource = { runId: 222, runAttempt: 1 }
+  const loadHistoricalOrCurrentRun = id => {
+    if (id === historicalSource.runId) {
+      return {
+        id,
+        runAttempt: 2,
+        repository: historicalController.repository,
+        controller: historicalController,
+      }
+    }
+    if (id === advancedSource.runId) {
+      return {
+        id,
+        runAttempt: advancedSource.runAttempt,
+        repository: advancedController.repository,
+        controller: advancedController,
+      }
+    }
+    throw new Error(`unexpected run ${id}`)
+  }
+  const renderHistorical = claim => rawComment(11, renderClaimComment({
+    version: 1,
+    claim,
+    controller: historicalController,
+    source: historicalSource,
+  }))
+  const advancedConfig = { controller: advancedController, source: advancedSource }
+
+  const current = createTaskClaim({
+    repository,
+    issueNumber,
+    taskId: taskId(),
+    claimant: 'change/runtime-01',
+    now: '2026-08-23T12:00:00.000Z',
+    leaseMs: 300_000,
+  })
+  const observeCurrent = harness({
+    comments: [renderHistorical(current)],
+    run: loadHistoricalOrCurrentRun,
+  })
+  assert.equal((await acquire(observeCurrent, {}, advancedConfig)).status, 'existing')
+  assert.equal(observeCurrent.calls.update, 0)
+
+  const expired = createTaskClaim({
+    repository,
+    issueNumber,
+    taskId: taskId(),
+    claimant: 'change/runtime-01',
+    now: '2026-08-23T12:00:00.000Z',
+    leaseMs: 60_000,
+  })
+  const replaceExpired = harness({
+    comments: [renderHistorical(expired)],
+    run: loadHistoricalOrCurrentRun,
+  })
+  const replaced = await acquire(replaceExpired, {}, advancedConfig)
+  assert.equal(replaced.status, 'acquired')
+  assert.equal(replaced.reason, 'claim-replaced')
+  assert.equal(replaceExpired.calls.update, 1)
+})
+
 test('dependencies, open pull requests, closed Issues, and task drift are ineligible', async () => {
   const dependencyBody = taskBody([4])
   const waiting = harness({
@@ -186,7 +251,7 @@ test('invalid authority and incomplete snapshots fail before any write', async (
   assert.equal(genericResult.reason, 'invalid-gateway-input')
   assert.equal(generic.calls.snapshot, 0)
 
-  const badRun = harness({ run: { ...run, runAttempt: 3 } })
+  const badRun = harness({ run: { ...run, runAttempt: 1 } })
   assert.equal((await acquire(badRun)).reason, 'invalid-gateway-input')
   assert.equal(badRun.calls.snapshot, 0)
 
