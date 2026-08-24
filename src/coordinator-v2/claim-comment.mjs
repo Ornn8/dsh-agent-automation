@@ -137,10 +137,13 @@ function normalizeComment(value) {
   }
 }
 
-function sameController(left, right) {
+function sameControllerAuthority(left, right) {
   return left.repository === right.repository
     && left.workflowPath === right.workflowPath
-    && left.sha === right.sha
+}
+
+function sameControllerRevision(left, right) {
+  return sameControllerAuthority(left, right) && left.sha === right.sha
 }
 
 function expectedAuthor(raw, expected) {
@@ -265,16 +268,16 @@ export async function verifyClaimComment({ comment, expected, loadRun }) {
     || record.claim.issueNumber !== normalizedExpected.issueNumber) {
     throw new Error('Claim comment does not identify the expected Issue')
   }
-  if (!sameController(record.controller, normalizedExpected.controller)) {
-    throw new Error('Claim comment controller provenance is not trusted')
+  if (!sameControllerAuthority(record.controller, normalizedExpected.controller)) {
+    throw new Error('Claim comment controller authority is not trusted')
   }
 
-  const observedRun = normalizeRun(await loadRun(record.source.runId))
+  const observedRun = normalizeRun(await loadRun(record.source.runId, record.source.runAttempt))
   if (observedRun.id !== record.source.runId
-    || observedRun.runAttempt !== record.source.runAttempt
-    || observedRun.repository !== normalizedExpected.controller.repository
-    || !sameController(observedRun.controller, normalizedExpected.controller)) {
-    throw new Error('Claim comment does not match its named Controller run provenance')
+    || observedRun.runAttempt < record.source.runAttempt
+    || observedRun.repository !== record.controller.repository
+    || !sameControllerRevision(observedRun.controller, record.controller)) {
+    throw new Error('Claim comment does not match its recorded Controller run provenance')
   }
   return record
 }
