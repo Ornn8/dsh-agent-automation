@@ -1,3 +1,5 @@
+// @ts-check
+
 import { decideTaskEligibility } from './task-policy.mjs'
 import { parseTaskClaimProjection, selectTaskClaim } from './claim-policy.mjs'
 
@@ -13,30 +15,108 @@ const ISSUE_FIELDS = ['body', 'number', 'state', 'trustedAuthor', 'type']
 const PULL_REQUEST_FIELDS = ['issueNumber', 'number']
 const CLAIM_FIELDS = ['authenticated', 'issueNumber', 'projection']
 
+/**
+ * @typedef {{
+ *   body: string,
+ *   number: number,
+ *   state: 'open' | 'closed',
+ *   trustedAuthor: boolean,
+ *   type: 'issue' | 'pull-request',
+ * }} NormalizedIssueObservation
+ */
+
+/** @typedef {{ issueNumber: number, number: number }} NormalizedPullRequestObservation */
+/** @typedef {{ authenticated: true, issueNumber: number, projection: unknown }} NormalizedClaimObservation */
+/** @typedef {{ authenticated: true, projection: unknown }} ClaimInput */
+/** @typedef {{ issueNumber: number, taskId: string }} ReadyTask */
+/** @typedef {{ issueNumber: number, status: string, reason: string }} ReadySetDiagnostic */
+
+/**
+ * @typedef {{
+ *   status: 'invalid',
+ *   reason: string,
+ *   detail?: string,
+ *   selected: ReadyTask[],
+ *   activeCount: 0,
+ *   remainingSlots: 0,
+ *   diagnostics: ReadySetDiagnostic[],
+ * }} InvalidReadySetResult
+ */
+
+/**
+ * @typedef {{
+ *   status: 'ok',
+ *   selected: ReadyTask[],
+ *   activeCount: number,
+ *   remainingSlots: number,
+ *   diagnostics: ReadySetDiagnostic[],
+ * }} ReadySetResult
+ */
+
+/** @typedef {InvalidReadySetResult | ReadySetResult} ReadySetDecision */
+
+/**
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | null}
+ */
+function objectRecord(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? /** @type {Record<string, unknown>} */ (value)
+    : null
+}
+
+/**
+ * @param {unknown} error
+ * @returns {string}
+ */
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * @param {unknown} value
+ * @param {string[]} expected
+ * @param {string} name
+ * @returns {Record<string, unknown>}
+ */
 function exactObject(value, expected, name) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${name} must be an object`)
-  }
-  const fields = Object.keys(value).sort()
+  const record = objectRecord(value)
+  if (!record) throw new Error(`${name} must be an object`)
+  const fields = Object.keys(record).sort()
   if (fields.length !== expected.length || fields.some((field, index) => field !== expected[index])) {
     throw new Error(`${name} has missing or unknown fields`)
   }
+  return record
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} [name]
+ * @returns {number}
+ */
 function positiveIssueNumber(value, name = 'Issue number') {
-  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_ISSUE_NUMBER) {
+  if (!Number.isSafeInteger(value) || /** @type {number} */ (value) < 1 || /** @type {number} */ (value) > MAX_ISSUE_NUMBER) {
     throw new Error(`${name} must be a positive bounded integer`)
   }
-  return value
+  return /** @type {number} */ (value)
 }
 
+/**
+ * @param {unknown} value
+ * @param {string} name
+ * @returns {number}
+ */
 function boundedLimit(value, name) {
-  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_LIMIT) {
+  if (!Number.isSafeInteger(value) || /** @type {number} */ (value) < 0 || /** @type {number} */ (value) > MAX_LIMIT) {
     throw new Error(`${name} must be an integer from 0 through ${MAX_LIMIT}`)
   }
-  return value
+  return /** @type {number} */ (value)
 }
 
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
 function canonicalRepository(value) {
   if (typeof value !== 'string' || !REPOSITORY_PATTERN.test(value)) {
     throw new Error('Repository must use owner/name form')
@@ -44,6 +124,10 @@ function canonicalRepository(value) {
   return value.toLowerCase()
 }
 
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
 function canonicalTime(value) {
   if (typeof value !== 'string') throw new Error('Observation time must be a canonical UTC timestamp')
   const milliseconds = Date.parse(value)
@@ -53,41 +137,58 @@ function canonicalTime(value) {
   return value
 }
 
+/**
+ * @param {unknown} value
+ * @returns {NormalizedIssueObservation}
+ */
 function normalizeIssue(value) {
-  exactObject(value, ISSUE_FIELDS, 'Issue observation')
-  if (!['open', 'closed'].includes(value.state)) throw new Error('Issue state must be open or closed')
-  if (!['issue', 'pull-request'].includes(value.type)) throw new Error('Issue type must be issue or pull-request')
-  if (typeof value.body !== 'string' || Buffer.byteLength(value.body, 'utf8') > MAX_BODY_BYTES) {
+  const record = exactObject(value, ISSUE_FIELDS, 'Issue observation')
+  if (record.state !== 'open' && record.state !== 'closed') throw new Error('Issue state must be open or closed')
+  if (record.type !== 'issue' && record.type !== 'pull-request') throw new Error('Issue type must be issue or pull-request')
+  if (typeof record.body !== 'string' || Buffer.byteLength(record.body, 'utf8') > MAX_BODY_BYTES) {
     throw new Error('Issue body must be a bounded string')
   }
-  if (typeof value.trustedAuthor !== 'boolean') throw new Error('Issue trustedAuthor must be boolean')
+  if (typeof record.trustedAuthor !== 'boolean') throw new Error('Issue trustedAuthor must be boolean')
   return {
-    body: value.body,
-    number: positiveIssueNumber(value.number),
-    state: value.state,
-    trustedAuthor: value.trustedAuthor,
-    type: value.type,
+    body: record.body,
+    number: positiveIssueNumber(record.number),
+    state: record.state,
+    trustedAuthor: record.trustedAuthor,
+    type: record.type,
   }
 }
 
+/**
+ * @param {unknown} value
+ * @returns {NormalizedPullRequestObservation}
+ */
 function normalizePullRequest(value) {
-  exactObject(value, PULL_REQUEST_FIELDS, 'Pull request observation')
+  const record = exactObject(value, PULL_REQUEST_FIELDS, 'Pull request observation')
   return {
-    issueNumber: positiveIssueNumber(value.issueNumber, 'Pull request Issue number'),
-    number: positiveIssueNumber(value.number, 'Pull request number'),
+    issueNumber: positiveIssueNumber(record.issueNumber, 'Pull request Issue number'),
+    number: positiveIssueNumber(record.number, 'Pull request number'),
   }
 }
 
+/**
+ * @param {unknown} value
+ * @returns {NormalizedClaimObservation}
+ */
 function normalizeClaimObservation(value) {
-  exactObject(value, CLAIM_FIELDS, 'Claim observation')
-  if (value.authenticated !== true) throw new Error('Claim observation must be authenticated')
+  const record = exactObject(value, CLAIM_FIELDS, 'Claim observation')
+  if (record.authenticated !== true) throw new Error('Claim observation must be authenticated')
   return {
     authenticated: true,
-    issueNumber: positiveIssueNumber(value.issueNumber, 'Claim Issue number'),
-    projection: value.projection,
+    issueNumber: positiveIssueNumber(record.issueNumber, 'Claim Issue number'),
+    projection: record.projection,
   }
 }
 
+/**
+ * @param {string} reason
+ * @param {string} [detail]
+ * @returns {InvalidReadySetResult}
+ */
 function invalidResult(reason, detail) {
   return {
     status: 'invalid',
@@ -100,24 +201,37 @@ function invalidResult(reason, detail) {
   }
 }
 
+/**
+ * @param {number} issueNumber
+ * @param {string} status
+ * @param {string} reason
+ * @returns {ReadySetDiagnostic}
+ */
 function diagnostic(issueNumber, status, reason) {
   return { issueNumber, status, reason }
 }
 
+/**
+ * @param {{ repository: string, issueNumber: number, observations: unknown[], now: string }} input
+ * @returns {import('./claim-policy.mjs').TaskClaimSelection}
+ */
 function selectAnyCurrentIssueClaim({ repository, issueNumber, observations, now }) {
-  const authenticated = observations.filter(observation => observation?.authenticated === true)
+  const authenticated = observations.filter(observation => objectRecord(observation)?.authenticated === true)
   if (authenticated.length > MAX_CURRENT_CLAIMS_PER_ISSUE) {
     return { status: 'invalid', reason: 'invalid-observations' }
   }
 
+  /** @type {Map<string, import('./claim-policy.mjs').ClaimProjection>} */
   const current = new Map()
   const observedAt = Date.parse(now)
   for (const observation of authenticated) {
+    const record = /** @type {Record<string, unknown>} */ (observation)
+    /** @type {import('./claim-policy.mjs').ClaimProjection} */
     let claim
     try {
-      claim = parseTaskClaimProjection(observation.projection)
+      claim = parseTaskClaimProjection(record.projection)
     } catch (error) {
-      return { status: 'invalid', reason: 'malformed-authenticated-claim', detail: error.message }
+      return { status: 'invalid', reason: 'malformed-authenticated-claim', detail: errorMessage(error) }
     }
     if (claim.repository !== repository || claim.issueNumber !== issueNumber) {
       return { status: 'invalid', reason: 'claim-subject-mismatch', claimId: claim.claimId }
@@ -135,11 +249,20 @@ function selectAnyCurrentIssueClaim({ repository, issueNumber, observations, now
   return { status: 'conflict', reason: 'multiple-current-claims' }
 }
 
+/**
+ * @param {import('./claim-policy.mjs').TaskClaimSelection} selection
+ * @param {unknown[]} observations
+ * @returns {boolean}
+ */
 function claimConsumesSlot(selection, observations) {
   if (selection.status === 'claimed') return true
   return selection.status !== 'claimable' && observations.length > 0
 }
 
+/**
+ * @param {{ repository?: unknown, issues?: unknown, pullRequests?: unknown, claimObservations?: unknown, requestedIssueNumber?: unknown, activeLimit?: unknown, batchLimit?: unknown, now?: unknown }} [input]
+ * @returns {ReadySetDecision}
+ */
 export function selectReadyTaskBatch({
   repository,
   issues = [],
@@ -150,13 +273,21 @@ export function selectReadyTaskBatch({
   batchLimit,
   now,
 } = {}) {
+  /** @type {string} */
   let normalizedRepository
+  /** @type {NormalizedIssueObservation[]} */
   let normalizedIssues
+  /** @type {NormalizedPullRequestObservation[]} */
   let normalizedPullRequests
+  /** @type {NormalizedClaimObservation[]} */
   let normalizedClaims
+  /** @type {number | null} */
   let normalizedRequested
+  /** @type {number} */
   let normalizedActiveLimit
+  /** @type {number} */
   let normalizedBatchLimit
+  /** @type {string} */
   let normalizedNow
   try {
     normalizedRepository = canonicalRepository(repository)
@@ -165,7 +296,7 @@ export function selectReadyTaskBatch({
       throw new Error('Pull request observations are not bounded')
     }
     if (!Array.isArray(claimObservations)) throw new Error('Claim observations must be an array')
-    const authenticatedClaimObservations = claimObservations.filter(observation => observation?.authenticated === true)
+    const authenticatedClaimObservations = claimObservations.filter(observation => objectRecord(observation)?.authenticated === true)
     if (authenticatedClaimObservations.length > MAX_CLAIM_OBSERVATIONS) {
       throw new Error('Authenticated claim observations are not bounded')
     }
@@ -179,9 +310,10 @@ export function selectReadyTaskBatch({
     normalizedBatchLimit = boundedLimit(batchLimit, 'Batch limit')
     normalizedNow = canonicalTime(now)
   } catch (error) {
-    return invalidResult('invalid-input', error.message)
+    return invalidResult('invalid-input', errorMessage(error))
   }
 
+  /** @type {Map<number, Map<string, NormalizedIssueObservation>>} */
   const issueGroups = new Map()
   for (const issue of normalizedIssues) {
     const group = issueGroups.get(issue.number) || new Map()
@@ -205,7 +337,9 @@ export function selectReadyTaskBatch({
     type: issue.type,
   }))
 
+  /** @type {Map<number, number>} */
   const pullRequestByNumber = new Map()
+  /** @type {Set<number>} */
   const pullRequestConflictIssues = new Set()
   for (const pullRequest of normalizedPullRequests) {
     const previousIssue = pullRequestByNumber.get(pullRequest.number)
@@ -215,6 +349,7 @@ export function selectReadyTaskBatch({
       pullRequestConflictIssues.add(pullRequest.issueNumber)
     }
   }
+  /** @type {Map<number, Set<number>>} */
   const pullRequestsByIssue = new Map()
   for (const [number, issueNumber] of pullRequestByNumber) {
     const set = pullRequestsByIssue.get(issueNumber) || new Set()
@@ -222,6 +357,7 @@ export function selectReadyTaskBatch({
     pullRequestsByIssue.set(issueNumber, set)
   }
 
+  /** @type {Map<number, ClaimInput[]>} */
   const claimsByIssue = new Map()
   for (const claim of normalizedClaims) {
     const observations = claimsByIssue.get(claim.issueNumber) || []
@@ -230,12 +366,16 @@ export function selectReadyTaskBatch({
   }
 
   let activeCount = 0
+  /** @type {ReadyTask[]} */
   const ready = []
+  /** @type {Map<number, ReadySetDiagnostic>} */
   const diagnostics = new Map()
   const issueNumbers = [...issueGroups.keys()].sort((left, right) => left - right)
 
   for (const issueNumber of issueNumbers) {
-    const variants = [...issueGroups.get(issueNumber).values()]
+    const group = issueGroups.get(issueNumber)
+    if (!group) continue
+    const variants = [...group.values()]
     const openPullRequests = pullRequestsByIssue.get(issueNumber) || new Set()
     const claimInputs = claimsByIssue.get(issueNumber) || []
     const issue = variants.length === 1 ? variants[0] : null
@@ -248,11 +388,14 @@ export function selectReadyTaskBatch({
         hasOpenPullRequest: false,
       })
       : { status: 'ineligible', reason: issue ? 'not-issue' : 'issue-observation-conflict' }
-    const claimSelection = eligibility.taskId
+    const eligibilityTaskId = 'taskId' in eligibility && typeof eligibility.taskId === 'string'
+      ? eligibility.taskId
+      : null
+    const claimSelection = eligibilityTaskId
       ? selectTaskClaim({
         repository: normalizedRepository,
         issueNumber,
-        taskId: eligibility.taskId,
+        taskId: eligibilityTaskId,
         observations: claimInputs,
         now: normalizedNow,
       })
@@ -289,12 +432,12 @@ export function selectReadyTaskBatch({
       diagnostics.set(issueNumber, diagnostic(issueNumber, 'invalid', claimSelection.reason))
       continue
     }
-    if (eligibility.status !== 'ready') {
+    if (eligibility.status !== 'ready' || !eligibilityTaskId) {
       diagnostics.set(issueNumber, diagnostic(issueNumber, eligibility.status, eligibility.reason))
       continue
     }
 
-    ready.push({ issueNumber, taskId: eligibility.taskId })
+    ready.push({ issueNumber, taskId: eligibilityTaskId })
     diagnostics.set(issueNumber, diagnostic(issueNumber, 'ready', 'eligible'))
   }
 
