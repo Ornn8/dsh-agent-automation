@@ -30,6 +30,7 @@
     "src/coordinator-v2/task-policy.mjs",
     "src/coordinator-v2/pr-policy.mjs",
     "src/coordinator-v2/claim-policy.mjs",
-    "src/coordinator-v2/ready-set-policy.mjs"
+    "src/coordinator-v2/ready-set-policy.mjs",
+    "src/coordinator-v2/claim-comment.mjs"
   ]
 }
