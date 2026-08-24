@@ -4,7 +4,7 @@ import test from 'node:test'
 
 const sourceDirectory = new URL('../src/', import.meta.url)
 const configUrl = new URL('../jsconfig.json', import.meta.url)
-const baselineCount = 24
+const baselineCount = 25
 
 async function sourceFiles(directory, prefix = 'src') {
   const entries = await readdir(directory, { withFileTypes: true })
