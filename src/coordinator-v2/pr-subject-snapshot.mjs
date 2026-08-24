@@ -13,20 +13,22 @@ const INPUT_FIELDS = [
 const REPOSITORY_FIELDS = ['defaultBranch', 'repository']
 const PULL_REQUEST_FIELDS = [
   'baseBranch', 'baseSha', 'draft', 'headRepository', 'headSha',
-  'mergeable', 'number', 'repository', 'state',
+  'mergeable', 'number', 'repository', 'state', 'updatedAt',
 ]
-const LINKED_SNAPSHOT_FIELDS = ['complete', 'issues']
+const LINKED_SNAPSHOT_FIELDS = ['complete', 'headSha', 'issues', 'pullRequestNumber', 'repository']
 const LINKED_ISSUE_FIELDS = ['number', 'repository', 'state', 'type']
-const REPAIR_FIELDS = ['active', 'attempts', 'complete', 'limit']
+const REPAIR_FIELDS = [
+  'active', 'attempts', 'complete', 'headSha', 'limit', 'pullRequestNumber', 'repository',
+]
 const IDENTITY_FIELDS = [
   'repository', 'number', 'state', 'draft', 'baseBranch', 'baseSha',
-  'headRepository', 'headSha',
+  'headRepository', 'headSha', 'updatedAt',
 ]
 
 /** @typedef {'open' | 'closed'} SubjectState */
 /** @typedef {'pull-request-not-open' | 'draft' | 'wrong-target-branch' | 'fork-head' | 'missing-linked-issue' | 'linked-issue-outside-repository' | 'linked-subject-not-issue' | 'linked-issue-not-open'} IneligibleReason */
 /** @typedef {{ repository: string, defaultBranch: string }} RepositoryObservation */
-/** @typedef {{ repository: string, number: number, state: SubjectState, draft: boolean, baseBranch: string, baseSha: string, headRepository: string, headSha: string, mergeable: boolean | null }} PullRequestObservation */
+/** @typedef {{ repository: string, number: number, state: SubjectState, draft: boolean, baseBranch: string, baseSha: string, headRepository: string, headSha: string, mergeable: boolean | null, updatedAt: string }} PullRequestObservation */
 /** @typedef {{ repository: string, number: number, state: SubjectState, type: 'issue' | 'pull-request' }} LinkedIssueObservation */
 /** @typedef {{ active: boolean, attempts: number, limit: number }} RepairObservation */
 /** @typedef {{ repository: string, pullRequestNumber: number, defaultBranch: string, pullRequest: PullRequestObservation, ci: import('./pr-ci-snapshot.mjs').CiObservation, repair: RepairObservation, linkedIssue: LinkedIssueObservation }} PullRequestSubjectSnapshot */
@@ -82,6 +84,14 @@ function fullSha(value, name) {
 }
 
 /** @param {unknown} value @param {string} name @returns {string} */
+function timestamp(value, name) {
+  if (typeof value !== 'string') throw new Error(`${name} must be a timestamp`)
+  const milliseconds = Date.parse(value)
+  if (!Number.isFinite(milliseconds)) throw new Error(`${name} must be a timestamp`)
+  return new Date(milliseconds).toISOString()
+}
+
+/** @param {unknown} value @param {string} name @returns {string} */
 function branchName(value, name) {
   if (typeof value !== 'string' || !value || value !== value.trim()
     || Buffer.byteLength(value, 'utf8') > MAX_REF_BYTES
@@ -125,15 +135,21 @@ function normalizePullRequest(value, name) {
     headRepository: repositoryName(record.headRepository, `${name} head repository`),
     headSha: fullSha(record.headSha, `${name} head SHA`),
     mergeable: record.mergeable,
+    updatedAt: timestamp(record.updatedAt, `${name} updatedAt`),
   }
   if (normalized.baseSha === normalized.headSha) throw new Error(`${name} base and head SHAs must differ`)
   return normalized
 }
 
-/** @param {unknown} value @returns {LinkedIssueObservation[]} */
-function normalizeLinkedIssues(value) {
+/** @param {unknown} value @param {string} repository @param {number} pullRequestNumber @param {string} headSha @returns {LinkedIssueObservation[]} */
+function normalizeLinkedIssues(value, repository, pullRequestNumber, headSha) {
   const snapshot = exactObject(value, LINKED_SNAPSHOT_FIELDS, 'Linked-Issue snapshot')
   if (snapshot.complete !== true) throw new Error('Linked-Issue snapshot is incomplete')
+  if (repositoryName(snapshot.repository, 'Linked-Issue snapshot repository') !== repository
+    || positiveInteger(snapshot.pullRequestNumber, 'Linked-Issue snapshot pull-request number') !== pullRequestNumber
+    || fullSha(snapshot.headSha, 'Linked-Issue snapshot head SHA') !== headSha) {
+    throw new Error('Linked-Issue snapshot does not match the pull-request subject')
+  }
   if (!Array.isArray(snapshot.issues) || snapshot.issues.length > MAX_LINKED_ISSUES) {
     throw new Error('Linked-Issue snapshot must contain a bounded array')
   }
@@ -142,9 +158,7 @@ function normalizeLinkedIssues(value) {
   for (const candidate of snapshot.issues) {
     const record = exactObject(candidate, LINKED_ISSUE_FIELDS, 'Linked-Issue observation')
     const type = record.type
-    if (type !== 'issue' && type !== 'pull-request') {
-      throw new Error('Linked-Issue type must be issue or pull-request')
-    }
+    if (type !== 'issue' && type !== 'pull-request') throw new Error('Linked-Issue type must be issue or pull-request')
     /** @type {LinkedIssueObservation} */
     const normalized = {
       repository: repositoryName(record.repository, 'Linked-Issue repository'),
@@ -161,11 +175,16 @@ function normalizeLinkedIssues(value) {
   return [...byNumber.values()].sort((left, right) => left.number - right.number)
 }
 
-/** @param {unknown} value @returns {RepairObservation} */
-function normalizeRepair(value) {
+/** @param {unknown} value @param {string} repository @param {number} pullRequestNumber @param {string} headSha @returns {RepairObservation} */
+function normalizeRepair(value, repository, pullRequestNumber, headSha) {
   if (value === null) return { active: false, attempts: 0, limit: 0 }
   const record = exactObject(value, REPAIR_FIELDS, 'Repair snapshot')
   if (record.complete !== true) throw new Error('Repair snapshot is incomplete')
+  if (repositoryName(record.repository, 'Repair snapshot repository') !== repository
+    || positiveInteger(record.pullRequestNumber, 'Repair snapshot pull-request number') !== pullRequestNumber
+    || fullSha(record.headSha, 'Repair snapshot head SHA') !== headSha) {
+    throw new Error('Repair snapshot does not match the pull-request subject')
+  }
   if (typeof record.active !== 'boolean') throw new Error('Repair active must be boolean')
   return {
     active: record.active,
@@ -212,8 +231,8 @@ export function normalizePullRequestSubjectSnapshot(input) {
     if (ciResult.status !== 'ok') throw new Error(`Exact-head CI evidence is invalid: ${ciResult.detail}`)
     if (ciResult.ci.headSha !== after.headSha) throw new Error('Exact-head CI evidence does not match the pull-request head')
 
-    const linkedIssues = normalizeLinkedIssues(root.linkedIssueSnapshot)
-    const repair = normalizeRepair(root.repairSnapshot)
+    const linkedIssues = normalizeLinkedIssues(root.linkedIssueSnapshot, repository, pullRequestNumber, after.headSha)
+    const repair = normalizeRepair(root.repairSnapshot, repository, pullRequestNumber, after.headSha)
 
     if (after.state !== 'open') return ineligible('pull-request-not-open', repository, pullRequestNumber)
     if (after.draft) return ineligible('draft', repository, pullRequestNumber)
