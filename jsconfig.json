@@ -34,6 +34,7 @@
     "src/coordinator-v2/claim-comment.mjs",
     "src/coordinator-v2/claim-gateway.mjs",
     "src/coordinator-v2/claim-workflow.mjs",
-    "src/coordinator-v2/pr-ci-snapshot.mjs"
+    "src/coordinator-v2/pr-ci-snapshot.mjs",
+    "src/coordinator-v2/pr-subject-snapshot.mjs"
   ]
 }
