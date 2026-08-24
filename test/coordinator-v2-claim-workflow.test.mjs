@@ -9,7 +9,7 @@ import {
 } from '../src/coordinator-v2/claim-workflow.mjs'
 
 const baseEnv = {
-  TARGET_REPOSITORY: 'Ornn8/example',
+  TARGET_REPOSITORY: 'ornn8/example',
   ISSUE_NUMBER: '7',
   EXPECTED_TASK_ID: `task-${'a'.repeat(64)}`,
   CLAIMANT: 'change/runtime-01',
@@ -46,6 +46,19 @@ test('central workflow environment is strict and derives one fresh Claim configu
   }), /Dedicated Claim App/)
   assert.throws(() => parseClaimWorkflowEnvironment({ ...baseEnv, CLAIM_APP_LOGIN: 'other[bot]' }), /does not match/)
   assert.throws(() => parseClaimWorkflowEnvironment({ ...baseEnv, CLAIM_LEASE_SECONDS: '59' }), /60 through 21600/)
+
+  for (const changed of [
+    { TARGET_REPOSITORY: 'Ornn8/example' },
+    { TARGET_REPOSITORY: 'ornn8/example ' },
+    { ISSUE_NUMBER: '007' },
+    { ISSUE_NUMBER: '1e3' },
+    { ISSUE_NUMBER: ' 7 ' },
+    { CLAIM_LEASE_SECONDS: '3e2' },
+    { SOURCE_RUN_ID: '0123' },
+    { SOURCE_RUN_ATTEMPT: ' 2 ' },
+  ]) {
+    assert.throws(() => parseClaimWorkflowEnvironment({ ...baseEnv, ...changed }), /canonical/)
+  }
 })
 
 test('GitHub API client sends one masked Bearer request and rejects unsafe responses', async () => {
@@ -69,7 +82,7 @@ test('GitHub API client sends one masked Bearer request and rejects unsafe respo
   await assert.rejects(failing.request('/repos/o/r'), /403.*denied/)
 })
 
-test('adapter reads dependencies, same-repository closing PRs, comments, and the central source run', async () => {
+test('adapter reads dependencies, same-repository closing PRs, comments, and the exact central source run attempt', async () => {
   const target = {
     request: async (path, options = {}) => {
       if (path === '/repos/ornn8/example/issues/7') {
@@ -101,7 +114,7 @@ test('adapter reads dependencies, same-repository closing PRs, comments, and the
   }
   const controller = {
     request: async path => {
-      assert.equal(path, '/repos/ornn8/dsh-agent-automation/actions/runs/123')
+      assert.equal(path, '/repos/ornn8/dsh-agent-automation/actions/runs/123/attempts/2')
       return {
         id: 123,
         run_attempt: 2,
@@ -125,7 +138,7 @@ test('adapter reads dependencies, same-repository closing PRs, comments, and the
     id: 11, authorLogin: 'person', authorType: 'User', appSlug: '', body: 'hello',
   }])
   assert.equal(snapshot.commentsComplete, true)
-  assert.deepEqual(await adapter.loadRun(123), {
+  assert.deepEqual(await adapter.loadRun(123, 2), {
     id: 123,
     runAttempt: 2,
     repository: 'Ornn8/dsh-agent-automation',
